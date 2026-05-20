@@ -1,0 +1,27 @@
+[project]
+name = "vbrecomp"
+version = "0.1.0"
+description = "Static recompiler for the NEC V810 / Nintendo Virtual Boy"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+authors = [{ name = "Matthew Stanley" }]
+
+# Python 3.11+ ships tomllib in stdlib. For 3.10 we pull in `tomli`
+# (the exact backport tomllib is based on). Everything else is stdlib.
+dependencies = [
+    "tomli>=2.0 ; python_version < '3.11'",
+]
+
+[project.scripts]
+vbrecomp           = "recompiler.cli.vbrecomp_main:main"
+vbrecomp-inspect   = "recompiler.cli.vbrecomp_inspect:main"
+vbrecomp-coverage  = "recompiler.cli.vbrecomp_coverage:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["recompiler*"]

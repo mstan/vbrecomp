@@ -1,0 +1,125 @@
+# runtime.cmake — vb_add_runtime_target()
+#
+# Aggregates the runtime sources and emits one executable. Modelled on
+# psxrecomp/psxrecomp/runtime/runtime.cmake.
+#
+# Usage:
+#   vb_add_runtime_target(target_name
+#       DEBUG_PORT <int>
+#       WINDOW_TITLE <string>
+#       [NO_GAME_LINKED]        # link the no_game_linked.c placeholder
+#       [GENERATED_SOURCES ...] # full / dispatch C from the recompiler
+#   )
+
+set(VB_RUNTIME_DIR "${CMAKE_CURRENT_LIST_DIR}")
+
+function(vb_add_runtime_target TARGET)
+    set(options NO_GAME_LINKED)
+    set(oneValue DEBUG_PORT WINDOW_TITLE GENERATED_DIR GENERATED_MODULE)
+    set(multiValue GENERATED_SOURCES)
+    cmake_parse_arguments(VB "${options}" "${oneValue}" "${multiValue}" ${ARGN})
+
+    if(NOT VB_DEBUG_PORT)
+        set(VB_DEBUG_PORT 4390)
+    endif()
+    if(NOT VB_WINDOW_TITLE)
+        set(VB_WINDOW_TITLE "vbrecomp")
+    endif()
+
+    set(_runtime_sources
+        ${VB_RUNTIME_DIR}/src/main.cpp
+        ${VB_RUNTIME_DIR}/src/memory.c
+        ${VB_RUNTIME_DIR}/src/vip.c
+        ${VB_RUNTIME_DIR}/src/vsu.c
+        ${VB_RUNTIME_DIR}/src/input.c
+        ${VB_RUNTIME_DIR}/src/interrupts.c
+        ${VB_RUNTIME_DIR}/src/timer.c
+        ${VB_RUNTIME_DIR}/src/debug_server.c
+        ${VB_RUNTIME_DIR}/src/ring_frame.c
+        ${VB_RUNTIME_DIR}/src/stub_abort.c
+        ${VB_RUNTIME_DIR}/src/wtrace.c
+        ${VB_RUNTIME_DIR}/src/fntrace.c
+    )
+
+    # Pick exactly one source of dispatch — never both. The build
+    # fails loudly if a caller asks for both NO_GAME_LINKED and a
+    # generated module so the choice is explicit at site rather than
+    # masked by include order.
+    set(_dispatch_count 0)
+    if(VB_NO_GAME_LINKED)
+        math(EXPR _dispatch_count "${_dispatch_count} + 1")
+    endif()
+    if(VB_GENERATED_DIR AND VB_GENERATED_MODULE)
+        math(EXPR _dispatch_count "${_dispatch_count} + 1")
+    endif()
+    if(VB_GENERATED_SOURCES)
+        math(EXPR _dispatch_count "${_dispatch_count} + 1")
+    endif()
+    if(_dispatch_count GREATER 1)
+        message(FATAL_ERROR
+            "vb_add_runtime_target(${TARGET}): more than one dispatch "
+            "source given (NO_GAME_LINKED / GENERATED_DIR+MODULE / "
+            "GENERATED_SOURCES are mutually exclusive)")
+    endif()
+
+    if(VB_NO_GAME_LINKED)
+        list(APPEND _runtime_sources ${VB_RUNTIME_DIR}/src/no_game_linked.c)
+    endif()
+
+    set(_generated_include "")
+    if(VB_GENERATED_DIR AND VB_GENERATED_MODULE)
+        set(_full     "${VB_GENERATED_DIR}/${VB_GENERATED_MODULE}_full.c")
+        set(_dispatch "${VB_GENERATED_DIR}/${VB_GENERATED_MODULE}_dispatch.c")
+        set(_header   "${VB_GENERATED_DIR}/${VB_GENERATED_MODULE}.h")
+        foreach(_f IN ITEMS "${_full}" "${_dispatch}" "${_header}")
+            if(NOT EXISTS "${_f}")
+                message(FATAL_ERROR
+                    "vb_add_runtime_target(${TARGET}): generated file "
+                    "missing: ${_f}. Run "
+                    "`python -m recompiler.cli.vbrecomp_codegen "
+                    "--rom <rom> --module ${VB_GENERATED_MODULE} "
+                    "--out ${VB_GENERATED_DIR}` first.")
+            endif()
+        endforeach()
+        list(APPEND _runtime_sources "${_full}" "${_dispatch}")
+        set(_generated_include "${VB_GENERATED_DIR}")
+    endif()
+
+    if(VB_GENERATED_SOURCES)
+        list(APPEND _runtime_sources ${VB_GENERATED_SOURCES})
+    endif()
+
+    add_executable(${TARGET} ${_runtime_sources})
+
+    target_include_directories(${TARGET} PRIVATE
+        ${VB_RUNTIME_DIR}/include
+    )
+    if(_generated_include)
+        target_include_directories(${TARGET} PRIVATE ${_generated_include})
+    endif()
+
+    target_compile_definitions(${TARGET} PRIVATE
+        VB_DEFAULT_DEBUG_PORT=${VB_DEBUG_PORT}
+        VB_DEFAULT_WINDOW_TITLE="${VB_WINDOW_TITLE}"
+    )
+
+    if(VBRECOMP_DEBUG_TOOLS)
+        target_compile_definitions(${TARGET} PRIVATE VBRECOMP_DEBUG_TOOLS=1)
+    endif()
+
+    # Warnings — match psxrecomp's discipline.
+    if(MSVC)
+        target_compile_options(${TARGET} PRIVATE /W4 /permissive- /utf-8)
+    else()
+        target_compile_options(${TARGET} PRIVATE -Wall -Wextra -Wno-unused-parameter)
+    endif()
+
+    # Sockets.
+    if(WIN32)
+        target_link_libraries(${TARGET} PRIVATE ws2_32)
+    endif()
+    if(UNIX)
+        find_package(Threads REQUIRED)
+        target_link_libraries(${TARGET} PRIVATE Threads::Threads)
+    endif()
+endfunction()

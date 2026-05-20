@@ -1,0 +1,30 @@
+# homebrew_test.toml.example
+#
+# Skeleton per-game config for a Virtual Boy homebrew test ROM.
+# Copy to homebrew_test.toml (gitignored) and fill in rom + sha.
+
+[program]
+name        = "homebrew_test"
+rom         = "roms/homebrew_test.vb"
+rom_sha256  = ""                       # fill once the ROM is in place
+load_base   = "0x07000000"             # cart ROM physical base
+entry_pc    = "0xFFFFFFF0"             # reset vector (folds to 0x07FFFFF0)
+
+[runtime]
+window_title = "vbrecomp - homebrew test"
+debug_port   = 4390
+oracle_port  = 4391
+frame_hz     = 50.27
+
+[functions]
+# Hand-seeded entry points discovered via Ghidra. Phase 2+ populates
+# this from the recompiler's automatic discovery pass.
+# 0xFFFFFFF0 = "reset_entry"
+
+[mmio]
+# Address-range overrides only when a game touches non-standard MMIO.
+# Most ROMs leave this empty.
+
+[breakpoints]
+# Block-PC breakpoints active by default in the debug build.
+# Useful while developing the runtime — leave empty in committed configs.

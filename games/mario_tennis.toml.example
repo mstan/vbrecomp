@@ -1,0 +1,27 @@
+# mario_tennis.toml.example
+#
+# Skeleton per-game config for Mario's Tennis (the pack-in title).
+# The REAL build wiring lives in the per-game consumer repo at
+# https://github.com/mstan/MarioTennisVirtualBoyRecomp — that's where
+# the ROM, generated/, and top-level CMake live. This file is for
+# framework-side experimentation only.
+
+[program]
+name        = "MariosTennis"
+rom         = "roms/MariosTennis.vb"
+rom_sha256  = ""                       # fill once the ROM is in place
+load_base   = "0x07000000"
+entry_pc    = "0xFFFFFFF0"
+
+[runtime]
+window_title = "vbrecomp - Mario's Tennis"
+debug_port   = 4390
+oracle_port  = 4391
+frame_hz     = 50.27
+
+[functions]
+# Populated from Ghidra seed export + recompiler discovery, Phase 5.
+
+[mmio]
+
+[breakpoints]

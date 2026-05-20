@@ -1,0 +1,53 @@
+MIT License
+
+Copyright (c) 2026 Matthew Stanley
+
+Permission is hereby granted, free of charge, to any person obtaining a
+copy of this software and associated documentation files (the
+"Software"), to deal in the Software without restriction, including
+without limitation the rights to use, copy, modify, merge, publish,
+distribute, sublicense, and/or sell copies of the Software, and to
+permit persons to whom the Software is furnished to do so, subject to
+the following conditions:
+
+The above copyright notice and this permission notice shall be included
+in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+---
+
+# Attribution
+
+vbrecomp adapts patterns, file layouts, and discrete code snippets
+from the following sibling projects (all in F:/Projects/):
+
+- **psxrecomp** — runtime structure (cpu_state, debug_server, ring
+  buffers, fntrace, wtrace, crash_trace, freeze_heartbeat,
+  beetle_*.cpp shape, runtime.cmake), constitution-style CLAUDE.md.
+- **snesrecomp** — Python recompiler pattern (frozen-dataclass IR,
+  worklist decoder, codegen structure in `recompiler/v2/`).
+- **nesrecomp** — TCP debug server protocol, reverse-debugger tier
+  design, 36k-frame ring buffer concept.
+- **segagenesisrecomp** — coroutine/fiber dispatch model
+  (reference only at this stage).
+- **recomp-template** — PRINCIPLES.md and DEBUG.md (system-agnostic
+  rules).
+
+Where code is copied near-verbatim, the file's leading comment names
+the originating project. Documentation copied verbatim (PRINCIPLES.md,
+DEBUG.md) carries an explicit attribution paragraph.
+
+Mednafen Beetle VB (a fork of Mednafen's VB module) is referenced as
+the oracle backend. It is dynamically linked / statically linked
+according to its own GPL licence; vbrecomp does not redistribute it.
+
+The NEC V810 architecture, Virtual Boy hardware, and any cartridge
+ROMs are property of their respective rights holders. This project
+ships no ROM data.
