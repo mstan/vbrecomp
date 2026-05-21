@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/vbrecomp-logo.png" alt="VBRecomp" width="600"></p>
+
 # vbrecomp
 
 Static V810 (Nintendo Virtual Boy) → C recompiler + runtime + Beetle VB
