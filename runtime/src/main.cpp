@@ -220,6 +220,39 @@ int main(int argc, char** argv) {
                 "vb-runtime: failed to load ROM '%s' (rc=%d)\n", rom_path, rc);
             return 3;
         }
+        /* CRC32-verify the loaded cart against the value baked in by
+         * the recompiler. A mismatch means the user pointed --rom at
+         * something other than the cart this binary was built for —
+         * running on would produce garbage (the recompiled C does the
+         * original cart's CPU work on the new cart's data). */
+        uint32_t expected = vb_game_expected_crc32();
+        if (expected != 0) {
+            const uint8_t* rom_bytes = vb_rom_data();
+            uint32_t rom_n = vb_rom_size();
+            /* IEEE 802.3 CRC-32 reflected; matches zlib.crc32 and
+             * Python's binascii.crc32. Compact table-free shift loop —
+             * one-shot at boot, perf doesn't matter. */
+            uint32_t crc = 0xFFFFFFFFu;
+            for (uint32_t i = 0; i < rom_n; ++i) {
+                crc ^= rom_bytes[i];
+                for (int b = 0; b < 8; ++b)
+                    crc = (crc >> 1) ^ (0xEDB88320u & -(int32_t)(crc & 1));
+            }
+            crc ^= 0xFFFFFFFFu;
+            if (crc != expected) {
+                std::fprintf(stderr,
+                    "vb-runtime: ROM CRC32 mismatch.\n"
+                    "  expected: 0x%08X (built for this cart)\n"
+                    "  actual:   0x%08X (provided '%s')\n"
+                    "The recompiled C is specific to one cart dump — "
+                    "running against a different ROM file produces "
+                    "garbage. Provide the correct .vb file via --rom.\n",
+                    expected, crc, rom_path);
+                vb_memory_shutdown();
+                return 5;
+            }
+            std::printf("vb-runtime: CRC32 OK (0x%08X)\n", crc);
+        }
         cpu.read8 = vb_read8;
         cpu.read16 = vb_read16;
         cpu.read32 = vb_read32;

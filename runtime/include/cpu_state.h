@@ -113,6 +113,14 @@ typedef struct CPUState {
 void vb_dispatch(CPUState* cpu, uint32_t target_pc);
 void vb_dispatch_call(CPUState* cpu, uint32_t target_pc, uint32_t lp);
 
+/* CRC32 of the cart this recompiler run was generated against.
+ * Returned by the generated `<module>_dispatch.c` so main() can refuse
+ * to run against a ROM that doesn't match the recompiled code. A
+ * return of 0 means "skip the check" (used by the no-game-linked
+ * placeholder build). Defined alongside vb_dispatch in the generated
+ * dispatch file. */
+uint32_t vb_game_expected_crc32(void);
+
 /* PSW pack/unpack — keep the exploded psw_* fields and
  * sysreg[VB_SR_PSW] in sync.
  *

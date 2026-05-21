@@ -118,6 +118,16 @@ function(vb_add_runtime_target TARGET)
     if(WIN32)
         target_link_libraries(${TARGET} PRIVATE ws2_32 xinput)
         target_compile_definitions(${TARGET} PRIVATE VB_RUNTIME_HAVE_XINPUT=1)
+        # When building with MinGW (the project's primary toolchain),
+        # statically link the gcc/stdc++/winpthread runtimes so the
+        # release zip ships just vb-runtime.exe + SDL2.dll without
+        # the libgcc_s_seh-1 / libstdc++-6 / libwinpthread-1 DLLs.
+        if(MINGW)
+            target_link_options(${TARGET} PRIVATE
+                -static-libgcc -static-libstdc++
+                -Wl,-Bstatic,--whole-archive -lwinpthread
+                -Wl,--no-whole-archive)
+        endif()
     endif()
     if(UNIX)
         find_package(Threads REQUIRED)

@@ -30,3 +30,6 @@ void vb_dispatch_call(CPUState* cpu, uint32_t target_pc, uint32_t lp) {
         "vb_dispatch_call called but no generated game C is linked",
         target_pc, 0xFFFFFFFFu);
 }
+
+/* No game linked → no expected CRC → main skips the check. */
+uint32_t vb_game_expected_crc32(void) { return 0; }
