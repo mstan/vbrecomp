@@ -114,12 +114,29 @@ function(vb_add_runtime_target TARGET)
         target_compile_options(${TARGET} PRIVATE -Wall -Wextra -Wno-unused-parameter)
     endif()
 
-    # Sockets.
+    # Sockets + XInput controller support on Windows.
     if(WIN32)
-        target_link_libraries(${TARGET} PRIVATE ws2_32)
+        target_link_libraries(${TARGET} PRIVATE ws2_32 xinput)
+        target_compile_definitions(${TARGET} PRIVATE VB_RUNTIME_HAVE_XINPUT=1)
     endif()
     if(UNIX)
         find_package(Threads REQUIRED)
         target_link_libraries(${TARGET} PRIVATE Threads::Threads)
+    endif()
+
+    # SDL2 for the live window. If unavailable, compile in --headless-only
+    # mode so the runtime still builds for TCP-only setups.
+    # For MSVC release builds we ship a vendored SDL2 dev pack at
+    # runtime/external/SDL2/; on MSYS2/mingw local builds the system
+    # find_package finds the toolchain's SDL2 directly.
+    list(APPEND CMAKE_PREFIX_PATH "${VB_RUNTIME_DIR}/external/SDL2/cmake")
+    find_package(SDL2 QUIET)
+    if(SDL2_FOUND)
+        target_compile_definitions(${TARGET} PRIVATE VB_RUNTIME_HAVE_SDL=1)
+        target_include_directories(${TARGET} PRIVATE ${SDL2_INCLUDE_DIRS})
+        target_link_libraries(${TARGET} PRIVATE ${SDL2_LIBRARIES})
+        message(STATUS "${TARGET}: SDL2 ${SDL2_VERSION_STRING} — live window enabled")
+    else()
+        message(STATUS "${TARGET}: SDL2 not found — TCP-only build")
     endif()
 endfunction()

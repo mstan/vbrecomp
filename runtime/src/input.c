@@ -29,11 +29,19 @@ static uint16_t s_pad;
 static uint8_t  s_scr;
 
 void vb_input_init(void) {
-    s_pad = 0;
+    /* Bit 1 ("device-connected" sentinel) must always be 1 so the
+     * cart's controller-presence check passes. Beetle composes
+     * PadData with `| 0x2` for the same reason. */
+    s_pad = VB_PAD_PRESENT;
     s_scr = 0;
 }
 
-void vb_input_set_pad(uint16_t pressed) { s_pad = pressed; }
+void vb_input_set_pad(uint16_t pressed) {
+    /* Caller passes a "buttons currently pressed" mask using the
+     * VB_PAD_* hardware-bit macros. Always re-force the PRESENT
+     * sentinel so the cart sees a live controller. */
+    s_pad = (uint16_t)((pressed & ~(uint16_t)VB_PAD_BAT_LOW) | VB_PAD_PRESENT);
+}
 uint16_t vb_input_get_pad(void) { return s_pad; }
 
 static uint8_t input_read_low_byte(uint32_t lo) {

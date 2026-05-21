@@ -731,9 +731,110 @@ def _collect_cross_function_targets(rom: RomImage, walk: WalkResult,
     return cross_targets
 
 
-def discover_functions(rom: RomImage) -> List[FunctionRange]:
+def _looks_like_function_entry(rom: RomImage, v: int) -> bool:
+    """Heuristic: does VA `v` look like the start of a function?
+    Tight enough to discriminate genuine function-pointer table
+    entries from data that happens to alias the cart range. Used by
+    `scan_rom_for_function_pointers`.
+
+    Criteria:
+      * `v` must map into the cart and be 2-byte aligned.
+      * The first instruction must decode cleanly.
+      * The first instruction must NOT itself be a return
+        (JMP r31 with no other state) — a function entry that's
+        nothing but RET is theoretically legal but vanishingly rare
+        and almost always means we mis-identified data as code.
+    """
+    if v & 1:
+        return False
+    if rom.va_to_offset(v) is None:
+        return False
+    ins = rom.decode_at_va(v)
+    if ins is None or ins.is_unknown:
+        return False
+    return True
+
+
+def scan_rom_for_function_pointers(rom: RomImage,
+                                   known_code_pcs: Set[int],
+                                   already_entries: Set[int],
+                                   *,
+                                   table_min_run: int = 2) -> Set[int]:
+    """Scan ROM data for *runs* of 4-byte-aligned 32-bit values that
+    look like cart function pointers — the canonical shape of game
+    state machines, vtables, and ISR dispatch tables that the CFG
+    walker can't follow because the target sits in ROM/WRAM as data,
+    not as a JAL/Bcond immediate.
+
+    A *single* aligned 4-byte value pointing into the cart is too
+    easy a false positive (random instruction-stream bytes alias
+    into the cart bank constantly). We require a run of at least
+    `table_min_run` consecutive valid pointer-shaped entries before
+    promoting any of them. That captures genuine jump tables (which
+    are always laid out contiguously) and rejects literal-pool
+    constants that just happen to look like pointers.
+
+    Source-side filters:
+      * Source offset is 4-byte aligned.
+      * Source slot's VA is NOT in `known_code_pcs` — slots that
+        live inside a decoded instruction are literals, never
+        pointer-table cells.
+
+    Per-target filters: see `_looks_like_function_entry`.
+
+    Returns the set of new candidate function PCs. False positives
+    that survive these filters become unreachable functions; they
+    cost build time and binary size but don't affect correctness.
+    """
+    new_seeds: Set[int] = set()
+    data = rom.data
+    n = len(data)
+
+    def slot_is_data(off: int) -> bool:
+        """Is ROM offset `off` outside the decoded-code set?"""
+        # The walker stores PCs in the canonical bank-7 mirror VA.
+        return (CART_BANK_BASE | off) not in known_code_pcs
+
+    run: List[int] = []
+    last_off = -8
+
+    def flush_run():
+        if len(run) >= table_min_run:
+            for v in run:
+                if v not in already_entries and v not in known_code_pcs:
+                    new_seeds.add(v)
+        run.clear()
+
+    for off in range(0, n - 3, 4):
+        # Reset the run if we hit a non-contiguous slot or a slot
+        # that lives inside decoded code.
+        if not slot_is_data(off) or off != last_off + 4:
+            flush_run()
+            last_off = off - 4
+            if not slot_is_data(off):
+                continue
+        v = int.from_bytes(data[off:off + 4], "little")
+        if not _looks_like_function_entry(rom, v):
+            flush_run()
+            last_off = off
+            continue
+        run.append(v)
+        last_off = off
+    flush_run()
+    return new_seeds
+
+
+def discover_functions(rom: RomImage,
+                       *,
+                       extra_seeds: Optional[Iterable[int]] = None
+                       ) -> List[FunctionRange]:
     """Discover functions by CFG walk from the reset trampoline +
     every transitively-reached JAL target.
+
+    `extra_seeds` is an optional iterable of additional function-entry
+    PCs to seed alongside RESET_VECTOR + HANDLER_VECTORS. Use this for
+    function-pointer-table entries that the static walker can't
+    follow (state-machine dispatch, vtables, callback registration).
 
     Returns a list of `FunctionRange` sorted by `start_pc`. Each
     function spans from its entry PC to the highest visited byte
@@ -754,11 +855,24 @@ def discover_functions(rom: RomImage) -> List[FunctionRange]:
     if rom.va_to_offset(RESET_VECTOR) is None:
         return []
     # Seed the CFG walk from RESET_VECTOR and from every cart handler
-    # vector. Vectors that pad to 0xFFFF cause the walker to record an
-    # unknown encoding and stop — the walker is robust to that.
+    # vector. Vectors padded with 0xFFFF (unused-IRQ slots — Mario's
+    # Tennis fills 0xFFFFFF60..FFFFFFD0 this way) decode as the bogus
+    # ST.W r31, -1[r31] pattern and emit unused-label warnings during
+    # gcc build. Skip them at seed time so they never become function
+    # entries.
+    def _is_unused_vector(v: int) -> bool:
+        off = rom.va_to_offset(v)
+        if off is None or off + 4 > rom.rom_size:
+            return True
+        return rom.data[off:off + 4] == b"\xff\xff\xff\xff"
     seeds = [RESET_VECTOR] + [
-        v for v in HANDLER_VECTORS if rom.va_to_offset(v) is not None
+        v for v in HANDLER_VECTORS
+        if rom.va_to_offset(v) is not None and not _is_unused_vector(v)
     ]
+    if extra_seeds:
+        for v in extra_seeds:
+            if rom.va_to_offset(v) is not None and v not in seeds:
+                seeds.append(v)
     walk = cfg_walk_with_table_resolution(rom, seeds)
     if not walk.visited:
         return []
@@ -775,6 +889,64 @@ def discover_functions(rom: RomImage) -> List[FunctionRange]:
     # Iterates to fixpoint because each promotion can shrink an
     # existing function, exposing new cross-references that were
     # previously intra-function.
+    for _ in range(8):
+        cross = _collect_cross_function_targets(rom, walk, entries)
+        if not cross:
+            break
+        entries |= cross
+
+    # ROM-wide function-pointer table scan. Game state-machine
+    # dispatch tables, vtables, and ISR callback tables are stored as
+    # raw cart-PC 32-bit words in ROM data that the CFG walker can't
+    # follow through (no JAL/Bcond/JR points at them — the cart loads
+    # the pointer with LD.W and JMPs through a register).
+    #
+    # Two filters keep the scan tight enough to net-add real entries:
+    #   1. `scan_rom_for_function_pointers` requires a run of >= 4
+    #      consecutive valid-pointer cells before promoting any —
+    #      Mario's Tennis's real tables run 16/40/90/147 cells long
+    #      while false-positive instruction-stream literals cluster
+    #      at length 2-3.
+    #   2. Per-candidate walks below cap visited-PC count at 800. A
+    #      seed that walks past the cap is almost certainly walking
+    #      into data (real functions are ~100-1000 instructions); we
+    #      drop it before it pollutes the function set.
+    # Also restrict candidates to the cart's actual code range
+    # (0xFFF80000-0xFFFFFFFF for a 512 KB cart at the top of memory)
+    # so we don't admit the alias-mirrored 0x07/0x0F upper-bit
+    # variants that point at the same cart byte but never appear as
+    # function entries in cart-internal code.
+    PER_SEED_VISIT_CAP = 800
+    for _ in range(8):
+        known_code = set(walk.visited.keys())
+        candidates = scan_rom_for_function_pointers(
+            rom, known_code_pcs=known_code, already_entries=entries,
+            table_min_run=4,
+        )
+        # Cart-PC-range filter — Mario's Tennis uses 0xFFFxxxxx for
+        # its own function entries; the heuristic also surfaces the
+        # 0x07/0x0F mirror VAs that alias to the same bytes but
+        # aren't used as PCs by cart code.
+        candidates = {v for v in candidates if 0xFFF80000 <= v <= 0xFFFFFFFF}
+        if not candidates:
+            break
+        accepted: Set[int] = set()
+        for seed in sorted(candidates):
+            step = cfg_walk_from_seeds(rom, [seed])
+            if not step.visited:
+                continue
+            if len(step.visited) > PER_SEED_VISIT_CAP:
+                continue
+            accepted.add(seed)
+            _merge_walk_into(walk, step)
+            entries |= step.call_targets
+        if not accepted:
+            break
+        entries |= accepted
+
+    # Re-promote cross-function-targets one more time so any Bcond/JR
+    # landings exposed by the newly-walked functions get split into
+    # their own entries.
     for _ in range(8):
         cross = _collect_cross_function_targets(rom, walk, entries)
         if not cross:

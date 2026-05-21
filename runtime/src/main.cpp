@@ -1,13 +1,10 @@
 /* main.cpp — vb-runtime entry point.
  *
- * Phase 1 skeleton:
- *   - parse args
- *   - optionally load a ROM and wire bus pointers
- *   - start the TCP debug server
- *   - service it in a non-blocking loop until "quit" arrives
- *
- * Phase 3+ replaces the idle loop with a real frame loop that calls
- * vb_dispatch() at the reset vector and runs to the next yield boundary.
+ * Drives the recompiled cart in a step-budget dispatch loop, ticks
+ * device emulation (timer + VIP) by the cycle delta consumed each
+ * pass, services the TCP debug server, and (when SDL2 is available)
+ * presents the latest VIP framebuffer at 50.27 Hz with keyboard
+ * input feeding vb_input_set_pad.
  */
 #include <chrono>
 #include <cstdio>
@@ -18,13 +15,25 @@
 
 #include "cpu_state.h"
 #include "debug_server.h"
+#include "input.h"
 #include "interrupts.h"
 #include "memory.h"
 #include "ring_frame.h"
 #include "timer.h"
 #include "vip.h"
+#include "vsu.h"
 #include "wtrace.h"
 #include "fntrace.h"
+
+#if VB_RUNTIME_HAVE_SDL
+#  include <SDL.h>
+#endif
+
+#if VB_RUNTIME_HAVE_XINPUT
+#  define WIN32_LEAN_AND_MEAN
+#  include <windows.h>
+#  include <xinput.h>
+#endif
 
 #ifndef VB_DEFAULT_DEBUG_PORT
 #define VB_DEFAULT_DEBUG_PORT 4390
@@ -36,26 +45,145 @@
 
 static void print_help(const char* argv0) {
     std::printf(
-        "%s — Virtual Boy static-recomp runtime (Phase 1 skeleton)\n"
+        "%s — Virtual Boy static-recomp runtime\n"
         "\n"
-        "Usage: %s [--rom PATH] [--port N]\n"
+        "Usage: %s [--rom PATH] [--port N] [--headless] [--stereo]\n"
         "\n"
         "Options:\n"
         "  --rom PATH       Load a Virtual Boy ROM into the simulated cart slot.\n"
-        "                   Optional in Phase 1; without it, the runtime starts the\n"
-        "                   TCP server and idles. With a ROM, the bus is wired but\n"
-        "                   dispatch is not (no generated game C linked yet).\n"
+        "                   Without it, the runtime starts the TCP server and idles.\n"
         "  --port N         TCP debug port (default: %d).\n"
+        "  --headless       Do not open an SDL window. TCP-only.\n"
+        "  --stereo         Show both eyes stacked vertically (L top / R bottom)\n"
+        "                   instead of the single-eye default.\n"
         "  --help, -h       Show this help and exit.\n"
+        "\n"
+        "Keyboard map (when the SDL window has focus):\n"
+        "  Arrows .......... Left D-pad\n"
+        "  W A S D ......... Right D-pad\n"
+        "  X / Z ........... A / B\n"
+        "  Q / E ........... L / R triggers\n"
+        "  Enter / RShift .. Start / Select\n"
+        "  TAB ............. Turbo (skip 50.27 Hz pacing)\n"
+        "  Esc ............. Quit\n"
+        "\n"
+        "XInput (Xbox controller, player 1):\n"
+        "  D-pad / L-stick . Left D-pad      R-stick ......... Right D-pad\n"
+        "  A / B button .... A / B           LB / RB ......... L / R triggers\n"
+        "  Start / Back .... Start / Select\n"
         "\n"
         "TCP harness:        see TCP.md for the JSON command surface.\n"
         "Constitution:       see CLAUDE.md before making changes.\n",
         VB_DEFAULT_WINDOW_TITLE, argv0, VB_DEFAULT_DEBUG_PORT);
 }
 
+#if VB_RUNTIME_HAVE_SDL
+/* VB native single-eye geometry. Window defaults to single-eye
+ * (eye 0 / left); --stereo opt-in stacks both eyes vertically. */
+static constexpr int VB_RT_EYE_W = 384;
+static constexpr int VB_RT_EYE_H = 224;
+static constexpr double VB_RT_FRAME_HZ = 50.27;
+static constexpr int VB_RT_WIN_SCALE = 2;   /* legibility default */
+
+static uint16_t pad_from_keyboard(void) {
+    /* vb-runtime's pad word is ACTIVE-HIGH (a set bit = pressed).
+     * This is opposite to vb-beetle's active-low convention; the
+     * V810 input register synthesises the active-low view at read
+     * time inside input.c. */
+    const Uint8* keys = SDL_GetKeyboardState(nullptr);
+    uint16_t pad = 0;
+    if (!keys) return pad;
+    if (keys[SDL_SCANCODE_UP])     pad |= VB_PAD_LUP;
+    if (keys[SDL_SCANCODE_DOWN])   pad |= VB_PAD_LDOWN;
+    if (keys[SDL_SCANCODE_LEFT])   pad |= VB_PAD_LLEFT;
+    if (keys[SDL_SCANCODE_RIGHT])  pad |= VB_PAD_LRIGHT;
+    if (keys[SDL_SCANCODE_W])      pad |= VB_PAD_RUP;
+    if (keys[SDL_SCANCODE_S])      pad |= VB_PAD_RDOWN;
+    if (keys[SDL_SCANCODE_A])      pad |= VB_PAD_RLEFT;
+    if (keys[SDL_SCANCODE_D])      pad |= VB_PAD_RRIGHT;
+    if (keys[SDL_SCANCODE_X])      pad |= VB_PAD_A;
+    if (keys[SDL_SCANCODE_Z])      pad |= VB_PAD_B;
+    if (keys[SDL_SCANCODE_Q])      pad |= VB_PAD_LT;
+    if (keys[SDL_SCANCODE_E])      pad |= VB_PAD_RT;
+    if (keys[SDL_SCANCODE_RETURN]) pad |= VB_PAD_START;
+    if (keys[SDL_SCANCODE_RSHIFT]) pad |= VB_PAD_SELECT;
+    return pad;
+}
+#endif  /* VB_RUNTIME_HAVE_SDL */
+
+#if VB_RUNTIME_HAVE_XINPUT
+/* Read player-1 XInput controller, return the same active-high VB
+ * pad word as pad_from_keyboard. Mapping:
+ *   D-pad + left stick  -> Left D-pad   (left thumb)
+ *   Right stick         -> Right D-pad  (right thumb)
+ *   Xbox A / B          -> VB A / VB B  (same labels)
+ *   LB / RB             -> L / R triggers
+ *   Start / Back        -> Start / Select
+ * Sticks use the standard XInput deadzones. Returns 0 when no
+ * controller is connected. */
+static uint16_t pad_from_xinput(bool* out_connected) {
+    XINPUT_STATE st;
+    ZeroMemory(&st, sizeof(st));
+    if (XInputGetState(0, &st) != ERROR_SUCCESS) {
+        if (out_connected) *out_connected = false;
+        return 0;
+    }
+    if (out_connected) *out_connected = true;
+    const WORD btn = st.Gamepad.wButtons;
+    uint16_t pad = 0;
+
+    if (btn & XINPUT_GAMEPAD_DPAD_UP)        pad |= VB_PAD_LUP;
+    if (btn & XINPUT_GAMEPAD_DPAD_DOWN)      pad |= VB_PAD_LDOWN;
+    if (btn & XINPUT_GAMEPAD_DPAD_LEFT)      pad |= VB_PAD_LLEFT;
+    if (btn & XINPUT_GAMEPAD_DPAD_RIGHT)     pad |= VB_PAD_LRIGHT;
+
+    /* Left thumbstick → L D-pad (OR'd with D-pad). */
+    const SHORT lx = st.Gamepad.sThumbLX;
+    const SHORT ly = st.Gamepad.sThumbLY;
+    if (ly >  XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE) pad |= VB_PAD_LUP;
+    if (ly < -XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE) pad |= VB_PAD_LDOWN;
+    if (lx < -XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE) pad |= VB_PAD_LLEFT;
+    if (lx >  XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE) pad |= VB_PAD_LRIGHT;
+
+    /* Right thumbstick → R D-pad. */
+    const SHORT rx = st.Gamepad.sThumbRX;
+    const SHORT ry = st.Gamepad.sThumbRY;
+    if (ry >  XINPUT_GAMEPAD_RIGHT_THUMB_DEADZONE) pad |= VB_PAD_RUP;
+    if (ry < -XINPUT_GAMEPAD_RIGHT_THUMB_DEADZONE) pad |= VB_PAD_RDOWN;
+    if (rx < -XINPUT_GAMEPAD_RIGHT_THUMB_DEADZONE) pad |= VB_PAD_RLEFT;
+    if (rx >  XINPUT_GAMEPAD_RIGHT_THUMB_DEADZONE) pad |= VB_PAD_RRIGHT;
+
+    if (btn & XINPUT_GAMEPAD_A)              pad |= VB_PAD_A;
+    if (btn & XINPUT_GAMEPAD_B)              pad |= VB_PAD_B;
+    if (btn & XINPUT_GAMEPAD_LEFT_SHOULDER)  pad |= VB_PAD_LT;
+    if (btn & XINPUT_GAMEPAD_RIGHT_SHOULDER) pad |= VB_PAD_RT;
+    if (btn & XINPUT_GAMEPAD_START)          pad |= VB_PAD_START;
+    if (btn & XINPUT_GAMEPAD_BACK)           pad |= VB_PAD_SELECT;
+    return pad;
+}
+#endif  /* VB_RUNTIME_HAVE_XINPUT */
+
+#if VB_RUNTIME_HAVE_SDL
+/* SDL audio callback. Runs on SDL's audio thread; pulls the VSU
+ * ring buffer into the device buffer. `vb_vsu_pull_samples` pads
+ * with silence when the producer is starved, so brief stalls
+ * (TCP-blocked main loop) just produce a momentary quiet rather
+ * than a buzzing underrun.
+ *
+ * `stream` is byte-addressed; we want int16 stereo frames so each
+ * SDL "byte" pair is one int16 channel sample. The audio spec
+ * below sets `format = AUDIO_S16SYS`, `channels = 2`. */
+static void vb_sdl_audio_cb(void* /*ud*/, Uint8* stream, int len) {
+    const size_t n_frames = (size_t)len / (2 * sizeof(int16_t));
+    vb_vsu_pull_samples((int16_t*)stream, n_frames);
+}
+#endif
+
 int main(int argc, char** argv) {
     int port = VB_DEFAULT_DEBUG_PORT;
     const char* rom_path = nullptr;
+    bool headless = false;
+    bool stereo = false;
 
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
@@ -66,11 +194,21 @@ int main(int argc, char** argv) {
             port = std::atoi(argv[++i]);
         } else if (a == "--rom" && i + 1 < argc) {
             rom_path = argv[++i];
+        } else if (a == "--headless") {
+            headless = true;
+        } else if (a == "--stereo" || a == "--dual-eye") {
+            stereo = true;
         } else {
             std::fprintf(stderr, "unknown argument: %s (try --help)\n", argv[i]);
             return 2;
         }
     }
+
+#if !VB_RUNTIME_HAVE_SDL
+    /* The build doesn't have SDL2; window is impossible regardless of
+     * the user's wishes. Treat as headless for the rest of main(). */
+    headless = true;
+#endif
 
     CPUState cpu;
     std::memset(&cpu, 0, sizeof(cpu));
@@ -125,11 +263,108 @@ int main(int argc, char** argv) {
 
     using namespace std::chrono_literals;
 
+#if VB_RUNTIME_HAVE_SDL
+    SDL_Window*       win = nullptr;
+    SDL_Renderer*     ren = nullptr;
+    SDL_Texture*      tex = nullptr;
+    SDL_AudioDeviceID aud = 0;
+    Uint64            sdl_freq = 0;
+    Uint64            sdl_period = 0;
+    Uint64            sdl_deadline = 0;
+    const int         tex_w = VB_RT_EYE_W;
+    const int         tex_h = stereo ? VB_RT_EYE_H * 2 : VB_RT_EYE_H;
+    uint32_t          tex_pixels[VB_RT_EYE_W * VB_RT_EYE_H * 2];
+
+    if (!headless) {
+        if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO) != 0) {
+            std::fprintf(stderr, "vb-runtime: SDL_Init failed: %s — "
+                                 "falling back to headless\n",
+                         SDL_GetError());
+            headless = true;
+        }
+    }
+    if (!headless) {
+        win = SDL_CreateWindow(
+            VB_DEFAULT_WINDOW_TITLE,
+            SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+            tex_w * VB_RT_WIN_SCALE, tex_h * VB_RT_WIN_SCALE,
+            SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
+        if (!win) {
+            std::fprintf(stderr, "vb-runtime: SDL_CreateWindow failed: %s\n",
+                         SDL_GetError());
+            headless = true;
+        }
+    }
+    if (!headless) {
+        SDL_SetHint(SDL_HINT_RENDER_DRIVER, "opengl");
+        ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_ACCELERATED);
+        if (!ren) ren = SDL_CreateRenderer(win, -1, 0);
+        if (!ren) {
+            std::fprintf(stderr, "vb-runtime: SDL_CreateRenderer failed: %s\n",
+                         SDL_GetError());
+            headless = true;
+        }
+    }
+    if (!headless) {
+        tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_ARGB8888,
+                                SDL_TEXTUREACCESS_STREAMING,
+                                tex_w, tex_h);
+        if (!tex) {
+            std::fprintf(stderr, "vb-runtime: SDL_CreateTexture failed: %s\n",
+                         SDL_GetError());
+            headless = true;
+        }
+    }
+    if (!headless) {
+        sdl_freq = SDL_GetPerformanceFrequency();
+        const double frame_ms = 1000.0 / VB_RT_FRAME_HZ;
+        sdl_period = (Uint64)((double)sdl_freq * (frame_ms / 1000.0));
+        std::printf("vb-runtime: SDL window %dx%d at %.2f Hz (%s)\n",
+                    tex_w * VB_RT_WIN_SCALE, tex_h * VB_RT_WIN_SCALE,
+                    VB_RT_FRAME_HZ,
+                    stereo ? "L eye top / R eye bottom"
+                           : "single eye (--stereo for both)");
+        std::fflush(stdout);
+
+        /* Audio device. Failure is non-fatal — the window keeps
+         * running with the cart's writes accumulating into the VSU
+         * ring but no sound out. */
+        SDL_AudioSpec want;
+        std::memset(&want, 0, sizeof(want));
+        want.freq     = VSU_OUTPUT_HZ;
+        want.format   = AUDIO_S16SYS;
+        want.channels = 2;
+        want.samples  = 1024;            /* ~23 ms @ 44.1 kHz */
+        want.callback = vb_sdl_audio_cb;
+        SDL_AudioSpec have;
+        aud = SDL_OpenAudioDevice(nullptr, 0, &want, &have, 0);
+        if (aud == 0) {
+            std::fprintf(stderr,
+                "vb-runtime: SDL_OpenAudioDevice failed: %s "
+                "(continuing without audio)\n", SDL_GetError());
+        } else {
+            SDL_PauseAudioDevice(aud, 0);
+            std::printf("vb-runtime: SDL audio at %d Hz, %d-frame "
+                        "buffer\n", have.freq, have.samples);
+            std::fflush(stdout);
+        }
+    }
+#endif  /* VB_RUNTIME_HAVE_SDL */
+
     if (rom_path) {
         std::printf("vb-runtime: dispatching to reset vector "
                     "0x%08X\n", VB_RESET_VECTOR);
         std::fflush(stdout);
     }
+
+    /* VB CPU 20 MHz / 50.27 Hz frame ≈ 397 853 cycles. The dispatch
+     * loop advances at ~750 000 cycles per pass when not halted, so
+     * "one frame ready to present" is the natural cadence; in halted
+     * idle it takes ~20 passes (IDLE_TICK_CYCLES) to accumulate one
+     * frame's worth, which still leaves TCP/SDL polls responsive. */
+    constexpr uint64_t VB_CYCLES_PER_FRAME = 397853;
+    uint64_t last_present_cycles = 0;
+    bool sdl_quit = false;
 
     // P4-A main loop: alternate between recompiled-code dispatch
     // and TCP polling, and tick device emulation (timer, VIP) by the
@@ -156,7 +391,42 @@ int main(int argc, char** argv) {
     constexpr uint64_t IDLE_TICK_CYCLES = 20000;
     bool dispatched_once = false;
     uint32_t dispatch_pc = cpu.pc;
-    while (vb_debug_server_poll() == 0) {
+    while (vb_debug_server_poll() == 0 && !sdl_quit) {
+#if VB_RUNTIME_HAVE_SDL
+        if (!headless) {
+            SDL_Event ev;
+            while (SDL_PollEvent(&ev)) {
+                if (ev.type == SDL_QUIT) { sdl_quit = true; break; }
+                if (ev.type == SDL_KEYDOWN
+                        && ev.key.keysym.sym == SDLK_ESCAPE) {
+                    sdl_quit = true;
+                    break;
+                }
+            }
+            if (sdl_quit) break;
+        }
+#endif
+        /* Compose pad from every available input source. Rules:
+         *   - Window open: keyboard is the authority; XInput OR's in.
+         *     TCP press/set_input is clobbered every frame.
+         *   - Headless + controller present: XInput drives.
+         *   - Headless + no controller: leave pad alone so the TCP
+         *     press/set_input commands persist.
+         */
+        bool xinput_connected = false;
+        uint16_t xinput_pad = 0;
+#if VB_RUNTIME_HAVE_XINPUT
+        xinput_pad = pad_from_xinput(&xinput_connected);
+#endif
+#if VB_RUNTIME_HAVE_SDL
+        if (!headless) {
+            vb_input_set_pad((uint16_t)(pad_from_keyboard() | xinput_pad));
+        } else
+#endif
+        if (xinput_connected) {
+            vb_input_set_pad(xinput_pad);
+        }
+
         if (!rom_path) {
             std::this_thread::sleep_for(2ms);
             continue;
@@ -178,6 +448,7 @@ int main(int argc, char** argv) {
             cpu.cycles += IDLE_TICK_CYCLES;
             vb_timer_tick((uint32_t)IDLE_TICK_CYCLES);
             vb_vip_tick(IDLE_TICK_CYCLES);
+            vb_vsu_tick(IDLE_TICK_CYCLES);
             std::this_thread::sleep_for(1ms);
             continue;
         }
@@ -191,6 +462,7 @@ int main(int argc, char** argv) {
         cpu.cycles += cyc_delta;
         vb_timer_tick((uint32_t)cyc_delta);
         vb_vip_tick(cyc_delta);
+        vb_vsu_tick(cyc_delta);
 
         if (cpu.yielded) {
             // Resume from wherever the cart left off next tick.
@@ -236,7 +508,66 @@ int main(int argc, char** argv) {
             cpu.halted = 1;
             dispatch_pc = cpu.pc;
         }
+
+#if VB_RUNTIME_HAVE_SDL
+        if (!headless && (cpu.cycles - last_present_cycles) >= VB_CYCLES_PER_FRAME) {
+            last_present_cycles = cpu.cycles;
+
+            vb_vip_render_framebuffer(0, &tex_pixels[0]);
+            if (stereo) {
+                vb_vip_render_framebuffer(1,
+                    &tex_pixels[VB_RT_EYE_H * VB_RT_EYE_W]);
+            }
+
+            SDL_UpdateTexture(tex, nullptr, tex_pixels,
+                              tex_w * (int)sizeof(uint32_t));
+
+            int win_w = 0, win_h = 0;
+            SDL_GetRendererOutputSize(ren, &win_w, &win_h);
+            double sx = (double)win_w / tex_w;
+            double sy = (double)win_h / tex_h;
+            double s  = (sx < sy) ? sx : sy;
+            SDL_Rect dst;
+            dst.w = (int)(tex_w * s);
+            dst.h = (int)(tex_h * s);
+            dst.x = (win_w - dst.w) / 2;
+            dst.y = (win_h - dst.h) / 2;
+
+            SDL_SetRenderDrawColor(ren, 0, 0, 0, 0xFF);
+            SDL_RenderClear(ren);
+            SDL_RenderCopy(ren, tex, nullptr, &dst);
+            SDL_RenderPresent(ren);
+
+            /* Pace to VB_RT_FRAME_HZ — TAB skips the wait (turbo). */
+            const Uint8* keys = SDL_GetKeyboardState(nullptr);
+            const bool turbo = keys && keys[SDL_SCANCODE_TAB];
+            Uint64 now = SDL_GetPerformanceCounter();
+            if (sdl_deadline == 0 || now >= sdl_deadline + sdl_period * 3) {
+                /* Either first present or we fell badly behind; resync. */
+                sdl_deadline = now + sdl_period;
+            } else if (!turbo) {
+                while (SDL_GetPerformanceCounter() < sdl_deadline) {
+                    Uint64 left = sdl_deadline - SDL_GetPerformanceCounter();
+                    Uint64 ms = (left * 1000) / sdl_freq;
+                    if (ms >= 2) SDL_Delay((Uint32)(ms - 1));
+                    else break;
+                }
+                while (SDL_GetPerformanceCounter() < sdl_deadline) { /* spin */ }
+                sdl_deadline += sdl_period;
+            } else {
+                sdl_deadline += sdl_period;
+            }
+        }
+#endif
     }
+
+#if VB_RUNTIME_HAVE_SDL
+    if (aud) { SDL_PauseAudioDevice(aud, 1); SDL_CloseAudioDevice(aud); }
+    if (tex) SDL_DestroyTexture(tex);
+    if (ren) SDL_DestroyRenderer(ren);
+    if (win) SDL_DestroyWindow(win);
+    if (!headless) SDL_Quit();
+#endif
 
     vb_debug_server_stop();
     vb_memory_shutdown();

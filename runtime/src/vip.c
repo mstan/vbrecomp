@@ -25,6 +25,7 @@
  */
 #include "vip.h"
 
+#include <math.h>
 #include <string.h>
 
 #include "interrupts.h"
@@ -69,6 +70,26 @@ static uint8_t s_jplt_cache[4][4];
  * screenshot path to convert 2bpp pixels → grayscale ARGB. */
 static int32_t s_brt_cache[4];
 static uint8_t s_brt_repeat;   /* per-frame "Repeat" — set from CT data */
+
+/* Beetle's MakeColorLUT (vip.c:108-144) applies a 1/2.2 gamma curve
+ * when mapping the BrightnessCache scalar (0..255) into the host
+ * framebuffer's RGB channel. Default_Color is 0xFFFFFF in mednafen-vb
+ * (vip.c:389) so the per-channel scale collapses to 1.0; the gamma
+ * step is what raises BrightnessCache[3]=199 to host R=227 = 0xE3. */
+static uint8_t s_color_lut[256];
+static int     s_color_lut_built;
+
+static void build_color_lut(void) {
+    for (int i = 0; i < 256; ++i) {
+        double prod = (double)i / 255.0;
+        double r_prime = pow(prod, 1.0 / 2.2);
+        int v = (int)(r_prime * 255.0);
+        if (v < 0) v = 0;
+        if (v > 255) v = 255;
+        s_color_lut[i] = (uint8_t)v;
+    }
+    s_color_lut_built = 1;
+}
 
 static void recalc_gplt_cache(int which) {
     for (int i = 0; i < 4; ++i)
@@ -187,6 +208,7 @@ void vb_vip_init(void) {
     s_bkcol  = 0;
     s_brta = s_brtb = s_brtc = s_rest = 0;
     s_brt_repeat = 0;
+    build_color_lut();
     recalc_brt_cache();
     for (int i = 0; i < 4; ++i) {
         s_spt[i] = 0; s_gplt[i] = 0; s_jplt[i] = 0;
@@ -215,6 +237,27 @@ void vb_vip_shutdown(void) {}
 /* ----------------- Column state machine ----------------- */
 
 static void vip_advance_column(void) {
+    /* CT-table sample, Beetle vip.c:1357-1366. Every 4 columns during
+     * an active display half, DRAM[0x1DFFE - (Column>>2)*2 - (lr?0:0x200)]
+     * is fetched; the high byte is the per-column brightness "Repeat"
+     * count consumed by recalc_brt_cache(). Without this the loop body
+     * in recalc_brt_cache runs once instead of Repeat+1 times and every
+     * lit pixel comes out 24/255 too dark vs the oracle. */
+    if ((s_display_region & 1) && !(s_column & 3)) {
+        int lr = (s_display_region & 2) >> 1;
+        uint32_t ct_off = 0x1DFFEu
+                       - (uint32_t)((s_column >> 2) * 2)
+                       - (lr ? 0u : 0x200u);
+        uint32_t flat = 0x20000u + ct_off;
+        uint16_t ctdata = (uint16_t)s_vip_mem[flat]
+                        | ((uint16_t)s_vip_mem[flat + 1] << 8);
+        uint8_t repeat = (uint8_t)(ctdata >> 8);
+        if (repeat != s_brt_repeat) {
+            s_brt_repeat = repeat;
+            recalc_brt_cache();
+        }
+    }
+
     s_column++;
     if (s_column == VIP_COLUMNS_PER_PHASE) {
         s_column = 0;
@@ -963,8 +1006,13 @@ void vb_vip_render_framebuffer(int eye, uint32_t* argb_out) {
         for (int x = 0; x < 384; x++) {
             uint8_t b = fb[x * 64 + byte_off];
             uint32_t v = (b >> bit_shift) & 3u;
-            uint32_t r = (uint32_t)s_brt_cache[v];
-            if (r > 255) r = 255;
+            int32_t bv = s_brt_cache[v];
+            if (bv < 0) bv = 0;
+            if (bv > 255) bv = 255;
+            /* Beetle MakeColorLUT (vip.c:108-144) applies a 1/2.2
+             * gamma curve before emitting the host pixel. Skipping it
+             * gives BrightnessCache[3]=199 → R=0xC7 instead of 0xE3. */
+            uint32_t r = s_color_lut[bv];
             /* Virtual Boy LEDs are red-only; G=B=0 to match what the
              * real hardware emits (and what the Beetle oracle outputs
              * via libretro's XRGB8888 framebuffer). */

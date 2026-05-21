@@ -15,20 +15,32 @@ extern "C" {
 
 #define VB_PAD_REG     0x02000028u
 
-#define VB_PAD_LDOWN   (1u << 0)
-#define VB_PAD_LLEFT   (1u << 1)
-#define VB_PAD_LUP     (1u << 2)
-#define VB_PAD_LRIGHT  (1u << 3)
-#define VB_PAD_RDOWN   (1u << 4)
-#define VB_PAD_RLEFT   (1u << 5)
+/* Real-hardware Virtual Boy pad register bit layout. The cart reads
+ * SDR_LO/SDR_HI at 0x02000010/0x02000014 and tests specific bits; the
+ * layout below mirrors Beetle's VBINPUT_Frame composition:
+ *   PadData = (libretro_pad << 2) | 0x2 | battery_low_bit
+ * which puts the 14 actual buttons at bits 2..15 and reserves
+ *   bit 0 = battery-low flag (0 = OK)
+ *   bit 1 = "always 1" / device-connected sentinel
+ * The cart's input-polling code tests bit 1 as part of "is controller
+ * present", so input.c keeps it forced to 1 on every set_pad call. */
+#define VB_PAD_BAT_LOW (1u << 0)   /* status, not a button */
+#define VB_PAD_PRESENT (1u << 1)   /* sentinel, always 1 when a pad is "live" */
+
+#define VB_PAD_A       (1u << 2)
+#define VB_PAD_B       (1u << 3)
+#define VB_PAD_RT      (1u << 4)
+#define VB_PAD_LT      (1u << 5)
 #define VB_PAD_RUP     (1u << 6)
 #define VB_PAD_RRIGHT  (1u << 7)
-#define VB_PAD_A       (1u << 8)
-#define VB_PAD_B       (1u << 9)
-#define VB_PAD_START   (1u << 10)
-#define VB_PAD_SELECT  (1u << 11)
-#define VB_PAD_LT      (1u << 12)
-#define VB_PAD_RT      (1u << 13)
+#define VB_PAD_LRIGHT  (1u << 8)
+#define VB_PAD_LLEFT   (1u << 9)
+#define VB_PAD_LDOWN   (1u << 10)
+#define VB_PAD_LUP     (1u << 11)
+#define VB_PAD_START   (1u << 12)
+#define VB_PAD_SELECT  (1u << 13)
+#define VB_PAD_RLEFT   (1u << 14)
+#define VB_PAD_RDOWN   (1u << 15)
 
 void vb_input_init(void);
 void vb_input_set_pad(uint16_t pressed);

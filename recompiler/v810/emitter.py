@@ -47,7 +47,7 @@ Control flow:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 from .analysis import (
     BasicBlock,
@@ -408,11 +408,146 @@ def _emit_format_vi(ins: DecodedInstruction) -> str:
 
 
 def _emit_format_vii(ins: DecodedInstruction) -> str:
-    """Format VII — FPP / BSU. Bootstrap typically does not touch
-    these; surface as a clear stub_abort so the gap is visible if a
-    cart does."""
-    return (f"vb_stub_abort_simple(\"Format VII ({ins.mnemonic}) — FPP/BSU "
-            f"lifting deferred to P4+\", 0x{ins.pc:08X}u);")
+    """Format VII — FPP / extended (primary 0x3E) and BSU (primary 0x1F).
+    FPP sub-ops follow Beetle's v810_cpu.cpp fpu_subop (lines 941-1107):
+    arg1/arg2 in Beetle's notation map to OUR reg2/reg1 (Beetle decodes
+    Format VII as arg1=bits 9:5 / arg2=bits 4:0; our decoder uses the
+    Format I convention reg1=bits 4:0 / reg2=bits 9:5).
+
+    Flag policy:
+      ADDF.S / SUBF.S / MULF.S / DIVF.S → SetFPUOPNonFPUFlags:
+        OV = 0
+        result==±0 → Z=1, S=0, CY=0
+        else       → Z=0, S = sign bit, CY = sign bit
+      CMPF.S → equal: Z=1 S=0 CY=0; less: S=1 CY=1; greater: S=0 CY=0; OV=0
+      CVT.SW / TRNC.SW → SetSZ on the int32 result; OV=0
+      CVT.WS → SetFPUOPNonFPUFlags on the float bits
+      XB / XH / REV / MPYHW → no PSW change
+
+    The FRO / FIV / FZD / FOV / FUD / FPR exception machinery is NOT
+    modeled — the cart code that uses these ops is expected to feed
+    normal (non-subnormal, non-NaN, non-Inf) inputs. If a future cart
+    needs the exception path, plumb it through here.
+    """
+    op = ins.opcode6
+    sub = ins.subop
+    r1, r2 = ins.reg1, ins.reg2
+    pc = ins.pc
+
+    if op == 0x1F:
+        # BSU — not used by Mario's Tennis. Keep stubbed so any cart
+        # that wants it surfaces a clear error rather than silently
+        # corrupting memory.
+        return (f"vb_stub_abort_simple(\"Format VII BSU ({ins.mnemonic}) "
+                f"— not yet lifted\", 0x{pc:08X}u);")
+
+    if op != 0x3E:
+        return (f"vb_stub_abort_simple(\"Format VII unexpected primary "
+                f"0x{op:02X}\", 0x{pc:08X}u);")
+
+    # ---- 0x3E primary: FPP / extended ----
+    # Reinterpret-cast between uint32_t and float via union (the
+    # canonical strict-aliasing-safe idiom in C).
+    UNION_DECL = "union { uint32_t u; float f; }"
+
+    if sub == 0x00:  # CMPF.S — compare reg2 vs reg1; no result write
+        body = (
+            f"{UNION_DECL} _a, _b; "
+            f"_a.u = cpu->gpr[{r2}]; _b.u = cpu->gpr[{r1}]; "
+            "cpu->psw_ov = 0; "
+            "if (_a.f == _b.f) { cpu->psw_z = 1; cpu->psw_s = 0; cpu->psw_cy = 0; } "
+            "else if (_a.f <  _b.f) { cpu->psw_z = 0; cpu->psw_s = 1; cpu->psw_cy = 1; } "
+            "else                   { cpu->psw_z = 0; cpu->psw_s = 0; cpu->psw_cy = 0; } "
+        )
+        return "{ " + body + " }"
+
+    if sub == 0x02:  # CVT.WS — int32 → float; reg2 = (float)(int32)reg1
+        write_dest = (r2 != 0)
+        body = (
+            f"{UNION_DECL} _r; "
+            f"int32_t _i = (int32_t)cpu->gpr[{r1}]; "
+            "_r.f = (float)_i; "
+            + (f"cpu->gpr[{r2}] = _r.u; " if write_dest else "")
+            + "cpu->psw_ov = 0; "
+            "if ((_r.u & 0x7FFFFFFFu) == 0) { cpu->psw_z = 1; cpu->psw_s = 0; cpu->psw_cy = 0; } "
+            "else { cpu->psw_z = 0; cpu->psw_s = (_r.u >> 31) & 1; cpu->psw_cy = (_r.u >> 31) & 1; } "
+        )
+        return "{ " + body + " }"
+
+    if sub == 0x03:  # CVT.SW — float → int32 (round to nearest); reg2 = (int32)floatbits(reg1)
+        write_dest = (r2 != 0)
+        body = (
+            f"{UNION_DECL} _a; "
+            f"_a.u = cpu->gpr[{r1}]; "
+            # Round-to-nearest-even via lrintf to match V810 default rounding.
+            "int32_t _r = (int32_t)lrintf(_a.f); "
+            + (f"cpu->gpr[{r2}] = (uint32_t)_r; " if write_dest else "")
+            + "cpu->psw_ov = 0; "
+            "cpu->psw_z = (_r == 0); cpu->psw_s = (((uint32_t)_r) >> 31) & 1; "
+        )
+        return "{ " + body + " }"
+
+    if sub in (0x04, 0x05, 0x06, 0x07):
+        # ADDF/SUBF/MULF/DIVF — reg2 = reg2 OP reg1
+        cop = {0x04: "+", 0x05: "-", 0x06: "*", 0x07: "/"}[sub]
+        write_dest = (r2 != 0)
+        body = (
+            f"{UNION_DECL} _a, _b, _r; "
+            f"_a.u = cpu->gpr[{r2}]; _b.u = cpu->gpr[{r1}]; "
+            f"_r.f = _a.f {cop} _b.f; "
+            + (f"cpu->gpr[{r2}] = _r.u; " if write_dest else "")
+            + "cpu->psw_ov = 0; "
+            "if ((_r.u & 0x7FFFFFFFu) == 0) { cpu->psw_z = 1; cpu->psw_s = 0; cpu->psw_cy = 0; } "
+            "else { cpu->psw_z = 0; cpu->psw_s = (_r.u >> 31) & 1; cpu->psw_cy = (_r.u >> 31) & 1; } "
+        )
+        return "{ " + body + " }"
+
+    if sub == 0x08:  # XB — swap low/high bytes of low halfword of reg2; high halfword preserved
+        if r2 == 0:
+            return ""
+        return ("{ uint32_t _v = cpu->gpr[" + str(r2) + "]; "
+                f"cpu->gpr[{r2}] = (_v & 0xFFFF0000u) | "
+                "((_v & 0x000000FFu) << 8) | ((_v & 0x0000FF00u) >> 8); }")
+
+    if sub == 0x09:  # XH — swap halfwords of reg2
+        if r2 == 0:
+            return ""
+        return ("{ uint32_t _v = cpu->gpr[" + str(r2) + "]; "
+                f"cpu->gpr[{r2}] = (_v << 16) | (_v >> 16); }}")
+
+    if sub == 0x0A:  # REV — reverse bits of reg1, write to reg2
+        if r2 == 0:
+            return ""
+        return ("{ uint32_t _v = cpu->gpr[" + str(r1) + "]; "
+                "_v = ((_v >> 1) & 0x55555555u) | ((_v & 0x55555555u) << 1); "
+                "_v = ((_v >> 2) & 0x33333333u) | ((_v & 0x33333333u) << 2); "
+                "_v = ((_v >> 4) & 0x0F0F0F0Fu) | ((_v & 0x0F0F0F0Fu) << 4); "
+                "_v = ((_v >> 8) & 0x00FF00FFu) | ((_v & 0x00FF00FFu) << 8); "
+                "_v = (_v >> 16) | (_v << 16); "
+                f"cpu->gpr[{r2}] = _v; }}")
+
+    if sub == 0x0B:  # TRNC.SW — float → int32 (truncate); reg2 = (int32)floatbits(reg1)
+        write_dest = (r2 != 0)
+        body = (
+            f"{UNION_DECL} _a; "
+            f"_a.u = cpu->gpr[{r1}]; "
+            "int32_t _r = (int32_t)_a.f; "
+            + (f"cpu->gpr[{r2}] = (uint32_t)_r; " if write_dest else "")
+            + "cpu->psw_ov = 0; "
+            "cpu->psw_z = (_r == 0); cpu->psw_s = (((uint32_t)_r) >> 31) & 1; "
+        )
+        return "{ " + body + " }"
+
+    if sub == 0x0C:  # MPYHW — reg2 = (int16)(reg2 & 0xFFFF) * (int16)(reg1 & 0xFFFF)
+        if r2 == 0:
+            return ""
+        return ("{ int32_t _r = (int32_t)(int16_t)(cpu->gpr[" + str(r2)
+                + "] & 0xFFFFu) * (int32_t)(int16_t)(cpu->gpr["
+                + str(r1) + "] & 0xFFFFu); "
+                f"cpu->gpr[{r2}] = (uint32_t)_r; }}")
+
+    return (f"vb_stub_abort_simple(\"Format VII FPP subop "
+            f"0x{sub:02X} ({ins.mnemonic}) not lifted\", 0x{pc:08X}u);")
 
 
 def _emit_straight_line(ins: DecodedInstruction) -> str:
@@ -580,7 +715,25 @@ def _collect_leaders(rom: RomImage, fn: FunctionRange) -> Set[int]:
                     and ins.opcode6 in (0x18, 0x19, 0x1A)):
                 break  # TRAP / RETI / HALT
             cur = nxt
-    return leaders
+
+    # Filter leaders to those the linear emit pass will actually land on.
+    # `emit_function` iterates pc = fn.start_pc, advancing by ins.size of
+    # whatever decode_at_va returns. When the function range covers data
+    # walked from a toml-seeded false positive, the CFG walk above may
+    # land on PCs that the linear iteration skips over (because adjacent
+    # bytes happened to decode as a 4-byte ins in linear order vs two
+    # 2-byte ins from the CFG entry). Without this filter the emitter
+    # generates `goto bb_<unreachable-pc>` that gcc rejects with
+    # "label used but not defined".
+    linear_pcs: Set[int] = set()
+    lp = fn.start_pc
+    while lp < fn.end_pc:
+        linear_pcs.add(lp)
+        ins = rom.decode_at_va(lp)
+        if ins is None:
+            break
+        lp += max(ins.size, 2)
+    return {pc for pc in leaders if pc in linear_pcs}
 
 
 def emit_function(rom: RomImage, fn: FunctionRange,
@@ -706,6 +859,7 @@ def emit_full_c(rom: RomImage, fns: List[FunctionRange],
     parts.append(f"/* AUTOGENERATED by recompiler/v810/emitter.py. "
                  f"DO NOT EDIT — Rule 4. */")
     parts.append(f"/* module: {module_name}    functions: {len(fns)} */")
+    parts.append(f"#include <math.h>")
     parts.append(f"#include <stdint.h>")
     parts.append(f"#include \"cpu_state.h\"")
     parts.append(f"#include \"interrupts.h\"")
@@ -853,15 +1007,21 @@ def emit_header(fns: List[FunctionRange], module_name: str) -> str:
 
 
 def recompile_rom(rom: RomImage, *, module_name: str = "cart",
-                  function_limit: Optional[int] = None) -> CodegenResult:
+                  function_limit: Optional[int] = None,
+                  extra_seeds: Optional[Iterable[int]] = None) -> CodegenResult:
     """Top-level driver: discover functions, recompile up to
     `function_limit` of them (BFS-from-entry order), produce the
     three generated files.
 
+    `extra_seeds` is an optional list of additional function-entry
+    PCs to seed the CFG walker with. Pull these from the per-cart
+    `[functions]` toml when a function-pointer-table entry is
+    invisible to the static heuristic walker.
+
     Functions outside the limit are not emitted; calls to them via
     JAL/JR will hit `vb_dispatch`'s default arm and abort cleanly,
     surfacing the gap (per CLAUDE.md §0 no-stub policy)."""
-    fns_all = discover_functions(rom)
+    fns_all = discover_functions(rom, extra_seeds=extra_seeds)
     if not fns_all:
         return CodegenResult(files={}, function_count=0, instruction_count=0)
 

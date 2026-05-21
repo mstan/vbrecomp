@@ -421,6 +421,25 @@ static void handle_pad_state(long long id) {
     send_response(buf);
 }
 
+/* set_input pad=0xNNNN — set the active-high 16-bit pad mask.
+ * Works in --headless without a controller (main.cpp's per-frame
+ * keyboard/XInput handler leaves the pad untouched in that case);
+ * when the SDL window is open the keyboard handler will clobber
+ * this on the next loop iteration. */
+static void handle_set_input(long long id, const char* line) {
+    long long pad = 0;
+    if (!extract_int(line, "\"pad\"", &pad)) {
+        send_response("{\"ok\":false,\"error\":\"set_input requires 'pad' (16-bit mask)\"}");
+        return;
+    }
+    vb_input_set_pad((uint16_t)(pad & 0xFFFFu));
+    char buf[128];
+    snprintf(buf, sizeof(buf),
+             "{\"ok\":true,\"cmd\":\"set_input\",\"id\":%lld,\"pad\":\"0x%04X\"}",
+             id, vb_input_get_pad());
+    send_response(buf);
+}
+
 static void handle_irq_state(long long id) {
     char buf[256];
     snprintf(buf, sizeof(buf),
@@ -728,6 +747,7 @@ static void dispatch_line(char* line) {
     else if (strcmp(cmd, "psw_set") == 0)      handle_psw_set(id, line);
     else if (strcmp(cmd, "read_ram") == 0)     handle_read_ram(id, line);
     else if (strcmp(cmd, "pad_state") == 0)    handle_pad_state(id);
+    else if (strcmp(cmd, "set_input") == 0)    handle_set_input(id, line);
     else if (strcmp(cmd, "irq_state") == 0)    handle_irq_state(id);
     else if (strcmp(cmd, "irq_force") == 0)    handle_irq_force(id, line);
     else if (strcmp(cmd, "timer_state") == 0)  handle_timer_state(id);
