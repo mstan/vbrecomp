@@ -47,13 +47,24 @@ beetle-vb/           Clean upstream clone of mednafen-vb-libretro.
 build/               CMake build dir.
 ```
 
+## Platform support
+
+The runtime builds and runs natively on **Windows (MSVC/MinGW)**, **macOS
+(Apple Silicon & Intel)**, and **Linux**. There is no fiber/coroutine
+dependency — the recompiled code yields cooperatively via a step-budget
+counter — so no platform-specific scheduler shim is required. SDL2 provides
+the window, audio, and `SDL_GameController` gamepad input on every platform
+(`brew install sdl2` on macOS, the distro `libsdl2-dev` on Linux, the vendored
+dev pack on Windows). Fullscreen toggles with F11 / Alt+Enter / Cmd+F.
+
 ## Build (standalone, no game)
 
 ```bash
 python -m unittest discover recompiler/tests
-cmake -S . -B build
+# macOS/Linux: -G Ninja; Windows/MSYS2 as documented in the per-game README
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --target vb-runtime
-./build/runtime/vb-runtime.exe --port 4390
+./build/runtime/vb-runtime --port 4390      # vb-runtime.exe on Windows
 python tools/_ping.py --port 4390
 ```
 

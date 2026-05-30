@@ -11,6 +11,7 @@
 #define VB_RING_FRAME_H
 
 #include <stdint.h>
+#include <stddef.h>   /* size_t (not transitively pulled in by clang) */
 #include "cpu_state.h"
 
 #ifdef __cplusplus

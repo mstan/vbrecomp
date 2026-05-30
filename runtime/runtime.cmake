@@ -114,10 +114,10 @@ function(vb_add_runtime_target TARGET)
         target_compile_options(${TARGET} PRIVATE -Wall -Wextra -Wno-unused-parameter)
     endif()
 
-    # Sockets + XInput controller support on Windows.
+    # Winsock on Windows. Game-controller support is cross-platform via
+    # SDL_GameController (see main.cpp), so no XInput link is needed.
     if(WIN32)
-        target_link_libraries(${TARGET} PRIVATE ws2_32 xinput)
-        target_compile_definitions(${TARGET} PRIVATE VB_RUNTIME_HAVE_XINPUT=1)
+        target_link_libraries(${TARGET} PRIVATE ws2_32)
         # When building with MinGW (the project's primary toolchain),
         # statically link the gcc/stdc++/winpthread runtimes so the
         # release zip ships just vb-runtime.exe + SDL2.dll without
@@ -138,8 +138,12 @@ function(vb_add_runtime_target TARGET)
     # mode so the runtime still builds for TCP-only setups.
     # For MSVC release builds we ship a vendored SDL2 dev pack at
     # runtime/external/SDL2/; on MSYS2/mingw local builds the system
-    # find_package finds the toolchain's SDL2 directly.
-    list(APPEND CMAKE_PREFIX_PATH "${VB_RUNTIME_DIR}/external/SDL2/cmake")
+    # find_package finds the toolchain's SDL2 directly. On macOS/Linux use
+    # the system/Homebrew SDL2 only — the vendored pack is Windows-shaped
+    # (no .dylib/.a) and would shadow the real one.
+    if(WIN32)
+        list(APPEND CMAKE_PREFIX_PATH "${VB_RUNTIME_DIR}/external/SDL2/cmake")
+    endif()
     find_package(SDL2 QUIET)
     if(SDL2_FOUND)
         target_compile_definitions(${TARGET} PRIVATE VB_RUNTIME_HAVE_SDL=1)
