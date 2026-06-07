@@ -29,12 +29,6 @@
 #  include <SDL.h>
 #endif
 
-#if VB_RUNTIME_HAVE_XINPUT
-#  define WIN32_LEAN_AND_MEAN
-#  include <windows.h>
-#  include <xinput.h>
-#endif
-
 #ifndef VB_DEFAULT_DEBUG_PORT
 #define VB_DEFAULT_DEBUG_PORT 4390
 #endif
@@ -65,9 +59,10 @@ static void print_help(const char* argv0) {
         "  Q / E ........... L / R triggers\n"
         "  Enter / RShift .. Start / Select\n"
         "  TAB ............. Turbo (skip 50.27 Hz pacing)\n"
+        "  F11 / Alt+Enter . Toggle fullscreen\n"
         "  Esc ............. Quit\n"
         "\n"
-        "XInput (Xbox controller, player 1):\n"
+        "Gamepad (SDL game controller, player 1):\n"
         "  D-pad / L-stick . Left D-pad      R-stick ......... Right D-pad\n"
         "  A / B button .... A / B           LB / RB ......... L / R triggers\n"
         "  Start / Back .... Start / Select\n"
@@ -111,57 +106,85 @@ static uint16_t pad_from_keyboard(void) {
 }
 #endif  /* VB_RUNTIME_HAVE_SDL */
 
-#if VB_RUNTIME_HAVE_XINPUT
-/* Read player-1 XInput controller, return the same active-high VB
- * pad word as pad_from_keyboard. Mapping:
+#if VB_RUNTIME_HAVE_SDL
+/* Player-1 game controller, opened lazily and tracked across hotplug.
+ * SDL_GameController is cross-platform (XInput/DInput on Windows, IOKit
+ * on macOS, evdev on Linux), so this replaces the old Windows-only
+ * XInput path with one mapping that works everywhere. */
+static SDL_GameController* s_pad = nullptr;
+
+/* Open the first attached controller, if any and none is open yet. */
+static void gamepad_open_first(void) {
+    if (s_pad) return;
+    for (int i = 0; i < SDL_NumJoysticks(); ++i) {
+        if (SDL_IsGameController(i)) {
+            s_pad = SDL_GameControllerOpen(i);
+            if (s_pad) return;
+        }
+    }
+}
+
+/* React to SDL_CONTROLLERDEVICEADDED / REMOVED so hotplug works. */
+static void gamepad_handle_device_event(const SDL_Event& ev) {
+    if (ev.type == SDL_CONTROLLERDEVICEADDED) {
+        if (!s_pad) s_pad = SDL_GameControllerOpen(ev.cdevice.which);
+    } else if (ev.type == SDL_CONTROLLERDEVICEREMOVED) {
+        if (s_pad && ev.cdevice.which ==
+                SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(s_pad))) {
+            SDL_GameControllerClose(s_pad);
+            s_pad = nullptr;
+            gamepad_open_first();   /* fall back to another pad if present */
+        }
+    }
+}
+
+/* Read player 1, returning the same active-high VB pad word as
+ * pad_from_keyboard. Mapping:
  *   D-pad + left stick  -> Left D-pad   (left thumb)
  *   Right stick         -> Right D-pad  (right thumb)
- *   Xbox A / B          -> VB A / VB B  (same labels)
+ *   A / B               -> VB A / VB B
  *   LB / RB             -> L / R triggers
  *   Start / Back        -> Start / Select
- * Sticks use the standard XInput deadzones. Returns 0 when no
- * controller is connected. */
-static uint16_t pad_from_xinput(bool* out_connected) {
-    XINPUT_STATE st;
-    ZeroMemory(&st, sizeof(st));
-    if (XInputGetState(0, &st) != ERROR_SUCCESS) {
+ * Returns 0 with *out_connected=false when no controller is open. */
+static uint16_t pad_from_gamecontroller(bool* out_connected) {
+    if (!s_pad) {
         if (out_connected) *out_connected = false;
         return 0;
     }
     if (out_connected) *out_connected = true;
-    const WORD btn = st.Gamepad.wButtons;
+    SDL_GameController* c = s_pad;
     uint16_t pad = 0;
 
-    if (btn & XINPUT_GAMEPAD_DPAD_UP)        pad |= VB_PAD_LUP;
-    if (btn & XINPUT_GAMEPAD_DPAD_DOWN)      pad |= VB_PAD_LDOWN;
-    if (btn & XINPUT_GAMEPAD_DPAD_LEFT)      pad |= VB_PAD_LLEFT;
-    if (btn & XINPUT_GAMEPAD_DPAD_RIGHT)     pad |= VB_PAD_LRIGHT;
+    if (SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_DPAD_UP))    pad |= VB_PAD_LUP;
+    if (SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_DPAD_DOWN))  pad |= VB_PAD_LDOWN;
+    if (SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_DPAD_LEFT))  pad |= VB_PAD_LLEFT;
+    if (SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_DPAD_RIGHT)) pad |= VB_PAD_LRIGHT;
 
-    /* Left thumbstick → L D-pad (OR'd with D-pad). */
-    const SHORT lx = st.Gamepad.sThumbLX;
-    const SHORT ly = st.Gamepad.sThumbLY;
-    if (ly >  XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE) pad |= VB_PAD_LUP;
-    if (ly < -XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE) pad |= VB_PAD_LDOWN;
-    if (lx < -XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE) pad |= VB_PAD_LLEFT;
-    if (lx >  XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE) pad |= VB_PAD_LRIGHT;
+    /* Sticks. SDL axes are -32768..32767 with +Y pointing DOWN. */
+    constexpr Sint16 DZ = 12000;
+    const Sint16 lx = SDL_GameControllerGetAxis(c, SDL_CONTROLLER_AXIS_LEFTX);
+    const Sint16 ly = SDL_GameControllerGetAxis(c, SDL_CONTROLLER_AXIS_LEFTY);
+    if (ly < -DZ) pad |= VB_PAD_LUP;
+    if (ly >  DZ) pad |= VB_PAD_LDOWN;
+    if (lx < -DZ) pad |= VB_PAD_LLEFT;
+    if (lx >  DZ) pad |= VB_PAD_LRIGHT;
 
-    /* Right thumbstick → R D-pad. */
-    const SHORT rx = st.Gamepad.sThumbRX;
-    const SHORT ry = st.Gamepad.sThumbRY;
-    if (ry >  XINPUT_GAMEPAD_RIGHT_THUMB_DEADZONE) pad |= VB_PAD_RUP;
-    if (ry < -XINPUT_GAMEPAD_RIGHT_THUMB_DEADZONE) pad |= VB_PAD_RDOWN;
-    if (rx < -XINPUT_GAMEPAD_RIGHT_THUMB_DEADZONE) pad |= VB_PAD_RLEFT;
-    if (rx >  XINPUT_GAMEPAD_RIGHT_THUMB_DEADZONE) pad |= VB_PAD_RRIGHT;
+    const Sint16 rx = SDL_GameControllerGetAxis(c, SDL_CONTROLLER_AXIS_RIGHTX);
+    const Sint16 ry = SDL_GameControllerGetAxis(c, SDL_CONTROLLER_AXIS_RIGHTY);
+    if (ry < -DZ) pad |= VB_PAD_RUP;
+    if (ry >  DZ) pad |= VB_PAD_RDOWN;
+    if (rx < -DZ) pad |= VB_PAD_RLEFT;
+    if (rx >  DZ) pad |= VB_PAD_RRIGHT;
 
-    if (btn & XINPUT_GAMEPAD_A)              pad |= VB_PAD_A;
-    if (btn & XINPUT_GAMEPAD_B)              pad |= VB_PAD_B;
-    if (btn & XINPUT_GAMEPAD_LEFT_SHOULDER)  pad |= VB_PAD_LT;
-    if (btn & XINPUT_GAMEPAD_RIGHT_SHOULDER) pad |= VB_PAD_RT;
-    if (btn & XINPUT_GAMEPAD_START)          pad |= VB_PAD_START;
-    if (btn & XINPUT_GAMEPAD_BACK)           pad |= VB_PAD_SELECT;
+    if (SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_A))             pad |= VB_PAD_A;
+    if (SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_B))             pad |= VB_PAD_B;
+    if (SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_LEFTSHOULDER))  pad |= VB_PAD_LT;
+    if (SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_RIGHTSHOULDER)) pad |= VB_PAD_RT;
+    if (SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_START))         pad |= VB_PAD_START;
+    if (SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_BACK))          pad |= VB_PAD_SELECT;
     return pad;
 }
-#endif  /* VB_RUNTIME_HAVE_XINPUT */
+#endif  /* VB_RUNTIME_HAVE_SDL */
 
 #if VB_RUNTIME_HAVE_SDL
 /* SDL audio callback. Runs on SDL's audio thread; pulls the VSU
@@ -309,11 +332,14 @@ int main(int argc, char** argv) {
     uint32_t          tex_pixels[VB_RT_EYE_W * VB_RT_EYE_H * 2];
 
     if (!headless) {
-        if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO) != 0) {
+        if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO
+                     | SDL_INIT_GAMECONTROLLER) != 0) {
             std::fprintf(stderr, "vb-runtime: SDL_Init failed: %s — "
                                  "falling back to headless\n",
                          SDL_GetError());
             headless = true;
+        } else {
+            gamepad_open_first();
         }
     }
     if (!headless) {
@@ -329,8 +355,17 @@ int main(int argc, char** argv) {
         }
     }
     if (!headless) {
+#ifdef _WIN32
+        /* Preserved from the Windows build; on macOS/Linux let SDL pick its
+         * native backend (Metal on Apple Silicon). */
         SDL_SetHint(SDL_HINT_RENDER_DRIVER, "opengl");
-        ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_ACCELERATED);
+#endif
+        /* PRESENTVSYNC aligns presents to the display refresh to avoid
+         * scroll tearing; the manual pacer below still bounds the rate.
+         * Fall back progressively if a driver can't provide vsync/accel. */
+        ren = SDL_CreateRenderer(win, -1,
+                                 SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+        if (!ren) ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_ACCELERATED);
         if (!ren) ren = SDL_CreateRenderer(win, -1, 0);
         if (!ren) {
             std::fprintf(stderr, "vb-runtime: SDL_CreateRenderer failed: %s\n",
@@ -430,35 +465,42 @@ int main(int argc, char** argv) {
             SDL_Event ev;
             while (SDL_PollEvent(&ev)) {
                 if (ev.type == SDL_QUIT) { sdl_quit = true; break; }
-                if (ev.type == SDL_KEYDOWN
-                        && ev.key.keysym.sym == SDLK_ESCAPE) {
-                    sdl_quit = true;
-                    break;
+                if (ev.type == SDL_CONTROLLERDEVICEADDED ||
+                    ev.type == SDL_CONTROLLERDEVICEREMOVED) {
+                    gamepad_handle_device_event(ev);
+                }
+                if (ev.type == SDL_KEYDOWN) {
+                    if (ev.key.keysym.sym == SDLK_ESCAPE) {
+                        sdl_quit = true;
+                        break;
+                    }
+                    /* Fullscreen toggle: F11, Alt+Enter, or Cmd/Ctrl+F.
+                     * FULLSCREEN_DESKTOP keeps the desktop resolution; the
+                     * present loop's letterbox math scales the eye image. */
+                    const Uint16 mod = ev.key.keysym.mod;
+                    if (ev.key.keysym.sym == SDLK_F11 ||
+                        (ev.key.keysym.sym == SDLK_RETURN && (mod & KMOD_ALT)) ||
+                        (ev.key.keysym.sym == SDLK_f && (mod & (KMOD_GUI | KMOD_CTRL)))) {
+                        Uint32 is_fs = SDL_GetWindowFlags(win) &
+                                       SDL_WINDOW_FULLSCREEN_DESKTOP;
+                        SDL_SetWindowFullscreen(win,
+                            is_fs ? 0 : SDL_WINDOW_FULLSCREEN_DESKTOP);
+                    }
                 }
             }
             if (sdl_quit) break;
         }
 #endif
-        /* Compose pad from every available input source. Rules:
-         *   - Window open: keyboard is the authority; XInput OR's in.
-         *     TCP press/set_input is clobbered every frame.
-         *   - Headless + controller present: XInput drives.
-         *   - Headless + no controller: leave pad alone so the TCP
-         *     press/set_input commands persist.
-         */
-        bool xinput_connected = false;
-        uint16_t xinput_pad = 0;
-#if VB_RUNTIME_HAVE_XINPUT
-        xinput_pad = pad_from_xinput(&xinput_connected);
-#endif
+        /* Compose the pad. With a window open, the keyboard is the
+         * authority and the game controller OR's in; this clobbers TCP
+         * press/set_input every frame. Controller support requires SDL,
+         * so a --headless run is driven purely by TCP commands. */
 #if VB_RUNTIME_HAVE_SDL
         if (!headless) {
-            vb_input_set_pad((uint16_t)(pad_from_keyboard() | xinput_pad));
-        } else
-#endif
-        if (xinput_connected) {
-            vb_input_set_pad(xinput_pad);
+            uint16_t controller_pad = pad_from_gamecontroller(nullptr);
+            vb_input_set_pad((uint16_t)(pad_from_keyboard() | controller_pad));
         }
+#endif
 
         if (!rom_path) {
             std::this_thread::sleep_for(2ms);
@@ -595,6 +637,7 @@ int main(int argc, char** argv) {
     }
 
 #if VB_RUNTIME_HAVE_SDL
+    if (s_pad) { SDL_GameControllerClose(s_pad); s_pad = nullptr; }
     if (aud) { SDL_PauseAudioDevice(aud, 1); SDL_CloseAudioDevice(aud); }
     if (tex) SDL_DestroyTexture(tex);
     if (ren) SDL_DestroyRenderer(ren);
