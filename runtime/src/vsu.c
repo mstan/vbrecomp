@@ -23,9 +23,11 @@
  */
 #include "vsu.h"
 
+#include <stdbool.h>
 #include <string.h>
 
 #include "stub_abort.h"
+#include "vsu_shadow.h"
 
 /* ------------------------- Register state ------------------------- */
 
@@ -114,6 +116,8 @@ void vb_vsu_init(void) {
 
     s_ring_head = s_ring_tail = 0;
     s_sample_cycle_residue = 0;
+
+    vb_vsu_shadow_reset();
 }
 
 void vb_vsu_shutdown(void) {}
@@ -401,15 +405,50 @@ static void vsu_step_channel(int ch, int32_t clocks) {
     }
 }
 
+/* Verified-enhancement shadow: float re-render of one channel. Mirrors
+ * vsu_channel_output EXACTLY in waveform/envelope/level selection, but keeps
+ * the per-channel gain in full precision (no `(envelope*level)>>3 + 1`
+ * 4-bit requantize) and accumulates in float. Same notes, same envelopes,
+ * same timing — only the gain quantization differs. Present-time only; this
+ * never feeds the canon path nor the verify oracle (see vsu_shadow.h). */
+static inline void vsu_channel_output_shadow(int ch, float* left, float* right) {
+    if (!(s_intl_control[ch] & 0x80u)) {
+        *left = *right = 0.0f;
+        return;
+    }
+    int wd;
+    if (ch == 5) {
+        wd = (int)s_noise_latcher;
+    } else {
+        if (s_ram_address[ch] > 4) wd = 0;
+        else wd = s_wave_data[s_ram_address[ch]][s_wave_pos[ch]];
+    }
+    wd -= 0x20;
+    /* Full-precision gain: envelope*level/8 (the canon truncates to int and
+     * adds 1; the shadow keeps the fractional gain and the silence floor). */
+    float fl = (float)(s_envelope[ch] * s_left_level[ch]) / 8.0f;
+    float fr = (float)(s_envelope[ch] * s_right_level[ch]) / 8.0f;
+    *left  = (float)wd * fl;
+    *right = (float)wd * fr;
+}
+
 /* ---------------------- Sample emission ------------------------- */
 
 static inline void vsu_emit_one_sample(void) {
     int32_t mix_l = 0, mix_r = 0;
+    float   sh_l = 0.0f, sh_r = 0.0f;
+    const bool shadow_on = vb_vsu_shadow_enabled();
     for (int ch = 0; ch < 6; ++ch) {
         int l, r;
         vsu_channel_output(ch, &l, &r);
         mix_l += l;
         mix_r += r;
+        if (shadow_on) {
+            float fl, fr;
+            vsu_channel_output_shadow(ch, &fl, &fr);
+            sh_l += fl;
+            sh_r += fr;
+        }
     }
     /* Per-channel peak ~= +/- 31 * 30 = +/- 930. Six channels max
      * out near +/- 5580. Scale by 4 maps the loudest plausible mix
@@ -421,14 +460,32 @@ static inline void vsu_emit_one_sample(void) {
     if (mix_r >  32767) mix_r =  32767;
     if (mix_r < -32768) mix_r = -32768;
 
+    int16_t out_l = (int16_t)mix_l;
+    int16_t out_r = (int16_t)mix_r;
+
+    /* Verified-enhancement shadow (default OFF). Feed the canon mix
+     * (pre-clip numeric value) and the float re-render (same *4 scale) to the
+     * differential verifier; it substitutes the shadow only after a proven
+     * window and reverts loudly otherwise. When OFF, this is a no-op and the
+     * stored bytes are byte-identical to the canon path above. */
+    if (shadow_on) {
+        int16_t s_out_l, s_out_r;
+        if (vb_vsu_shadow_substitute((float)(mix_l), (float)(mix_r),
+                                     sh_l * 4.0f, sh_r * 4.0f,
+                                     &s_out_l, &s_out_r)) {
+            out_l = s_out_l;
+            out_r = s_out_r;
+        }
+    }
+
     /* Drop the oldest frame when the consumer hasn't drained
      * (happens during `--headless` runs with no SDL audio device). */
     size_t next_head = (s_ring_head + 1) & VSU_RING_MASK;
     if (next_head == s_ring_tail) {
         s_ring_tail = (s_ring_tail + 1) & VSU_RING_MASK;
     }
-    s_ring_l[s_ring_head] = (int16_t)mix_l;
-    s_ring_r[s_ring_head] = (int16_t)mix_r;
+    s_ring_l[s_ring_head] = out_l;
+    s_ring_r[s_ring_head] = out_r;
     s_ring_head = next_head;
 }
 
