@@ -1,27 +1,27 @@
-"""Dump lit-pixel coordinates from a 32bpp BMP so we can see WHERE
+"""Dump lit-pixel coordinates from a screenshot PNG so we can see WHERE
 the content is. Also reports the bounding box."""
-import struct
 import sys
 from pathlib import Path
+
+from _imgio import load_png, luma as _luma
 
 
 def main(argv):
     if len(argv) != 1:
-        print("usage: _lit_map.py path.bmp")
+        print("usage: _lit_map.py path.png")
         return 2
-    raw = Path(argv[0]).read_bytes()
-    pixel_off = struct.unpack_from("<I", raw, 10)[0]
-    w = struct.unpack_from("<i", raw, 18)[0]
-    h = abs(struct.unpack_from("<i", raw, 22)[0])
+    w, h, px = load_png(Path(argv[0]))
 
     lit = []
     for y in range(h):
         for x in range(w):
-            i = pixel_off + (y * w + x) * 4
-            b, g, r, _ = raw[i:i + 4]
-            luma = (r * 299 + g * 587 + b * 114) // 1000
-            if luma > 4:
-                lit.append((x, y, r, g, b, luma))
+            p = px[y * w + x]
+            r = (p >> 16) & 0xFF
+            g = (p >> 8) & 0xFF
+            b = p & 0xFF
+            lv = _luma(p)
+            if lv > 4:
+                lit.append((x, y, r, g, b, lv))
 
     if not lit:
         print("0 lit pixels")

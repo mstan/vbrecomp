@@ -20,6 +20,8 @@
 #include "input.h"
 #include "interrupts.h"
 #include "memory.h"
+#include "png_write.h"
+#include "vsu_shadow.h"
 #include "ring_frame.h"
 #include "timer.h"
 #include "vip.h"
@@ -299,53 +301,6 @@ static void handle_timer_state(long long id) {
     send_response(buf);
 }
 
-/* Minimal BMP writer (BI_RGB 32bpp, top-down via negative height). Used
- * by the screenshot command. The format is intentionally trivial — a
- * BITMAPFILEHEADER + BITMAPINFOHEADER + raw BGRA pixels. */
-static int write_bmp_32bpp(const char* path, int w, int h,
-                           const uint32_t* argb) {
-    FILE* f = fopen(path, "wb");
-    if (!f) return -1;
-    uint32_t pixel_bytes = (uint32_t)(w * h * 4);
-    uint32_t file_size   = 54u + pixel_bytes;
-    uint8_t header[54] = {0};
-    /* BITMAPFILEHEADER */
-    header[0] = 'B'; header[1] = 'M';
-    header[2]  = (uint8_t)(file_size      );
-    header[3]  = (uint8_t)(file_size >>  8);
-    header[4]  = (uint8_t)(file_size >> 16);
-    header[5]  = (uint8_t)(file_size >> 24);
-    header[10] = 54;
-    /* BITMAPINFOHEADER */
-    header[14] = 40;
-    header[18] = (uint8_t)(w      );
-    header[19] = (uint8_t)(w >>  8);
-    header[20] = (uint8_t)(w >> 16);
-    header[21] = (uint8_t)(w >> 24);
-    /* Negative height for top-down. */
-    int32_t neg_h = -h;
-    header[22] = (uint8_t)((uint32_t)neg_h      );
-    header[23] = (uint8_t)((uint32_t)neg_h >>  8);
-    header[24] = (uint8_t)((uint32_t)neg_h >> 16);
-    header[25] = (uint8_t)((uint32_t)neg_h >> 24);
-    header[26] = 1;                          /* planes */
-    header[28] = 32;                         /* bpp */
-    fwrite(header, 1, sizeof(header), f);
-    /* BMP stores BGRA, our buffer is ARGB → swap on write. */
-    for (int i = 0; i < w * h; ++i) {
-        uint32_t p = argb[i];
-        uint8_t bgra[4] = {
-            (uint8_t)(p      ),  /* B */
-            (uint8_t)(p >>  8),  /* G */
-            (uint8_t)(p >> 16),  /* R */
-            (uint8_t)(p >> 24),  /* A */
-        };
-        fwrite(bgra, 1, 4, f);
-    }
-    fclose(f);
-    return 0;
-}
-
 static void handle_screenshot(long long id, const char* line) {
     char path[256] = {0};
     long long eye = 0;
@@ -353,7 +308,7 @@ static void handle_screenshot(long long id, const char* line) {
     extract_int(line, "\"eye\"", &eye);
     if (!path[0]) {
         snprintf(path, sizeof(path),
-                 (eye ? "vb-runtime-eye1.bmp" : "vb-runtime-eye0.bmp"));
+                 (eye ? "vb-runtime-eye1.png" : "vb-runtime-eye0.png"));
     }
     uint32_t* buf = (uint32_t*)malloc(384u * 224u * 4u);
     if (!buf) {
@@ -361,7 +316,7 @@ static void handle_screenshot(long long id, const char* line) {
         return;
     }
     vb_vip_render_framebuffer((int)eye, buf);
-    int rc = write_bmp_32bpp(path, 384, 224, buf);
+    int rc = vb_write_png_32bpp(path, 384, 224, buf);
     free(buf);
     char body[384];
     if (rc != 0) {
@@ -449,6 +404,66 @@ static void handle_irq_state(long long id) {
              id, vb_irq_pending(), vb_irq_in_service(),
              vb_irq_highest_pending_level());
     send_response(buf);
+}
+
+/* Append `s` to *p as a JSON string body, escaping the characters JSON
+ * requires (", \, and control chars). Advances *p. */
+static void json_escape_append(char** p, const char* s) {
+    char* q = *p;
+    for (; *s; ++s) {
+        unsigned char c = (unsigned char)*s;
+        if (c == '"' || c == '\\') { *q++ = '\\'; *q++ = (char)c; }
+        else if (c == '\n')        { *q++ = '\\'; *q++ = 'n'; }
+        else if (c == '\r')        { *q++ = '\\'; *q++ = 'r'; }
+        else if (c == '\t')        { *q++ = '\\'; *q++ = 't'; }
+        else if (c < 0x20)         { q += sprintf(q, "\\u%04x", c); }
+        else                       { *q++ = (char)c; }
+    }
+    *p = q;
+}
+
+/* Query the always-on VSU shadow status ring (prove/degrade transitions +
+ * current substitution state). Replaces the old stderr DEGRADED/proven log;
+ * the probe reads the ring for the window of interest, never arms it. */
+static void handle_audio_shadow_state(long long id) {
+    VbVsuShadowStatus st;
+    vb_vsu_shadow_get_status(&st);
+
+    /* Header + fixed fields ~320B; each event ~ 80B + escaped reason (<=160*2
+     * worst case). Budget generously. */
+    size_t bodysz = 512 + (size_t)st.n_events * (96 + 2 * 160);
+    char* body = (char*)malloc(bodysz);
+    if (!body) { send_response("{\"ok\":false,\"error\":\"oom\"}"); return; }
+
+    char* p = body;
+    p += sprintf(p,
+        "{\"ok\":true,\"cmd\":\"audio_shadow_state\",\"id\":%lld,"
+        "\"enabled\":%s,\"substituting\":%s,"
+        "\"last_r\":%.4f,\"last_ratio\":%.4f,\"gain\":%.4f,"
+        "\"samples_seen\":%llu,\"engage_count\":%llu,\"degrade_count\":%llu,"
+        "\"events\":[",
+        id,
+        st.enabled ? "true" : "false",
+        st.substituting ? "true" : "false",
+        (double)st.last_r, (double)st.last_ratio, (double)st.gain,
+        (unsigned long long)st.samples_seen,
+        (unsigned long long)st.engage_count,
+        (unsigned long long)st.degrade_count);
+    for (uint32_t i = 0; i < st.n_events; ++i) {
+        const VbVsuShadowEvent* e = &st.events[i];
+        p += sprintf(p,
+            "%s{\"seq\":%llu,\"sample\":%llu,\"kind\":\"%s\","
+            "\"r\":%.4f,\"ratio\":%.4f,\"gain\":%.4f,\"reason\":\"",
+            i ? "," : "",
+            (unsigned long long)e->seq, (unsigned long long)e->sample,
+            e->kind == VB_VSU_SHADOW_EV_ENGAGE ? "engage" : "degrade",
+            (double)e->r, (double)e->ratio, (double)e->gain);
+        json_escape_append(&p, e->reason);
+        p += sprintf(p, "\"}");
+    }
+    p += sprintf(p, "]}");
+    send_response(body);
+    free(body);
 }
 
 static void handle_memory_map(long long id) {
@@ -753,6 +768,7 @@ static void dispatch_line(char* line) {
     else if (strcmp(cmd, "timer_state") == 0)  handle_timer_state(id);
     else if (strcmp(cmd, "vip_state") == 0)    handle_vip_state(id);
     else if (strcmp(cmd, "screenshot") == 0)   handle_screenshot(id, line);
+    else if (strcmp(cmd, "audio_shadow_state") == 0) handle_audio_shadow_state(id);
     else if (strcmp(cmd, "memory_map") == 0)   handle_memory_map(id);
     else if (strcmp(cmd, "wtrace_stats") == 0) handle_wtrace_stats(id);
     else if (strcmp(cmd, "wtrace_dump") == 0)  handle_wtrace_dump(id, line);

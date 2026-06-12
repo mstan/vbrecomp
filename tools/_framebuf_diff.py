@@ -2,8 +2,8 @@
 
 Per CLAUDE.md Rule 14 the two processes are independent — we sample
 state and diff. This tool:
-  1. Asks vb-runtime to dump its current display-FB to a .bmp
-  2. Asks vb-beetle to dump its current libretro framebuffer to a .bmp
+  1. Asks vb-runtime to dump its current display-FB to a PNG
+  2. Asks vb-beetle to dump its current libretro framebuffer to a PNG
   3. Loads both BMPs, compares pixel-by-pixel for the overlapping
      384×224 left-eye region
   4. Reports total differing pixels + first divergent (x, y) + a
@@ -21,9 +21,10 @@ from __future__ import annotations
 import argparse
 import json
 import socket
-import struct
 import sys
 from pathlib import Path
+
+from _imgio import load_png
 
 
 def _send(host: str, port: int, cmd: dict, timeout: float = 5.0) -> dict:
@@ -36,32 +37,6 @@ def _send(host: str, port: int, cmd: dict, timeout: float = 5.0) -> dict:
                 break
             data += chunk
     return json.loads(data.decode("ascii", errors="replace").strip())
-
-
-def _load_bmp(path: Path) -> tuple[int, int, list[int]]:
-    """Read a BI_RGB 32bpp BMP and return (w, h, pixels[]) with each
-    pixel as 0xAARRGGBB. Tolerates positive or negative height."""
-    raw = path.read_bytes()
-    if len(raw) < 54 or raw[:2] != b"BM":
-        raise ValueError(f"{path}: not a BMP")
-    pixel_off = struct.unpack_from("<I", raw, 10)[0]
-    w = struct.unpack_from("<i", raw, 18)[0]
-    h = struct.unpack_from("<i", raw, 22)[0]
-    bpp = struct.unpack_from("<H", raw, 28)[0]
-    if bpp != 32:
-        raise ValueError(f"{path}: expected 32bpp, got {bpp}")
-    flipped = h > 0   # positive = bottom-up
-    abs_h = abs(h)
-    px = []
-    for i in range(w * abs_h):
-        b, g, r, a = raw[pixel_off + i * 4: pixel_off + i * 4 + 4]
-        px.append((a << 24) | (r << 16) | (g << 8) | b)
-    if flipped:
-        # reverse row order
-        rows = [px[i * w:(i + 1) * w] for i in range(abs_h)]
-        rows.reverse()
-        px = [p for row in rows for p in row]
-    return w, abs_h, px
 
 
 def _luma(p: int) -> int:
@@ -78,10 +53,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--oracle-port",  type=int, default=4391)
     p.add_argument("--tolerance", type=int, default=0,
                    help="per-channel luma tolerance (0 = exact)")
-    p.add_argument("--runtime-path", default="vb-runtime-eye0.bmp")
-    p.add_argument("--oracle-path",  default="vb-beetle-fb.bmp")
+    p.add_argument("--runtime-path", default="vb-runtime-eye0.png")
+    p.add_argument("--oracle-path",  default="vb-beetle-fb.png")
     p.add_argument("--keep", action="store_true",
-                   help="don't delete the .bmp files after diffing")
+                   help="don't delete the screenshot files after diffing")
     p.add_argument("--timeout", type=float, default=5.0)
     args = p.parse_args(argv)
 
@@ -105,8 +80,8 @@ def main(argv: list[str] | None = None) -> int:
     if not or_.get("ok"):
         print(f"oracle returned error: {or_}", file=sys.stderr); return 4
 
-    rt_w, rt_h, rt_px = _load_bmp(Path(args.runtime_path))
-    or_w, or_h, or_px = _load_bmp(Path(args.oracle_path))
+    rt_w, rt_h, rt_px = load_png(Path(args.runtime_path))
+    or_w, or_h, or_px = load_png(Path(args.oracle_path))
 
     if rt_w != 384 or rt_h != 224:
         print(f"runtime: unexpected dims {rt_w}x{rt_h}", file=sys.stderr); return 5

@@ -31,6 +31,7 @@
 #include <string.h>
 
 #include "vb_beetle.h"
+#include "png_write.h"
 
 #if defined(_WIN32)
 #  include <winsock2.h>
@@ -276,52 +277,10 @@ static void handle_get_registers(long long id) {
     send_response(buf);
 }
 
-/* BMP writer — mirrors the runtime side (debug_server.c) so the two
- * processes produce comparable .bmp files. */
-static int beetle_write_bmp_32bpp(const char* path, int w, int h,
-                                  const uint32_t* argb) {
-    FILE* f = fopen(path, "wb");
-    if (!f) return -1;
-    uint32_t pixel_bytes = (uint32_t)(w * h * 4);
-    uint32_t file_size   = 54u + pixel_bytes;
-    uint8_t header[54] = {0};
-    header[0] = 'B'; header[1] = 'M';
-    header[2]  = (uint8_t)(file_size      );
-    header[3]  = (uint8_t)(file_size >>  8);
-    header[4]  = (uint8_t)(file_size >> 16);
-    header[5]  = (uint8_t)(file_size >> 24);
-    header[10] = 54;
-    header[14] = 40;
-    header[18] = (uint8_t)(w      );
-    header[19] = (uint8_t)(w >>  8);
-    header[20] = (uint8_t)(w >> 16);
-    header[21] = (uint8_t)(w >> 24);
-    int32_t neg_h = -h;
-    header[22] = (uint8_t)((uint32_t)neg_h      );
-    header[23] = (uint8_t)((uint32_t)neg_h >>  8);
-    header[24] = (uint8_t)((uint32_t)neg_h >> 16);
-    header[25] = (uint8_t)((uint32_t)neg_h >> 24);
-    header[26] = 1;
-    header[28] = 32;
-    fwrite(header, 1, sizeof(header), f);
-    for (int i = 0; i < w * h; ++i) {
-        uint32_t p = argb[i];
-        uint8_t bgra[4] = {
-            (uint8_t)(p      ),
-            (uint8_t)(p >>  8),
-            (uint8_t)(p >> 16),
-            (uint8_t)(p >> 24),
-        };
-        fwrite(bgra, 1, 4, f);
-    }
-    fclose(f);
-    return 0;
-}
-
 static void handle_screenshot(long long id, const char* line) {
     char path[256] = {0};
     extract_str(line, "\"path\"", path, sizeof(path));
-    if (!path[0]) snprintf(path, sizeof(path), "vb-beetle-fb.bmp");
+    if (!path[0]) snprintf(path, sizeof(path), "vb-beetle-fb.png");
 
     const uint32_t* pixels = NULL;
     unsigned w = 0, h = 0;
@@ -335,7 +294,7 @@ static void handle_screenshot(long long id, const char* line) {
         send_response(body);
         return;
     }
-    int rc = beetle_write_bmp_32bpp(path, (int)w, (int)h, pixels);
+    int rc = vb_write_png_32bpp(path, (int)w, (int)h, pixels);
     char body[384];
     if (rc != 0) {
         snprintf(body, sizeof(body),
