@@ -16,7 +16,8 @@ Allowed; Load-Bearing HLE Is Not"):
    output and the verify oracle. The shadow is never ground truth.
 2. The shadow is continuously, differentially checked against the canon stream
    and substitutes only after a proven window.
-3. It reverts loudly (logs DEGRADED) the instant it stops matching.
+3. It reverts loudly (records a DEGRADE transition in the TCP-queryable shadow
+   status ring) the instant it stops matching.
 4. It is opt-in and present-time, off by default; with it off the output is
    byte-identical (frame bytes / audio bytes / vb-beetle compares stay on the
    raw canon).
@@ -65,8 +66,13 @@ thing being diffed.
 - **Audio shadow glue:** `runtime/src/vsu_shadow.c`
   - `vb_vsu_shadow_enabled()` — env gate `VBRECOMP_AUDIO_SHADOW` (default OFF).
   - `vb_vsu_shadow_substitute()` — drives `shadow_verifier_judge`, substitutes
-    when `proven`, prints `[DEGRADED]` on revert and `[vsu_shadow] proven` on
-    engage.
+    when `proven`, and records an `engage`/`degrade` transition into the
+    always-on shadow status ring (`vb_vsu_shadow_get_status`) on each edge.
+  - **No stderr/printf** (CLAUDE.md Rule 3): the prove/revert contract is
+    surfaced over TCP. Query the runtime debug server (port 4390) with
+    `{"cmd":"audio_shadow_state"}` — it returns `enabled`, `substituting`,
+    `last_r`/`last_ratio`/`gain`, `engage_count`/`degrade_count`, and the recent
+    transition ring (each `degrade` carries the verifier's revert `reason`).
 - **Canon video present:** `runtime/src/vip.c`
   - `vb_vip_render_framebuffer()` (`vip.c:993`) — unpacks 2bpp → `bv` (0..255
     BRT cache) → `s_color_lut[bv]` (1/2.2 gamma) → red channel. The pack line

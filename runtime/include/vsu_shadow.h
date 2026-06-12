@@ -52,12 +52,54 @@ bool vb_vsu_shadow_enabled(void);
  * outputs untouched and returns false (caller stores the canon bytes —
  * byte-identical).
  *
- * On a proven→paused transition it logs a single DEGRADED line to stderr and
- * stops substituting until re-proven. Never becomes the oracle: the canon
- * pair it is fed remains the ground truth being diffed. */
+ * On a proven→paused transition it records a DEGRADED event in the always-on
+ * shadow status ring (queryable via the TCP `audio_shadow_state` command — see
+ * vb_vsu_shadow_get_status) and stops substituting until re-proven. Never
+ * becomes the oracle: the canon pair it is fed remains the ground truth being
+ * diffed. No stderr/printf — per CLAUDE.md Rule 3 all inspection is via TCP. */
 bool vb_vsu_shadow_substitute(float canon_l, float canon_r,
                               float shadow_l, float shadow_r,
                               int16_t* out_l, int16_t* out_r);
+
+/* ── Always-on status ring (replaces the old stderr DEGRADED/proven log) ──
+ *
+ * Every proven→substituting (ENGAGE) and proven→paused (DEGRADE) transition is
+ * recorded continuously into a small ring from the moment the process starts.
+ * The TCP debug server QUERIES this ring for the window of interest; it never
+ * arms recording at probe time (global always-on-ring-buffer rule). */
+#define VB_VSU_SHADOW_EVENT_RING 32u
+
+typedef enum {
+  VB_VSU_SHADOW_EV_ENGAGE  = 1, /* proven: began substituting the float mix */
+  VB_VSU_SHADOW_EV_DEGRADE = 2, /* reverted to the canon integer mix */
+} VbVsuShadowEventKind;
+
+typedef struct {
+  uint64_t seq;          /* monotonic event index (1-based) */
+  uint64_t sample;       /* output-sample index when it occurred */
+  int      kind;         /* VbVsuShadowEventKind */
+  float    r;            /* envelope correlation at the transition */
+  float    ratio;        /* level ratio at the transition */
+  float    gain;         /* calibrated output gain at the transition */
+  char     reason[160];  /* DEGRADE reason ("" for ENGAGE) */
+} VbVsuShadowEvent;
+
+typedef struct {
+  bool     enabled;        /* VBRECOMP_AUDIO_SHADOW gate */
+  bool     substituting;   /* currently proven AND substituting */
+  float    last_r;         /* most-recent correlation */
+  float    last_ratio;     /* most-recent level ratio */
+  float    gain;           /* current calibrated gain */
+  uint64_t samples_seen;   /* output samples fed to the shadow */
+  uint64_t engage_count;   /* total ENGAGE transitions */
+  uint64_t degrade_count;  /* total DEGRADE transitions */
+  uint32_t n_events;       /* events below, oldest first (<= ring size) */
+  VbVsuShadowEvent events[VB_VSU_SHADOW_EVENT_RING];
+} VbVsuShadowStatus;
+
+/* Snapshot the current shadow state + recent transition ring. Safe to call at
+ * any time (e.g. from the TCP debug server thread). */
+void vb_vsu_shadow_get_status(VbVsuShadowStatus* out);
 
 #ifdef __cplusplus
 }

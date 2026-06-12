@@ -1,25 +1,14 @@
-"""ASCII-thumbnail a 32bpp BMP so we can compare framebuffers
+"""ASCII-thumbnail a screenshot PNG so we can compare framebuffers
 without rendering. Used for verification in headless sessions."""
-import struct
 import sys
 from pathlib import Path
 
+from _imgio import load_png, luma
 
-def load_bmp_luma(path: Path):
-    raw = path.read_bytes()
-    pixel_off = struct.unpack_from("<I", raw, 10)[0]
-    w = struct.unpack_from("<i", raw, 18)[0]
-    h_raw = struct.unpack_from("<i", raw, 22)[0]
-    h = abs(h_raw)
-    rows = []
-    for y in range(h):
-        row = []
-        for x in range(w):
-            i = pixel_off + (y * w + x) * 4
-            b, g, r, _ = raw[i:i + 4]
-            luma = (r * 299 + g * 587 + b * 114) // 1000
-            row.append(luma)
-        rows.append(row)
+
+def load_fb_luma(path: Path):
+    w, h, px = load_png(path)
+    rows = [[luma(px[y * w + x]) for x in range(w)] for y in range(h)]
     return w, h, rows
 
 
@@ -46,11 +35,11 @@ def ascii_thumb(rows, scale=8):
 
 def main(argv):
     if not argv:
-        print("usage: _thumb.py path.bmp [path.bmp ...]")
+        print("usage: _thumb.py path.png [path.png ...]")
         return 2
     for p in argv:
         path = Path(p)
-        w, h, rows = load_bmp_luma(path)
+        w, h, rows = load_fb_luma(path)
         lit = sum(1 for row in rows for px in row if px > 16)
         total = w * h
         print(f"\n=== {path} ({w}x{h}, "

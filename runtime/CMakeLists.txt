@@ -66,6 +66,7 @@ if(BEETLE_VB_LIB)
             ${CMAKE_CURRENT_SOURCE_DIR}/src/beetle_main.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/src/beetle_libretro.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/src/beetle_debug_server.c
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/png_write.c
             ${CMAKE_SOURCE_DIR}/beetle-vb/libretro-common/compat/compat_strl.c
         )
         target_include_directories(vb-beetle PRIVATE
