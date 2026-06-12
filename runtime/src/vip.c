@@ -29,6 +29,7 @@
 #include <string.h>
 
 #include "interrupts.h"
+#include "red_lut.h"
 #include "stub_abort.h"
 
 #define VIP_WINDOW_SIZE 0x80000u
@@ -1015,8 +1016,16 @@ void vb_vip_render_framebuffer(int eye, uint32_t* argb_out) {
             uint32_t r = s_color_lut[bv];
             /* Virtual Boy LEDs are red-only; G=B=0 to match what the
              * real hardware emits (and what the Beetle oracle outputs
-             * via libretro's XRGB8888 framebuffer). */
-            argb_out[y * 384 + x] = 0xFF000000u | (r << 16);
+             * via libretro's XRGB8888 framebuffer).
+             *
+             * Present-time only: route the gamma-corrected red value
+             * through the opt-in red-LED present LUT. Default (RAW) is
+             * an exact passthrough — `vb_red_lut_map(r)` returns
+             * `0xFF000000 | (r<<16)`, so the verified/oracle-compared
+             * frame is byte-identical unless VBRECOMP_SCREEN opts in.
+             * This never feeds the verify path (raw `r` stays the
+             * oracle); see red_lut.h. */
+            argb_out[y * 384 + x] = vb_red_lut_map((int)r);
         }
     }
 }

@@ -31,6 +31,11 @@ function(vb_add_runtime_target TARGET)
         ${VB_RUNTIME_DIR}/src/memory.c
         ${VB_RUNTIME_DIR}/src/vip.c
         ${VB_RUNTIME_DIR}/src/vsu.c
+        # Verified-enhancement shadow QoL layer (opt-in, default OFF;
+        # byte-identical with VBRECOMP_AUDIO_SHADOW / VBRECOMP_SCREEN unset).
+        ${VB_RUNTIME_DIR}/src/audio_shadow.c
+        ${VB_RUNTIME_DIR}/src/vsu_shadow.c
+        ${VB_RUNTIME_DIR}/src/red_lut.c
         ${VB_RUNTIME_DIR}/src/input.c
         ${VB_RUNTIME_DIR}/src/interrupts.c
         ${VB_RUNTIME_DIR}/src/timer.c
