@@ -13,6 +13,18 @@
  *       { "name": "title", "detect": { "all": [25, 26] }, "worlds": [...] }
  *   ] }
  *
+ * Horizontal regions (columns). A world rule may instead split the world's
+ * on-screen bounding box HORIZONTALLY before applying vertical bands, giving a
+ * 2-D grid of regions. This colors a horizontal row of distinct sprites that
+ * the VIP draws under one world index (e.g. a character-roster strip):
+ *   { "world": 30, "label": "roster", "cols": [
+ *       { "hx": 64,  "ramp": [...mario...] },        // rel-x 0..64
+ *       { "hx": 128, "bands": [ {hi,ramp}, ... ] },  // rel-x 64..128, then banded
+ *       { "hx": 256, "ramp": [...] } ] }             // cols cover rel-x 0..256
+ * Each column carries either a flat "ramp" or its own vertical "bands", exactly
+ * like a world rule. A rule with no "cols" is one full-width column (hx=256) —
+ * so the flat and banded forms above are unchanged.
+ *
  * A "detect" may also carry an optional ram predicate that gates the scene on
  * a game RAM byte: "detect": { "all": [22], "ram": { "addr": "0x0500203A",
  * "eq": 1 } } matches only when that byte equals 1. This lets one on-screen
@@ -43,9 +55,11 @@
 #define MAX_SCENES 16
 #define MAX_RULES  64   /* per scene */
 #define MAX_BANDS  8
+#define MAX_COLS   12   /* horizontal regions per rule (e.g. a roster strip) */
 
 typedef struct { int hi; uint32_t ramp[4]; } Band;        /* hi = rel-y upper bound 0..256 */
-typedef struct { int world; int nbands; Band bands[MAX_BANDS]; } Rule;
+typedef struct { int hx; int nbands; Band bands[MAX_BANDS]; } Col; /* hx = rel-x upper bound 0..256 */
+typedef struct { int world; int ncols; Col cols[MAX_COLS]; } Rule;
 typedef struct {
     char     name[24];
     uint32_t detect_all;   /* every one of these world indices must be present */
@@ -156,6 +170,31 @@ static const char* find_in(const char* hay, const char* end, const char* needle)
     return (p && p < end) ? p : NULL;
 }
 
+/* Parse all "ramp" arrays in [start, end) into col as vertical bands. Each
+ * band's upper bound is the nearest preceding "hi" in [start, end) (256 if
+ * none -> a single flat band). The last band is stretched to 256 so every
+ * rel-y is covered. */
+static void parse_bands(const char* start, const char* end, Col* col) {
+    col->nbands = 0;
+    const char* r = find_in(start, end, "\"ramp\"");
+    while (r && col->nbands < MAX_BANDS) {
+        int hi = 256;
+        const char* hk = NULL;
+        for (const char* s = find_in(start, r, "\"hi\""); s;
+             s = find_in(s + 1, r, "\"hi\"")) hk = s;
+        if (hk) hi = int_after(hk);
+        uint32_t ramp[4];
+        if (parse_ramp(r, end, ramp)) {
+            Band* b = &col->bands[col->nbands++];
+            b->hi = hi;
+            for (int i = 0; i < 4; ++i) b->ramp[i] = ramp[i];
+        }
+        r = find_in(r + 1, end, "\"ramp\"");
+    }
+    if (col->nbands > 0 && col->bands[col->nbands - 1].hi < 256)
+        col->bands[col->nbands - 1].hi = 256;
+}
+
 /* Parse all "world" rule objects in [start, end) into scene. */
 static void parse_rules(const char* start, const char* end, Scene* sc) {
     const char* w = find_in(start, end, "\"world\"");
@@ -164,30 +203,38 @@ static void parse_rules(const char* start, const char* end, Scene* sc) {
         const char* span_end = wnext ? wnext : end;
 
         Rule* rl = &sc->rules[sc->nrules];
-        rl->world  = int_after(w);
-        rl->nbands = 0;
+        rl->world = int_after(w);
+        rl->ncols = 0;
 
-        /* Each "ramp" in this span is a band; its upper bound is the nearest
-         * preceding "hi" in the span (or 256 if none -> flat). */
-        const char* r = find_in(w, span_end, "\"ramp\"");
-        while (r && rl->nbands < MAX_BANDS) {
-            int hi = 256;
-            const char* hk = NULL;
-            for (const char* s = find_in(w, r, "\"hi\""); s;
-                 s = find_in(s + 1, r, "\"hi\"")) hk = s;
-            if (hk) hi = int_after(hk);
-            uint32_t ramp[4];
-            if (parse_ramp(r, span_end, ramp)) {
-                Band* b = &rl->bands[rl->nbands++];
-                b->hi = hi;
-                for (int i = 0; i < 4; ++i) b->ramp[i] = ramp[i];
+        const char* cols = find_in(w, span_end, "\"cols\"");
+        if (cols) {
+            /* Horizontal regions: each "hx" starts a column whose span runs to
+             * the next "hx" (or the world-span end). Within a column the
+             * "ramp"/"hi" keys are vertical bands, exactly as in the
+             * single-column case. ("hx" never matches "hi"/"world".) */
+            const char* hx = find_in(cols, span_end, "\"hx\"");
+            while (hx && rl->ncols < MAX_COLS) {
+                const char* hxnext = find_in(hx + 1, span_end, "\"hx\"");
+                const char* col_end = hxnext ? hxnext : span_end;
+                Col* col = &rl->cols[rl->ncols];
+                col->hx = int_after(hx);
+                parse_bands(hx, col_end, col);
+                if (col->nbands > 0) rl->ncols++;
+                hx = hxnext;
             }
-            r = find_in(r + 1, span_end, "\"ramp\"");
+            /* ensure the last column reaches the right edge so all rel-x is
+             * covered */
+            if (rl->ncols > 0 && rl->cols[rl->ncols - 1].hx < 256)
+                rl->cols[rl->ncols - 1].hx = 256;
+        } else {
+            /* One full-width column: a flat "ramp" or vertical "bands". */
+            Col* col = &rl->cols[0];
+            col->hx = 256;
+            parse_bands(w, span_end, col);
+            if (col->nbands > 0) rl->ncols = 1;
         }
-        if (rl->nbands > 0) {
-            /* ensure the last band reaches the bottom so all rel-y is covered */
-            if (rl->bands[rl->nbands - 1].hi < 256)
-                rl->bands[rl->nbands - 1].hi = 256;
+
+        if (rl->ncols > 0) {
             sc->nrules++;
             s_total_rules++;
         }
@@ -383,20 +430,33 @@ const char* vb_recolor_current_scene(void) {
     return s_scenes[s_cur].name;
 }
 
-int vb_recolor_world_pixel(int world, int rel_num, int rel_den, int value,
+int vb_recolor_world_pixel(int world, int relx_num, int relx_den,
+                           int rely_num, int rely_den, int value,
                            uint32_t* argb_out) {
     if (s_cur < 0 || s_cur >= s_nscenes) return 0;
     const Scene* sc = &s_scenes[s_cur];
     const Rule* rl = NULL;
     for (int i = 0; i < sc->nrules; ++i)
         if (sc->rules[i].world == world) { rl = &sc->rules[i]; break; }
-    if (!rl || rl->nbands == 0) return 0;
-    int rel = (rel_den > 0) ? (rel_num * 256) / rel_den : 0;
-    if (rel < 0) rel = 0;
-    if (rel > 255) rel = 255;
-    for (int b = 0; b < rl->nbands; ++b) {
-        if (rel < rl->bands[b].hi) {
-            *argb_out = rl->bands[b].ramp[value & 3];
+    if (!rl || rl->ncols == 0) return 0;
+
+    /* Pick the horizontal column covering rel-x, then the vertical band
+     * covering rel-y within it. A single-column rule (ncols==1, hx==256)
+     * collapses to the pure vertical-band case. */
+    int relx = (relx_den > 0) ? (relx_num * 256) / relx_den : 0;
+    if (relx < 0) relx = 0;
+    if (relx > 255) relx = 255;
+    const Col* col = NULL;
+    for (int c = 0; c < rl->ncols; ++c)
+        if (relx < rl->cols[c].hx) { col = &rl->cols[c]; break; }
+    if (!col || col->nbands == 0) return 0;
+
+    int rely = (rely_den > 0) ? (rely_num * 256) / rely_den : 0;
+    if (rely < 0) rely = 0;
+    if (rely > 255) rely = 255;
+    for (int b = 0; b < col->nbands; ++b) {
+        if (rely < col->bands[b].hi) {
+            *argb_out = col->bands[b].ramp[value & 3];
             return 1;
         }
     }

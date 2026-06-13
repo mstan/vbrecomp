@@ -1297,9 +1297,14 @@ void vb_vip_render_framebuffer_recolored(int eye, uint32_t* argb_out) {
     const uint8_t*  fb   = &s_vip_mem[base];
     const uint16_t* attr = s_attr_fb[s_display_fb & 1][eye ? 1 : 0];
 
-    /* Pre-pass: per-world (attr value 1..32) vertical bounding box + count. */
-    int wy0[33], wy1[33], wcnt[33];
-    for (int i = 0; i < 33; ++i) { wy0[i] = 1 << 20; wy1[i] = -1; wcnt[i] = 0; }
+    /* Pre-pass: per-world (attr value 1..32) on-screen bounding box + count.
+     * Both axes: vertical (wy0/wy1) feeds the recolor band model, horizontal
+     * (wx0/wx1) feeds its column model (a row of distinct sprites drawn under
+     * one world index, e.g. a character roster). */
+    int wy0[33], wy1[33], wx0[33], wx1[33], wcnt[33];
+    for (int i = 0; i < 33; ++i) {
+        wy0[i] = wx0[i] = 1 << 20; wy1[i] = wx1[i] = -1; wcnt[i] = 0;
+    }
     for (int y = 0; y < 224; ++y) {
         const uint16_t* row = &attr[y * 384];
         for (int x = 0; x < 384; ++x) {
@@ -1307,6 +1312,8 @@ void vb_vip_render_framebuffer_recolored(int eye, uint32_t* argb_out) {
             if (a == 0 || a > 32) continue;
             if (y < wy0[a]) wy0[a] = y;
             if (y > wy1[a]) wy1[a] = y;
+            if (x < wx0[a]) wx0[a] = x;
+            if (x > wx1[a]) wx1[a] = x;
             wcnt[a]++;
         }
     }
@@ -1331,8 +1338,10 @@ void vb_vip_render_framebuffer_recolored(int eye, uint32_t* argb_out) {
             uint16_t a  = attr[y * 384 + x];
             uint32_t out;
             if (a != 0 && a <= 32 && wy1[a] >= 0 &&
-                vb_recolor_world_pixel((int)a - 1, y - wy0[a],
-                                       wy1[a] - wy0[a] + 1, (int)v, &out)) {
+                vb_recolor_world_pixel((int)a - 1,
+                                       x - wx0[a], wx1[a] - wx0[a] + 1,
+                                       y - wy0[a], wy1[a] - wy0[a] + 1,
+                                       (int)v, &out)) {
                 argb_out[y * 384 + x] = out;
             } else {
                 int32_t bv = s_brt_cache[v];

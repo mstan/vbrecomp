@@ -71,12 +71,16 @@ int vb_recolor_trace_get(int i, uint32_t* seq, uint32_t* mask, int* scene);
 
 /* Present-time pixel color for a world-attributed pixel, resolved within the
  * scene chosen by the last vb_recolor_select_scene call. `world` is the world
- * index 0..31; `rel_num`/`rel_den` give the pixel's vertical position within
- * that world's on-screen bounding box (rel = rel_num/rel_den in [0,1));
- * `value` is the 2bpp brightness 0..3. If the current scene has a rule for
- * `world` (and a band covering rel), writes the ARGB and returns 1; else
- * returns 0 (caller renders faithfully). */
-int  vb_recolor_world_pixel(int world, int rel_num, int rel_den, int value,
+ * index 0..31. `relx_num`/`relx_den` and `rely_num`/`rely_den` give the
+ * pixel's horizontal and vertical position within that world's on-screen
+ * bounding box (each rel = num/den in [0,1)); the rule's horizontal columns
+ * select on rel-x, then its vertical bands select on rel-y. `value` is the
+ * 2bpp brightness 0..3. If the current scene has a rule for `world` (and a
+ * column+band covering the pixel), writes the ARGB and returns 1; else returns
+ * 0 (caller renders faithfully). A rule with no horizontal split is one
+ * full-width column, so rel-x is ignored for the common vertical-only case. */
+int  vb_recolor_world_pixel(int world, int relx_num, int relx_den,
+                            int rely_num, int rely_den, int value,
                             uint32_t* argb_out);
 
 #ifdef __cplusplus
