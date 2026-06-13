@@ -485,6 +485,36 @@ static void handle_recolor_reload(long long id) {
     send_response(body);
 }
 
+/* Dump the always-on scene-selection decision ring (last `n`, default 64).
+ * Each entry: {seq, mask (active-world bitmask, world i = bit i), scene index
+ * + name (-1/"" = no match -> faithful frame)}. Query after a flicker to see
+ * why frames chose nothing instead of arming a trace. */
+static void handle_recolor_trace(long long id, const char* line) {
+    long long n = 64;
+    extract_int(line, "\"n\"", &n);
+    int len = vb_recolor_trace_len();
+    if (n < 1) n = 1;
+    if (n > len) n = len;
+    char* buf = (char*)malloc((size_t)(n * 96 + 128));
+    if (!buf) { send_response("{\"ok\":false,\"error\":\"oom\"}"); return; }
+    char* p = buf; char* end = buf + (size_t)(n * 96 + 128);
+    p += snprintf(p, (size_t)(end - p),
+                  "{\"ok\":true,\"cmd\":\"recolor_trace\",\"id\":%lld,\"entries\":[", id);
+    int first = 1;
+    for (int i = len - (int)n; i < len; ++i) {
+        uint32_t seq = 0, mask = 0; int scene = -1;
+        if (!vb_recolor_trace_get(i, &seq, &mask, &scene)) continue;
+        p += snprintf(p, (size_t)(end - p),
+                      "%s{\"seq\":%u,\"mask\":\"0x%08X\",\"scene\":%d,\"name\":\"%s\"}",
+                      first ? "" : ",", seq, mask, scene,
+                      scene >= 0 ? vb_recolor_scene_name(scene) : "");
+        first = 0;
+    }
+    snprintf(p, (size_t)(end - p), "]}");
+    send_response(buf);
+    free(buf);
+}
+
 static void handle_psw_set(long long id, const char* line) {
     if (!s_cpu) {
         send_response("{\"ok\":false,\"error\":\"no cpu state attached\"}");
@@ -947,6 +977,7 @@ static void dispatch_line(char* line) {
     else if (strcmp(cmd, "overrides_state") == 0) handle_overrides_state(id);
     else if (strcmp(cmd, "recolor_state") == 0) handle_recolor_state(id);
     else if (strcmp(cmd, "recolor_reload") == 0) handle_recolor_reload(id);
+    else if (strcmp(cmd, "recolor_trace") == 0) handle_recolor_trace(id, line);
     else if (strcmp(cmd, "world_map") == 0)    handle_world_map(id, line);
     else if (strcmp(cmd, "audio_shadow_state") == 0) handle_audio_shadow_state(id);
     else if (strcmp(cmd, "memory_map") == 0)   handle_memory_map(id);

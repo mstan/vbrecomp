@@ -64,6 +64,25 @@ static int    s_total_rules = 0;
 static int    s_cur = -1;       /* scene chosen by the last select_scene */
 static int    s_loaded = 0;
 
+/* Hysteresis: the VB redraws sprites on alternating frames, so a world (e.g.
+ * the near tennis player, world 22) drops out of ~10% of frames even while the
+ * scene is visually unchanged. Without smoothing those frames match no scene
+ * and render full faithful red — a harsh flicker. So when a frame matches
+ * nothing, hold the previously-selected scene for up to HOLD_MISS consecutive
+ * misses (≈ a few frames) before reverting to faithful. A real screen change
+ * misses for far longer than HOLD_MISS, so it still reverts. */
+#define HOLD_MISS 16
+static int    s_miss = 0;       /* consecutive no-match select calls */
+
+/* Always-on decision ring: every vb_recolor_select_scene call records the
+ * active-world mask it saw and the scene it chose (-1 = none -> faithful frame).
+ * Probes QUERY this for the window of interest instead of arming a trace. */
+#define TRACE_N 512
+typedef struct { uint32_t seq; uint32_t mask; int16_t scene; } TraceEnt;
+static TraceEnt s_trace[TRACE_N];
+static uint32_t s_trace_head = 0;   /* next write slot */
+static uint32_t s_trace_seq  = 0;   /* monotonic call counter */
+
 static const char* overrides_dir(void) {
     const char* env = getenv("VBRECOMP_OVERRIDES");
     return (env && *env) ? env : NULL;
@@ -272,17 +291,19 @@ void vb_recolor_init(void) {
     s_nscenes = 0;
     s_total_rules = 0;
     s_cur = -1;
+    s_miss = 0;
     load_pack();
 }
 
 void vb_recolor_shutdown(void) {
-    s_nscenes = 0; s_total_rules = 0; s_cur = -1; s_loaded = 0; s_active = -1;
+    s_nscenes = 0; s_total_rules = 0; s_cur = -1; s_miss = 0; s_loaded = 0; s_active = -1;
 }
 
 void vb_recolor_reload(void) {
     s_nscenes = 0;
     s_total_rules = 0;
     s_cur = -1;
+    s_miss = 0;
     load_pack();
     /* Re-resolve active state so a pack authored live (empty -> non-empty)
      * turns recolor on without a restart. */
@@ -292,7 +313,16 @@ void vb_recolor_reload(void) {
 int vb_recolor_entry_count(void) { return s_total_rules; }
 int vb_recolor_scene_count(void) { return s_nscenes; }
 
+static void trace_record(uint32_t mask, int scene) {
+    TraceEnt* e = &s_trace[s_trace_head];
+    e->seq = s_trace_seq++;
+    e->mask = mask;
+    e->scene = (int16_t)scene;
+    s_trace_head = (s_trace_head + 1) % TRACE_N;
+}
+
 int vb_recolor_select_scene(uint32_t mask) {
+    int matched = -1;
     for (int i = 0; i < s_nscenes; ++i) {
         const Scene* sc = &s_scenes[i];
         if ((mask & sc->detect_all) != sc->detect_all ||
@@ -306,11 +336,46 @@ int vb_recolor_select_scene(uint32_t mask) {
             vb_memory_dump(sc->ram_addr, &b, 1);
             if ((int)b != sc->ram_eq) continue;
         }
-        s_cur = i;
-        return i;
+        matched = i;
+        break;
     }
-    s_cur = -1;
-    return -1;
+
+    int chosen;
+    if (matched >= 0) {
+        chosen = matched;       /* positive match always wins immediately */
+        s_miss = 0;
+    } else if (s_cur >= 0 && s_miss < HOLD_MISS) {
+        chosen = s_cur;         /* transient dropout: hold the last scene */
+        s_miss++;
+    } else {
+        chosen = -1;            /* sustained miss: revert to faithful */
+        s_miss++;
+    }
+
+    s_cur = chosen;
+    trace_record(mask, chosen);
+    return chosen;
+}
+
+/* Decision-ring introspection (i=0 oldest available .. len-1 newest). */
+int vb_recolor_trace_len(void) {
+    return (s_trace_seq < TRACE_N) ? (int)s_trace_seq : TRACE_N;
+}
+int vb_recolor_trace_get(int i, uint32_t* seq, uint32_t* mask, int* scene) {
+    int len = vb_recolor_trace_len();
+    if (i < 0 || i >= len) return 0;
+    /* oldest entry is head-len (mod N) when full, else slot 0 */
+    uint32_t base = (s_trace_seq < TRACE_N) ? 0 : s_trace_head;
+    uint32_t idx = (base + (uint32_t)i) % TRACE_N;
+    if (seq)   *seq = s_trace[idx].seq;
+    if (mask)  *mask = s_trace[idx].mask;
+    if (scene) *scene = s_trace[idx].scene;
+    return 1;
+}
+
+const char* vb_recolor_scene_name(int idx) {
+    if (idx < 0 || idx >= s_nscenes) return "";
+    return s_scenes[idx].name;
 }
 
 const char* vb_recolor_current_scene(void) {

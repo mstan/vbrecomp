@@ -60,6 +60,15 @@ int  vb_recolor_select_scene(uint32_t active_world_mask);
 /* Name of the currently-selected scene, or "" if none (introspection). */
 const char* vb_recolor_current_scene(void);
 
+/* Scene name by index, or "" if out of range (introspection). */
+const char* vb_recolor_scene_name(int idx);
+
+/* Always-on scene-selection decision ring (i=0 oldest .. len-1 newest). Each
+ * vb_recolor_select_scene call appends {seq, active-world mask, chosen scene
+ * (-1=none)}. Query the window of interest after the fact — do not arm. */
+int vb_recolor_trace_len(void);
+int vb_recolor_trace_get(int i, uint32_t* seq, uint32_t* mask, int* scene);
+
 /* Present-time pixel color for a world-attributed pixel, resolved within the
  * scene chosen by the last vb_recolor_select_scene call. `world` is the world
  * index 0..31; `rel_num`/`rel_den` give the pixel's vertical position within
