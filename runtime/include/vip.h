@@ -78,6 +78,13 @@ void     vb_vip_write32(uint32_t addr, uint32_t v);
  * be layered as a P5 cosmetic flag. */
 void vb_vip_render_framebuffer(int eye, uint32_t* argb_out);
 
+/* Opt-in present-time full-screen recolor (experiment): same as
+ * vb_vip_render_framebuffer but maps each pixel through the per-frame recolor
+ * LUT (see recolor.h). Faithful red for pixels with no pack entry. Used by the
+ * present loop / screenshot only when the recolor pack is active; the function
+ * above stays the byte-identical oracle path. */
+void vb_vip_render_framebuffer_recolored(int eye, uint32_t* argb_out);
+
 /* Returns the current brightness cache value (0..255) for 2bpp
  * framebuffer pixel value 0..3. */
 int32_t vb_vip_brightness(int v);
@@ -108,6 +115,12 @@ int      vb_vip_display_active(void);
 int      vb_vip_display_fb(void);
 int      vb_vip_drawing_fb(void);
 uint64_t vb_vip_cycles(void);
+
+/* Recolor-identification introspection (experiment): the displayed eye's
+ * attribution buffer (384*224 of char_no|palette<<11; 0 = none) and the content
+ * hash of a CHR slot. Populated only when capture/recolor attribution is on. */
+const uint16_t* vb_vip_attr_buffer(int eye);
+uint32_t        vb_vip_char_hash(uint32_t char_no);
 
 #ifdef __cplusplus
 }

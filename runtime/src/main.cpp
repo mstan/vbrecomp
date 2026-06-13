@@ -14,6 +14,7 @@
 #include <thread>
 
 #include "asset_pack.h"
+#include "recolor.h"
 #include "cpu_state.h"
 #include "debug_server.h"
 #include "input.h"
@@ -597,10 +598,21 @@ int main(int argc, char** argv) {
             last_present_cycles = cpu.cycles;
             vb_watchdog_beat(VB_WD_PRESENT, dispatch_pc, cpu.cycles, ++present_count);
 
-            vb_vip_render_framebuffer(0, &tex_pixels[0]);
-            if (stereo) {
-                vb_vip_render_framebuffer(1,
-                    &tex_pixels[VB_RT_EYE_H * VB_RT_EYE_W]);
+            /* Opt-in full-screen recolor uses the recolored present path;
+             * otherwise the faithful render. */
+            const bool recolor = vb_recolor_active();
+            if (recolor) {
+                vb_vip_render_framebuffer_recolored(0, &tex_pixels[0]);
+                if (stereo) {
+                    vb_vip_render_framebuffer_recolored(1,
+                        &tex_pixels[VB_RT_EYE_H * VB_RT_EYE_W]);
+                }
+            } else {
+                vb_vip_render_framebuffer(0, &tex_pixels[0]);
+                if (stereo) {
+                    vb_vip_render_framebuffer(1,
+                        &tex_pixels[VB_RT_EYE_H * VB_RT_EYE_W]);
+                }
             }
 
             /* Opt-in override overlays (experiment): composite the colored

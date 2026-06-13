@@ -35,6 +35,7 @@ function(vb_add_runtime_target TARGET)
         ${VB_RUNTIME_DIR}/src/vip_capture.c
         ${VB_RUNTIME_DIR}/src/asset_pack.c
         ${VB_RUNTIME_DIR}/src/png_read.c
+        ${VB_RUNTIME_DIR}/src/recolor.c
         ${VB_RUNTIME_DIR}/src/vsu.c
         # Verified-enhancement shadow QoL layer (opt-in, default OFF;
         # byte-identical with VBRECOMP_AUDIO_SHADOW / VBRECOMP_SCREEN unset).

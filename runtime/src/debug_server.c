@@ -27,6 +27,7 @@
 #include "vip.h"
 #include "vip_capture.h"
 #include "asset_pack.h"
+#include "recolor.h"
 #include "watchdog.h"
 #include "wtrace.h"
 #include "fntrace.h"
@@ -318,7 +319,14 @@ static void handle_screenshot(long long id, const char* line) {
         send_response("{\"ok\":false,\"error\":\"oom\"}");
         return;
     }
-    vb_vip_render_framebuffer((int)eye, buf);
+    /* Opt-in full-screen recolor render (experiment); default is the faithful
+     * raw render so the oracle compare path stays byte-identical. */
+    long long recolor = 0;
+    extract_int(line, "\"recolor\"", &recolor);
+    if (recolor && vb_recolor_active())
+        vb_vip_render_framebuffer_recolored((int)eye, buf);
+    else
+        vb_vip_render_framebuffer((int)eye, buf);
     /* Opt-in: composite the override overlays into the captured frame so the
      * enhanced result can be inspected headlessly. Default (no "overlay"
      * field) stays the faithful raw render — keeps the oracle compare path
@@ -406,6 +414,83 @@ static void handle_overrides_state(long long id) {
              "\"overlay0\":%d,\"overlay1\":%d}",
              id, vb_overrides_active(), vb_overrides_image_count(), slot,
              vb_overlay_count(0), vb_overlay_count(1));
+    send_response(body);
+}
+
+/* List the distinct source tiles currently on screen (for recolor
+ * identification): for each attribution id present in the displayed eye's
+ * buffer, report its content hash, char_no, palette, pixel count, and bounding
+ * box — top N by pixel count. Requires attribution active (capture or recolor).*/
+static void handle_attr_hashes(long long id, const char* line) {
+    long long eye = 0, topn = 48;
+    extract_int(line, "\"eye\"", &eye);
+    extract_int(line, "\"top\"", &topn);
+    if (topn < 1) topn = 1;
+    if (topn > 256) topn = 256;
+
+    const uint16_t* attr = vb_vip_attr_buffer((int)(eye & 1));
+    static int cnt[8192];
+    static short x0[8192], y0[8192], x1[8192], y1[8192];
+    memset(cnt, 0, sizeof(cnt));
+    for (int y = 0; y < 224; y++) {
+        for (int x = 0; x < 384; x++) {
+            uint16_t a = attr[y * 384 + x];
+            if (!a) continue;
+            if (cnt[a] == 0) { x0[a] = x1[a] = (short)x; y0[a] = y1[a] = (short)y; }
+            else {
+                if (x < x0[a]) x0[a] = (short)x;
+                if (x > x1[a]) x1[a] = (short)x;
+                if (y < y0[a]) y0[a] = (short)y;
+                if (y > y1[a]) y1[a] = (short)y;
+            }
+            cnt[a]++;
+        }
+    }
+
+    char* buf = (char*)malloc(96 * 1024);
+    if (!buf) { send_response("{\"ok\":false,\"error\":\"oom\"}"); return; }
+    char* p = buf;
+    char* end = buf + 96 * 1024;
+    p += snprintf(p, (size_t)(end - p),
+                  "{\"ok\":true,\"cmd\":\"attr_hashes\",\"id\":%lld,\"eye\":%lld,"
+                  "\"tiles\":[", id, eye);
+    int used = 0;
+    for (long long k = 0; k < topn; ++k) {
+        int best = -1, bestc = 0;
+        for (int a = 1; a < 8192; ++a) if (cnt[a] > bestc) { bestc = cnt[a]; best = a; }
+        if (best < 0) break;
+        uint32_t hash = vb_vip_char_hash((uint32_t)(best & 0x7FF));
+        p += snprintf(p, (size_t)(end - p),
+                      "%s{\"hash\":\"%08x\",\"char\":%d,\"palette\":%d,"
+                      "\"count\":%d,\"x0\":%d,\"y0\":%d,\"x1\":%d,\"y1\":%d}",
+                      used ? "," : "", hash, best & 0x7FF, (best >> 11) & 3,
+                      cnt[best], x0[best], y0[best], x1[best], y1[best]);
+        cnt[best] = 0;  /* consume */
+        used++;
+        if (end - p < 256) break;
+    }
+    snprintf(p, (size_t)(end - p), "]}");
+    send_response(buf);
+    free(buf);
+}
+
+/* Introspect the opt-in recolor layer (TCP, not printf). */
+static void handle_recolor_state(long long id) {
+    char body[160];
+    snprintf(body, sizeof(body),
+             "{\"ok\":true,\"cmd\":\"recolor_state\",\"id\":%lld,"
+             "\"active\":%d,\"entries\":%d}",
+             id, vb_recolor_active(), vb_recolor_entry_count());
+    send_response(body);
+}
+
+/* Re-read the recolor pack file at runtime (author live, then reload). */
+static void handle_recolor_reload(long long id) {
+    vb_recolor_reload();
+    char body[160];
+    snprintf(body, sizeof(body),
+             "{\"ok\":true,\"cmd\":\"recolor_reload\",\"id\":%lld,\"entries\":%d}",
+             id, vb_recolor_entry_count());
     send_response(body);
 }
 
@@ -869,6 +954,9 @@ static void dispatch_line(char* line) {
     else if (strcmp(cmd, "watchdog") == 0)     handle_watchdog(id);
     else if (strcmp(cmd, "capture_dump") == 0) handle_capture_dump(id, line);
     else if (strcmp(cmd, "overrides_state") == 0) handle_overrides_state(id);
+    else if (strcmp(cmd, "recolor_state") == 0) handle_recolor_state(id);
+    else if (strcmp(cmd, "recolor_reload") == 0) handle_recolor_reload(id);
+    else if (strcmp(cmd, "attr_hashes") == 0)  handle_attr_hashes(id, line);
     else if (strcmp(cmd, "audio_shadow_state") == 0) handle_audio_shadow_state(id);
     else if (strcmp(cmd, "memory_map") == 0)   handle_memory_map(id);
     else if (strcmp(cmd, "wtrace_stats") == 0) handle_wtrace_stats(id);

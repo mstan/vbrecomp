@@ -34,6 +34,7 @@
 #include "stub_abort.h"
 #include "vip_capture.h"
 #include "asset_pack.h"
+#include "recolor.h"
 
 #define VIP_WINDOW_SIZE 0x80000u
 #define VIP_REGISTER_BASE 0x5F800u
@@ -209,6 +210,19 @@ static void vip_capture_pass(void);
  * drawn. Gated on VBRECOMP_OVERRIDES at the call site. */
 static void vip_resolve_overrides(void);
 
+/* Forward decl — opt-in recolor LUT build (experiment). Hashes each in-use CHR
+ * slot and installs per-(char,palette) RGB ramps for the frame. Gated on the
+ * recolor pack at the call site. */
+static void vip_resolve_recolor(void);
+
+/* Recolor attribution (experiment): per-pixel id = char_no | (palette<<11) of
+ * the source tile, captured during draw and packed into a full-res per-eye
+ * buffer (double-buffered by drawing_fb). Written only when recolor is active;
+ * the 2bpp framebuffer output is identical either way (separate memory), so a
+ * faithful run is byte-identical. */
+static int      s_attr_on;
+static uint16_t s_attr_fb[2][2][384 * 224];  /* [fb_slot][eye][y*384 + x] */
+
 /* Per-OAM suppression for matched OBJ tiles: 0 = draw faithfully; otherwise
  * (char_no + 1) of the matched tile, re-checked in draw_obj so a mid-frame
  * OAM mutation falls back to the original 2bpp render. All-zero (and never
@@ -250,6 +264,8 @@ void vb_vip_init(void) {
     s_vip_cycles = 0;
     vb_capture_init();      /* allocates rings only if VBRECOMP_CAPTURE is set */
     vb_overrides_init();    /* loads pack only if VBRECOMP_OVERRIDES is set */
+    vb_recolor_init();      /* loads recolor pack only if present */
+    s_attr_on = vb_recolor_active() || vb_capture_active();
     memset(s_obj_suppress, 0, sizeof(s_obj_suppress));
     vip_check_irq();
 }
@@ -329,6 +345,11 @@ static void vip_advance_column(void) {
                      * overlay list for this drawing frame. Gated on
                      * VBRECOMP_OVERRIDES; faithful when off. */
                     if (vb_overrides_active()) vip_resolve_overrides();
+
+                    /* Opt-in recolor: build the per-(char,palette) RGB LUT for
+                     * this frame from the content-hash pack. Gated; faithful
+                     * when off. */
+                    if (vb_recolor_active()) vip_resolve_recolor();
                 }
                 s_game_frame_counter = 0;
             }
@@ -671,7 +692,7 @@ static inline int32_t sign_x_s32(uint32_t v, int x) {
     return (int32_t)(((v & mask) ^ sgn) - sgn);
 }
 
-static void draw_bg(uint8_t* target, uint16_t real_y, int lr,
+static void draw_bg(uint8_t* target, uint16_t* attr_target, uint16_t real_y, int lr,
                     uint8_t bgmap_base_raw, int overplane,
                     uint16_t overplane_char,
                     int32_t source_x, int32_t source_y,
@@ -724,17 +745,20 @@ static void draw_bg(uint8_t* target, uint16_t real_y, int lr,
         uint32_t vflip_xor       = (bgsc & 0x1000u) ? 7u : 0u;
         uint32_t char_sub_y      = vflip_xor ^ ((uint32_t)source_y & 0x7u);
 
+        uint16_t attr_id = (uint16_t)((char_no & 0x7FFu) | (palette_sel << 11));
         if (!(source_x_u & 7u) && (x + 7) <= final_x) {
             uint32_t pixels = chr[char_no * 8u + char_sub_y];
             if (bgsc & 0x2000u) {
                 for (int sub = 0; sub < 8; ++sub) {
                     uint32_t v = (pixels >> (14 - sub * 2)) & 3u;
-                    if (v) target[x + sub] = s_gplt_cache[palette_sel][v];
+                    if (v) { target[x + sub] = s_gplt_cache[palette_sel][v];
+                             if (attr_target) attr_target[x + sub] = attr_id; }
                 }
             } else {
                 for (int sub = 0; sub < 8; ++sub) {
                     uint32_t v = (pixels >> (sub * 2)) & 3u;
-                    if (v) target[x + sub] = s_gplt_cache[palette_sel][v];
+                    if (v) { target[x + sub] = s_gplt_cache[palette_sel][v];
+                             if (attr_target) attr_target[x + sub] = attr_id; }
                 }
             }
             x += 7;
@@ -742,13 +766,14 @@ static void draw_bg(uint8_t* target, uint16_t real_y, int lr,
         } else {
             uint32_t char_sub_x = hflip_xor ^ (source_x_u & 0x7u);
             uint8_t pixel = (uint8_t)((chr[char_no * 8u + char_sub_y] >> (char_sub_x * 2u)) & 0x3u);
-            if (pixel) target[x] = s_gplt_cache[palette_sel][pixel];
+            if (pixel) { target[x] = s_gplt_cache[palette_sel][pixel];
+                         if (attr_target) attr_target[x] = attr_id; }
             source_x++;
         }
     }
 }
 
-static void draw_affine(uint8_t* target, uint16_t real_y, int lr,
+static void draw_affine(uint8_t* target, uint16_t* attr_target, uint16_t real_y, int lr,
                         uint32_t param_base, uint32_t bgmap_base,
                         int overplane_mode, uint16_t overplane_char,
                         uint32_t scx, uint32_t scy,
@@ -821,7 +846,9 @@ static void draw_affine(uint8_t* target, uint16_t real_y, int lr,
             uint32_t char_sub_y = vflip_xor ^ ((source_y >> 9) & 0x7u);
             uint32_t char_sub_x = hflip_xor ^ ((source_x >> 8) & 0xEu);
             uint32_t pixel = (chr[((bgsc & 0x7FFu) * 8u) | char_sub_y] >> char_sub_x) & 0x3u;
-            if (pixel) target[x] = s_gplt_cache[bgsc >> 14][pixel];
+            if (pixel) { target[x] = s_gplt_cache[bgsc >> 14][pixel];
+                         if (attr_target) attr_target[x] =
+                             (uint16_t)((bgsc & 0x7FFu) | ((bgsc >> 14) << 11)); }
             source_x = (uint32_t)((int32_t)source_x + dx);
         }
     } else {
@@ -843,14 +870,16 @@ static void draw_affine(uint8_t* target, uint16_t real_y, int lr,
             uint32_t char_sub_y = vflip_xor ^ ((source_y >> 9) & 0x7u);
             uint32_t char_sub_x = hflip_xor ^ ((source_x >> 9) & 0x7u);
             uint8_t pixel = (uint8_t)((chr[char_no * 8u + char_sub_y] >> (char_sub_x * 2u)) & 0x3u);
-            if (pixel) target[x] = s_gplt_cache[palette][pixel];
+            if (pixel) { target[x] = s_gplt_cache[palette][pixel];
+                         if (attr_target) attr_target[x] =
+                             (uint16_t)((char_no & 0x7FFu) | (palette << 11)); }
             source_x = (uint32_t)((int32_t)source_x + dx);
             source_y = (uint32_t)((int32_t)source_y + dy);
         }
     }
 }
 
-static void draw_obj(uint8_t* fb_lr[2], uint16_t y, int lron[2]) {
+static void draw_obj(uint8_t* fb_lr[2], uint16_t* attr_lr[2], uint16_t y, int lron[2]) {
     const uint16_t* chr = chr_u16();
     const uint16_t* bgm = dram_u16();
     int32_t start_oam = s_spt[s_obj_search_which];
@@ -891,18 +920,22 @@ static void draw_obj(uint8_t* fb_lr[2], uint16_t y, int lron[2]) {
             uint32_t pixels = pixels_save;
             int32_t  x = sign_x_s32(jx + (lr ? jp : -jp), 10);
             if (x >= -7 && x < 384) {
-                uint8_t* tgt = &fb_lr[lr][x];
+                uint8_t*  tgt  = &fb_lr[lr][x];
+                uint16_t* atgt = attr_lr[lr] ? &attr_lr[lr][x] : NULL;
+                uint16_t  id   = (uint16_t)((char_no & 0x7FFu) | (palette_sel << 11));
                 if (oam_ptr[3] & 0x2000u) {
-                    tgt += 7;
+                    tgt += 7; if (atgt) atgt += 7;
                     for (int m = 8; m; m--) {
-                        if (pixels & 3u) *tgt = s_jplt_cache[palette_sel][pixels & 3u];
-                        tgt--;
+                        if (pixels & 3u) { *tgt = s_jplt_cache[palette_sel][pixels & 3u];
+                                           if (atgt) *atgt = id; }
+                        tgt--; if (atgt) atgt--;
                         pixels >>= 2;
                     }
                 } else {
                     for (int m = 8; m; m--) {
-                        if (pixels & 3u) *tgt = s_jplt_cache[palette_sel][pixels & 3u];
-                        tgt++;
+                        if (pixels & 3u) { *tgt = s_jplt_cache[palette_sel][pixels & 3u];
+                                           if (atgt) *atgt = id; }
+                        tgt++; if (atgt) atgt++;
                         pixels >>= 2;
                     }
                 }
@@ -919,13 +952,18 @@ static void vip_draw_block_into(uint8_t block_no,
      * `DrawingBuffers[lr][8 + x + 512 * row]`. */
     const int ROW_STRIDE = 512;
     const int PAD_LEFT   = 8;
-    static uint8_t s_row_buf[2][8 * 512];
+    static uint8_t  s_row_buf[2][8 * 512];
+    static uint16_t s_attr_row[2][8 * 512];   /* parallel recolor attribution */
     const uint16_t* bgm = dram_u16();
 
     uint8_t bkcol = (uint8_t)(s_bkcol & 0x3u);
     for (int y = 0; y < 8; y++) {
         memset(&s_row_buf[0][y * ROW_STRIDE], bkcol, ROW_STRIDE);
         memset(&s_row_buf[1][y * ROW_STRIDE], bkcol, ROW_STRIDE);
+    }
+    if (s_attr_on) {
+        memset(s_attr_row[0], 0, sizeof(s_attr_row[0]));
+        memset(s_attr_row[1], 0, sizeof(s_attr_row[1]));
     }
 
     s_obj_search_which = 3;
@@ -959,13 +997,17 @@ static void vip_draw_block_into(uint8_t block_no,
                 &s_row_buf[0][PAD_LEFT + y * ROW_STRIDE],
                 &s_row_buf[1][PAD_LEFT + y * ROW_STRIDE],
             };
+            uint16_t* af[2] = {
+                s_attr_on ? &s_attr_row[0][PAD_LEFT + y * ROW_STRIDE] : NULL,
+                s_attr_on ? &s_attr_row[1][PAD_LEFT + y * ROW_STRIDE] : NULL,
+            };
 
             if (bgm_mode == BGM_OBJ) {
-                draw_obj(fb, (uint16_t)(block_no * 8 + y), lron);
+                draw_obj(fb, af, (uint16_t)(block_no * 8 + y), lron);
             } else if (bgm_mode == BGM_AFFINE) {
                 for (int lr = 0; lr < 2; lr++) {
                     if (lron[lr]) {
-                        draw_affine(fb[lr],
+                        draw_affine(fb[lr], af[lr],
                                     (uint16_t)(block_no * 8 + y), lr,
                                     param_base, bgmap_base * 4096u,
                                     over, overplane_chr,
@@ -988,7 +1030,7 @@ static void vip_draw_block_into(uint8_t block_no,
                             (param_base + (((real_y - dst_y) * 2u) | (uint32_t)lr))
                             & 0xFFFFu];
                     }
-                    draw_bg(fb[lr], real_y, lr, (uint8_t)bgmap_base,
+                    draw_bg(fb[lr], af[lr], real_y, lr, (uint8_t)bgmap_base,
                             over, overplane_chr,
                             (int32_t)(int16_t)src_x,
                             (int32_t)(int16_t)src_y,
@@ -1019,6 +1061,21 @@ static void vip_draw_block_into(uint8_t block_no,
                 | (uint8_t)((src[PAD_LEFT + x + 512 * 7] & 3u) << 6);
             fb_target[64 * x + 0] = b0;
             fb_target[64 * x + 1] = b1;
+        }
+    }
+
+    /* Pack the parallel attribution scratch into the full-res per-eye
+     * attribution buffer for the current drawing FB slot, so the present
+     * recolor path can map each displayed pixel back to its source tile. */
+    if (s_attr_on) {
+        for (int lr = 0; lr < 2; lr++) {
+            const uint16_t* asrc = s_attr_row[lr];
+            uint16_t* adst = s_attr_fb[s_drawing_fb & 1][lr];
+            for (int row = 0; row < 8; row++) {
+                int yy = block_no * 8 + row;
+                for (int x = 0; x < 384; x++)
+                    adst[yy * 384 + x] = asrc[PAD_LEFT + x + 512 * row];
+            }
         }
     }
 }
@@ -1187,6 +1244,24 @@ static void vip_resolve_overrides(void) {
     }
 }
 
+
+/* ----------------- Recolor resolve pass (experiment, opt-in) ------------ *
+ *
+ * Builds this frame's per-(char,palette) RGB LUT: hash every CHR slot's
+ * content and, for each palette bank, install the matching color-pack ramp.
+ * The attribution buffer stores char_no|palette<<11, so present maps each
+ * displayed pixel through this LUT. Keyed on content hash ⇒ a character keeps
+ * its colors across scenes even as VRAM slots churn. */
+static void vip_resolve_recolor(void) {
+    const uint16_t* chr = chr_u16();
+    vb_recolor_frame_reset();
+    for (uint32_t cn = 0; cn < 2048u; ++cn) {
+        uint32_t h = vb_capture_hash(&chr[cn * 8u]);
+        for (int pal = 0; pal < 4; ++pal)
+            vb_recolor_resolve((uint16_t)(cn | ((uint32_t)pal << 11)), h, pal);
+    }
+}
+
 /* Convert the display-FB to ARGB8888 for screenshot / SDL output.
  *
  * The 2bpp framebuffer stores 4 pixels per byte in the column-major
@@ -1232,6 +1307,39 @@ void vb_vip_render_framebuffer(int eye, uint32_t* argb_out) {
     }
 }
 
+/* Present-time full-screen recolor (experiment, opt-in). Same FB unpack as
+ * vb_vip_render_framebuffer, but each pixel is mapped through the per-frame
+ * recolor LUT keyed by its attribution id; pixels with no pack entry (or the
+ * id==0 sentinel = char0/pal0/background) fall back to the faithful red. Kept
+ * separate so vb_vip_render_framebuffer stays byte-identical / oracle-safe. */
+void vb_vip_render_framebuffer_recolored(int eye, uint32_t* argb_out) {
+    if (!argb_out) return;
+    uint32_t base = (eye == 0) ? (s_display_fb ? 0x8000u  : 0x0000u)
+                               : (s_display_fb ? 0x18000u : 0x10000u);
+    const uint8_t*  fb   = &s_vip_mem[base];
+    const uint16_t* attr = s_attr_fb[s_display_fb & 1][eye ? 1 : 0];
+    for (int y = 0; y < 224; y++) {
+        int block      = y >> 3;
+        int row_in_blk = y & 7;
+        int byte_off   = block * 2 + (row_in_blk >> 2);
+        int bit_shift  = (row_in_blk & 3) * 2;
+        for (int x = 0; x < 384; x++) {
+            uint8_t  b  = fb[x * 64 + byte_off];
+            uint32_t v  = (b >> bit_shift) & 3u;
+            uint16_t id = attr[y * 384 + x];
+            uint32_t out;
+            if (id != 0 && vb_recolor_pixel(id, (int)v, &out)) {
+                argb_out[y * 384 + x] = out;
+            } else {
+                int32_t bv = s_brt_cache[v];
+                if (bv < 0) bv = 0;
+                if (bv > 255) bv = 255;
+                argb_out[y * 384 + x] = vb_red_lut_map((int)s_color_lut[bv]);
+            }
+        }
+    }
+}
+
 int32_t vb_vip_brightness(int v) {
     if (v < 0 || v > 3) return 0;
     return s_brt_cache[v];
@@ -1269,3 +1377,14 @@ int      vb_vip_display_active(void)    { return s_display_active; }
 int      vb_vip_display_fb(void)        { return s_display_fb; }
 int      vb_vip_drawing_fb(void)        { return s_drawing_fb; }
 uint64_t vb_vip_cycles(void)            { return s_vip_cycles; }
+
+/* Recolor-identification introspection: the displayed eye's attribution buffer
+ * (per-pixel char_no|palette<<11; 0 = none) and the content hash of a CHR slot.
+ * Used by the `attr_hashes` debug command to list on-screen tiles. Attribution
+ * is populated only when capture or recolor is active. */
+const uint16_t* vb_vip_attr_buffer(int eye) {
+    return s_attr_fb[s_display_fb & 1][eye ? 1 : 0];
+}
+uint32_t vb_vip_char_hash(uint32_t char_no) {
+    return vb_capture_hash(&chr_u16()[(char_no & 0x7FFu) * 8u]);
+}
