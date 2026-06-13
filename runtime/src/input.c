@@ -28,13 +28,38 @@
 static uint16_t s_pad;
 static uint8_t  s_scr;
 
+/* Frame-counted press state (debug navigation; see vb_input_press). */
+static uint16_t s_press_mask;
+static int      s_press_frames;
+
 void vb_input_init(void) {
     /* Bit 1 ("device-connected" sentinel) must always be 1 so the
      * cart's controller-presence check passes. Beetle composes
      * PadData with `| 0x2` for the same reason. */
     s_pad = VB_PAD_PRESENT;
     s_scr = 0;
+    s_press_mask = 0;
+    s_press_frames = 0;
 }
+
+void vb_input_press(uint16_t mask, int frames) {
+    if (frames < 1) frames = 1;
+    s_press_mask = mask;
+    s_press_frames = frames;
+    vb_input_set_pad(mask);
+}
+
+void vb_input_frame_advance(void) {
+    if (s_press_frames <= 0) return;
+    if (--s_press_frames == 0) {
+        s_press_mask = 0;
+        vb_input_set_pad(0);
+    } else {
+        vb_input_set_pad(s_press_mask);  /* keep holding */
+    }
+}
+
+int vb_input_press_remaining(void) { return s_press_frames; }
 
 void vb_input_set_pad(uint16_t pressed) {
     /* Caller passes a "buttons currently pressed" mask using the

@@ -46,6 +46,15 @@ void vb_input_init(void);
 void vb_input_set_pad(uint16_t pressed);
 uint16_t vb_input_get_pad(void);
 
+/* Frame-counted button press for deterministic headless navigation (mirrors
+ * the psx/nes `press` debug command): hold `mask` for exactly `frames` game
+ * frames, then auto-release. Decremented once per VIP game-frame by
+ * vb_input_frame_advance(), so the hold duration is independent of headless
+ * wall-clock speed. */
+void vb_input_press(uint16_t mask, int frames);
+void vb_input_frame_advance(void);
+int  vb_input_press_remaining(void);
+
 uint8_t  vb_input_read8 (uint32_t addr);
 uint16_t vb_input_read16(uint32_t addr);
 uint32_t vb_input_read32(uint32_t addr);

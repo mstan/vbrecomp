@@ -13,6 +13,7 @@
 #include <string>
 #include <thread>
 
+#include "asset_pack.h"
 #include "cpu_state.h"
 #include "debug_server.h"
 #include "input.h"
@@ -600,6 +601,20 @@ int main(int argc, char** argv) {
             if (stereo) {
                 vb_vip_render_framebuffer(1,
                     &tex_pixels[VB_RT_EYE_H * VB_RT_EYE_W]);
+            }
+
+            /* Opt-in override overlays (experiment): composite the colored
+             * RGBA replacements over the faithful framebuffer, per eye, using
+             * the draw-list slot matching the displayed buffer. No-op when
+             * VBRECOMP_OVERRIDES is unset (empty list) ⇒ unchanged output. */
+            if (vb_overrides_active()) {
+                int slot = vb_vip_display_fb() & 1;
+                vb_overlay_composite(&tex_pixels[0],
+                                     VB_RT_EYE_W, VB_RT_EYE_H, 0, slot);
+                if (stereo) {
+                    vb_overlay_composite(&tex_pixels[VB_RT_EYE_H * VB_RT_EYE_W],
+                                         VB_RT_EYE_W, VB_RT_EYE_H, 1, slot);
+                }
             }
 
             SDL_UpdateTexture(tex, nullptr, tex_pixels,

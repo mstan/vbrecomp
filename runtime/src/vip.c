@@ -28,9 +28,12 @@
 #include <math.h>
 #include <string.h>
 
+#include "input.h"
 #include "interrupts.h"
 #include "red_lut.h"
 #include "stub_abort.h"
+#include "vip_capture.h"
+#include "asset_pack.h"
 
 #define VIP_WINDOW_SIZE 0x80000u
 #define VIP_REGISTER_BASE 0x5F800u
@@ -196,6 +199,22 @@ static void vip_check_irq(void) {
  * column state machine calls it. */
 static void vip_draw_block_now(uint8_t block_no);
 
+/* Forward decl — opt-in graphics-capture pass (experiment). Defined after
+ * the renderer; called from the column machine at drawing-frame start. A
+ * no-op when VBRECOMP_CAPTURE is unset (gated at the call site). */
+static void vip_capture_pass(void);
+
+/* Forward decl — opt-in override resolve pass (experiment). Builds the
+ * per-OAM suppress set + per-eye overlay draw-list for the frame about to be
+ * drawn. Gated on VBRECOMP_OVERRIDES at the call site. */
+static void vip_resolve_overrides(void);
+
+/* Per-OAM suppression for matched OBJ tiles: 0 = draw faithfully; otherwise
+ * (char_no + 1) of the matched tile, re-checked in draw_obj so a mid-frame
+ * OAM mutation falls back to the original 2bpp render. All-zero (and never
+ * written) unless VBRECOMP_OVERRIDES is active ⇒ byte-identical when off. */
+static uint16_t s_obj_suppress[1024];
+
 
 void vb_vip_init(void) {
     memset(s_vip_mem, 0, sizeof(s_vip_mem));
@@ -229,6 +248,9 @@ void vb_vip_init(void) {
     s_sb_latch        = 0;
     s_sbout_inactive_time = -1;
     s_vip_cycles = 0;
+    vb_capture_init();      /* allocates rings only if VBRECOMP_CAPTURE is set */
+    vb_overrides_init();    /* loads pack only if VBRECOMP_OVERRIDES is set */
+    memset(s_obj_suppress, 0, sizeof(s_obj_suppress));
     vip_check_irq();
 }
 
@@ -286,12 +308,27 @@ static void vip_advance_column(void) {
                 s_intpnd |= VB_VIP_INT_GAME_START;
                 vip_check_irq();
 
+                /* Advance any frame-counted debug press once per game frame
+                 * (deterministic headless navigation; auto-releases). */
+                vb_input_frame_advance();
+
                 if (s_xpctrl & XPCTRL_XP_EN) {
                     s_display_fb     = s_drawing_fb;
                     s_drawing_fb    ^= 1;
                     s_drawing_block  = 0;
                     s_drawing_active = 1;
                     s_drawing_counter = 1120 * 4;
+
+                    /* Opt-in capture: snapshot the world/OAM/CHR tables the
+                     * about-to-draw blocks will read. Gated on
+                     * VBRECOMP_CAPTURE — a single predictable branch when
+                     * off, so the faithful path is unchanged. */
+                    if (vb_capture_active()) vip_capture_pass();
+
+                    /* Opt-in override resolve: build the suppress set +
+                     * overlay list for this drawing frame. Gated on
+                     * VBRECOMP_OVERRIDES; faithful when off. */
+                    if (vb_overrides_active()) vip_resolve_overrides();
                 }
                 s_game_frame_counter = 0;
             }
@@ -823,6 +860,18 @@ static void draw_obj(uint8_t* fb_lr[2], uint16_t y, int lron[2]) {
 
     do {
         const uint16_t* oam_ptr = &bgm[(0x1E000u + (uint32_t)oam * 8u) >> 1];
+
+        /* Override suppression (experiment): skip an OBJ whose tile the
+         * resolve pass matched to a replacement, so the present-time RGBA
+         * overlay stands in. The (char_no+1) re-check fails safe — if the
+         * OAM entry's char changed since resolve, draw the original 2bpp.
+         * s_obj_suppress is all-zero unless VBRECOMP_OVERRIDES is active, so
+         * this branch is never taken on a faithful run. */
+        if (s_obj_suppress[oam] &&
+            (uint16_t)((oam_ptr[3] & 0x7FFu) + 1u) == s_obj_suppress[oam]) {
+            continue;
+        }
+
         uint32_t jy = oam_ptr[2];
         uint32_t tile_y = (y - jy) & 0xFFu;
         if (tile_y >= 8u) continue;
@@ -983,6 +1032,159 @@ static void vip_draw_block_now(uint8_t block_no) {
     uint8_t* fb_l = &s_vip_mem[s_drawing_fb ? 0x8000u  : 0x0000u];
     uint8_t* fb_r = &s_vip_mem[s_drawing_fb ? 0x18000u : 0x10000u];
     vip_draw_block_into(block_no, fb_l, fb_r);
+}
+
+
+/* ----------------- Capture pass (experiment, opt-in) ----------------- *
+ *
+ * Walks the world descriptors 31..0 exactly as vip_draw_block_into does,
+ * recording — for each OBJ — the full 8x8 CHR tile (by content hash) plus a
+ * draw-use with per-eye placement/parallax/visibility/flip/priority. BG and
+ * affine worlds are recorded at world granularity (position + visibility);
+ * per-cell BG tile enumeration is a documented follow-up. Read-only over the
+ * VIP DRAM/CHR shadow — never writes a framebuffer. */
+static void vip_capture_pass(void) {
+    const uint16_t* bgm = dram_u16();
+    const uint16_t* chr = chr_u16();
+
+    vb_capture_begin_frame();
+
+    int which = 3;   /* mirrors s_obj_search_which in the renderer */
+
+    for (int world = 31; world >= 0; world--) {
+        const uint16_t* wp = &bgm[(0x1D800u + (uint32_t)world * 0x20u) >> 1];
+
+        uint32_t bgm_mode = (wp[0] >> 12) & 3u;
+        int      end      = (wp[0] & 0x40u) != 0;
+        int      lron[2]  = { (int)(wp[0] & 0x8000u), (int)(wp[0] & 0x4000u) };
+
+        if (end) break;
+
+        if (bgm_mode == BGM_OBJ) {
+            int32_t start_oam = s_spt[which];
+            int32_t end_oam   = which ? s_spt[which - 1] : 1023;
+            int32_t oam = start_oam;
+            do {
+                const uint16_t* oam_ptr = &bgm[(0x1E000u + (uint32_t)oam * 8u) >> 1];
+                uint32_t jx          = oam_ptr[0];
+                uint32_t jp          = oam_ptr[1] & 0x3FFFu;
+                int      jlron[2]    = { (int)(oam_ptr[1] & 0x8000u),
+                                         (int)(oam_ptr[1] & 0x4000u) };
+                uint32_t jy          = oam_ptr[2];
+                uint32_t char_no     = oam_ptr[3] & 0x7FFu;
+                uint32_t hflip       = (oam_ptr[3] & 0x2000u) ? 1u : 0u;
+                uint32_t vflip       = (oam_ptr[3] & 0x1000u) ? 1u : 0u;
+                uint32_t palette     = oam_ptr[3] >> 14;
+
+                int vis_l = (jlron[0] && lron[0]) ? 1 : 0;
+                int vis_r = (jlron[1] && lron[1]) ? 1 : 0;
+                if (vis_l || vis_r) {
+                    uint16_t tile[8];
+                    for (int k = 0; k < 8; ++k) tile[k] = chr[char_no * 8u + k];
+                    uint32_t h = vb_capture_tile(tile, VB_CAP_CTX_OBJ,
+                                                 (uint8_t)palette);
+                    VbCaptureUse u;
+                    u.tile_hash = h;
+                    u.world_idx = (uint16_t)world;
+                    u.oam_idx   = (uint16_t)oam;
+                    u.x_l = (int16_t)sign_x_s32(jx - jp, 10);
+                    u.x_r = (int16_t)sign_x_s32(jx + jp, 10);
+                    u.y   = (int16_t)jy;
+                    u.ctx = VB_CAP_CTX_OBJ;
+                    u.vis_l = (uint8_t)vis_l;
+                    u.vis_r = (uint8_t)vis_r;
+                    u.hflip = (uint8_t)hflip;
+                    u.vflip = (uint8_t)vflip;
+                    u.palette = (uint8_t)palette;
+                    vb_capture_use(&u);
+                }
+            } while ((oam = (oam - 1) & 1023) != end_oam);
+
+            if (which) which--;
+        } else {
+            /* BG (mode 0/1) or affine (mode 2): world-level record. */
+            uint16_t gx = (uint16_t)sign_11(wp[1]);
+            uint16_t gp = (uint16_t)sign_9(wp[2]);
+            uint16_t gy = (uint16_t)sign_11(wp[3]);
+            VbCaptureUse u;
+            memset(&u, 0, sizeof(u));
+            u.tile_hash = 0;
+            u.world_idx = (uint16_t)world;
+            u.oam_idx   = 0xFFFF;
+            u.x_l = (int16_t)(int16_t)(gx - gp);
+            u.x_r = (int16_t)(int16_t)(gx + gp);
+            u.y   = (int16_t)gy;
+            u.ctx = (bgm_mode == BGM_AFFINE) ? VB_CAP_CTX_AFFINE : VB_CAP_CTX_BG;
+            u.vis_l = lron[0] ? 1 : 0;
+            u.vis_r = lron[1] ? 1 : 0;
+            vb_capture_use(&u);
+        }
+    }
+
+    vb_capture_end_frame();
+}
+
+
+/* ----------------- Override resolve pass (experiment, opt-in) ----------- *
+ *
+ * Same OBJ walk as the capture pass, but matches each OBJ's unflipped tile
+ * content hash against the loaded override pack. On a match it (a) records
+ * (char_no+1) in s_obj_suppress[oam] so draw_obj skips the original 2bpp,
+ * and (b) queues a per-eye overlay blit (image + per-eye X + flips +
+ * visibility) into the draw-list slot for the frame being drawn
+ * (s_drawing_fb) — consumed at present when that buffer is displayed. */
+static void vip_resolve_overrides(void) {
+    const uint16_t* bgm = dram_u16();
+    const uint16_t* chr = chr_u16();
+    int slot = s_drawing_fb & 1;
+
+    memset(s_obj_suppress, 0, sizeof(s_obj_suppress));
+    vb_overlay_reset(slot);
+
+    int which = 3;
+    for (int world = 31; world >= 0; world--) {
+        const uint16_t* wp = &bgm[(0x1D800u + (uint32_t)world * 0x20u) >> 1];
+        uint32_t bgm_mode = (wp[0] >> 12) & 3u;
+        int      end      = (wp[0] & 0x40u) != 0;
+        int      lron[2]  = { (int)(wp[0] & 0x8000u), (int)(wp[0] & 0x4000u) };
+        if (end) break;
+        if (bgm_mode != BGM_OBJ) continue;
+
+        int32_t start_oam = s_spt[which];
+        int32_t end_oam   = which ? s_spt[which - 1] : 1023;
+        int32_t oam = start_oam;
+        do {
+            const uint16_t* oam_ptr = &bgm[(0x1E000u + (uint32_t)oam * 8u) >> 1];
+            uint32_t char_no = oam_ptr[3] & 0x7FFu;
+            uint16_t tile[8];
+            for (int k = 0; k < 8; ++k) tile[k] = chr[char_no * 8u + k];
+            const VbOverrideImage* img = vb_overrides_lookup_tile(vb_capture_hash(tile));
+            if (!img) continue;
+
+            int jlron0 = (int)(oam_ptr[1] & 0x8000u);
+            int jlron1 = (int)(oam_ptr[1] & 0x4000u);
+            int vis_l = (jlron0 && lron[0]) ? 1 : 0;
+            int vis_r = (jlron1 && lron[1]) ? 1 : 0;
+            if (!vis_l && !vis_r) continue;
+
+            uint32_t jx = oam_ptr[0];
+            uint32_t jp = oam_ptr[1] & 0x3FFFu;
+            VbOverlayCmd cmd;
+            cmd.img   = img;
+            cmd.x_l   = (int16_t)sign_x_s32(jx - jp, 10);
+            cmd.x_r   = (int16_t)sign_x_s32(jx + jp, 10);
+            cmd.y     = (int16_t)oam_ptr[2];
+            cmd.hflip = (oam_ptr[3] & 0x2000u) ? 1 : 0;
+            cmd.vflip = (oam_ptr[3] & 0x1000u) ? 1 : 0;
+            cmd.vis_l = (uint8_t)vis_l;
+            cmd.vis_r = (uint8_t)vis_r;
+            vb_overlay_add(slot, &cmd);
+
+            s_obj_suppress[oam] = (uint16_t)(char_no + 1u);
+        } while ((oam = (oam - 1) & 1023) != end_oam);
+
+        if (which) which--;
+    }
 }
 
 /* Convert the display-FB to ARGB8888 for screenshot / SDL output.

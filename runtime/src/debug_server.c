@@ -25,6 +25,8 @@
 #include "ring_frame.h"
 #include "timer.h"
 #include "vip.h"
+#include "vip_capture.h"
+#include "asset_pack.h"
 #include "watchdog.h"
 #include "wtrace.h"
 #include "fntrace.h"
@@ -317,6 +319,15 @@ static void handle_screenshot(long long id, const char* line) {
         return;
     }
     vb_vip_render_framebuffer((int)eye, buf);
+    /* Opt-in: composite the override overlays into the captured frame so the
+     * enhanced result can be inspected headlessly. Default (no "overlay"
+     * field) stays the faithful raw render — keeps the oracle compare path
+     * byte-identical. */
+    long long overlay = 0;
+    extract_int(line, "\"overlay\"", &overlay);
+    if (overlay && vb_overrides_active()) {
+        vb_overlay_composite(buf, 384, 224, (int)eye, vb_vip_display_fb() & 1);
+    }
     int rc = vb_write_png_32bpp(path, 384, 224, buf);
     free(buf);
     char body[384];
@@ -351,6 +362,50 @@ static void handle_watchdog(long long id) {
              id, vb_watchdog_phase_name(phase), pc,
              (unsigned long long)cycles, (unsigned long long)frame,
              (unsigned long long)beats, stalled);
+    send_response(body);
+}
+
+/* Flush the opt-in graphics-capture catalog + per-frame layouts to disk.
+ * No-op (returns ok=false) when VBRECOMP_CAPTURE was not set, so this never
+ * fabricates output for a faithful run. */
+static void handle_capture_dump(long long id, const char* line) {
+    char dir[256] = {0};
+    extract_str(line, "\"dir\"", dir, sizeof(dir));
+    if (!dir[0]) snprintf(dir, sizeof(dir), "captures");
+
+    char body[384];
+    if (!vb_capture_active()) {
+        snprintf(body, sizeof(body),
+                 "{\"ok\":false,\"cmd\":\"capture_dump\",\"id\":%lld,"
+                 "\"error\":\"capture not active (set VBRECOMP_CAPTURE)\"}", id);
+        send_response(body);
+        return;
+    }
+    int n = vb_capture_dump(dir);
+    if (n < 0) {
+        snprintf(body, sizeof(body),
+                 "{\"ok\":false,\"cmd\":\"capture_dump\",\"id\":%lld,"
+                 "\"error\":\"dump failed\"}", id);
+    } else {
+        snprintf(body, sizeof(body),
+                 "{\"ok\":true,\"cmd\":\"capture_dump\",\"id\":%lld,"
+                 "\"dir\":\"%s\",\"tiles\":%d}", id, dir, n);
+    }
+    send_response(body);
+}
+
+/* Introspect the opt-in override layer (Rule 3: TCP, not printf). Reports
+ * whether it is active, how many replacement images loaded, and the current
+ * overlay draw-list size for each framebuffer slot + the displayed slot. */
+static void handle_overrides_state(long long id) {
+    char body[256];
+    int slot = vb_vip_display_fb() & 1;
+    snprintf(body, sizeof(body),
+             "{\"ok\":true,\"cmd\":\"overrides_state\",\"id\":%lld,"
+             "\"active\":%d,\"images\":%d,\"display_slot\":%d,"
+             "\"overlay0\":%d,\"overlay1\":%d}",
+             id, vb_overrides_active(), vb_overrides_image_count(), slot,
+             vb_overlay_count(0), vb_overlay_count(1));
     send_response(body);
 }
 
@@ -413,6 +468,27 @@ static void handle_set_input(long long id, const char* line) {
     snprintf(buf, sizeof(buf),
              "{\"ok\":true,\"cmd\":\"set_input\",\"id\":%lld,\"pad\":\"0x%04X\"}",
              id, vb_input_get_pad());
+    send_response(buf);
+}
+
+/* Frame-counted button press for deterministic headless navigation (mirrors
+ * the psx/nes `press` command): {"buttons":<mask>,"frames":<n>}. The mask
+ * uses the VB_PAD_* hardware bits (e.g. START=0x1000, A=0x4). The hold lasts
+ * exactly `frames` VIP game-frames then auto-releases — independent of
+ * headless wall-clock speed. */
+static void handle_press(long long id, const char* line) {
+    long long buttons = 0, frames = 4;
+    if (!extract_int(line, "\"buttons\"", &buttons)) {
+        send_response("{\"ok\":false,\"error\":\"press requires 'buttons' (VB_PAD_* mask)\"}");
+        return;
+    }
+    extract_int(line, "\"frames\"", &frames);
+    if (frames < 1) frames = 1;
+    vb_input_press((uint16_t)(buttons & 0xFFFFu), (int)frames);
+    char buf[160];
+    snprintf(buf, sizeof(buf),
+             "{\"ok\":true,\"cmd\":\"press\",\"id\":%lld,\"buttons\":\"0x%04X\","
+             "\"frames\":%lld}", id, (unsigned)(buttons & 0xFFFFu), frames);
     send_response(buf);
 }
 
@@ -784,12 +860,15 @@ static void dispatch_line(char* line) {
     else if (strcmp(cmd, "read_ram") == 0)     handle_read_ram(id, line);
     else if (strcmp(cmd, "pad_state") == 0)    handle_pad_state(id);
     else if (strcmp(cmd, "set_input") == 0)    handle_set_input(id, line);
+    else if (strcmp(cmd, "press") == 0)        handle_press(id, line);
     else if (strcmp(cmd, "irq_state") == 0)    handle_irq_state(id);
     else if (strcmp(cmd, "irq_force") == 0)    handle_irq_force(id, line);
     else if (strcmp(cmd, "timer_state") == 0)  handle_timer_state(id);
     else if (strcmp(cmd, "vip_state") == 0)    handle_vip_state(id);
     else if (strcmp(cmd, "screenshot") == 0)   handle_screenshot(id, line);
     else if (strcmp(cmd, "watchdog") == 0)     handle_watchdog(id);
+    else if (strcmp(cmd, "capture_dump") == 0) handle_capture_dump(id, line);
+    else if (strcmp(cmd, "overrides_state") == 0) handle_overrides_state(id);
     else if (strcmp(cmd, "audio_shadow_state") == 0) handle_audio_shadow_state(id);
     else if (strcmp(cmd, "memory_map") == 0)   handle_memory_map(id);
     else if (strcmp(cmd, "wtrace_stats") == 0) handle_wtrace_stats(id);
