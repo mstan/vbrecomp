@@ -466,11 +466,12 @@ static void handle_world_map(long long id, const char* line) {
 
 /* Introspect the opt-in recolor layer (TCP, not printf). */
 static void handle_recolor_state(long long id) {
-    char body[160];
+    char body[256];
     snprintf(body, sizeof(body),
              "{\"ok\":true,\"cmd\":\"recolor_state\",\"id\":%lld,"
-             "\"active\":%d,\"entries\":%d}",
-             id, vb_recolor_active(), vb_recolor_entry_count());
+             "\"active\":%d,\"entries\":%d,\"scenes\":%d,\"scene\":\"%s\"}",
+             id, vb_recolor_active(), vb_recolor_entry_count(),
+             vb_recolor_scene_count(), vb_recolor_current_scene());
     send_response(body);
 }
 
