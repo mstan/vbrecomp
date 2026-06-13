@@ -13,9 +13,17 @@
  *       { "name": "title", "detect": { "all": [25, 26] }, "worlds": [...] }
  *   ] }
  *
+ * A "detect" may also carry an optional ram predicate that gates the scene on
+ * a game RAM byte: "detect": { "all": [22], "ram": { "addr": "0x0500203A",
+ * "eq": 1 } } matches only when that byte equals 1. This lets one on-screen
+ * layout (e.g. the near tennis player, always world 22) resolve to different
+ * rules per selected character. The address is game-specific and lives only in
+ * the pack — never in this generic runtime.
+ *
  * Detection: each frame the runtime builds a bitmask of the world indices
  * present on screen and calls vb_recolor_select_scene(). The first scene whose
- * "detect" matches ((mask & all)==all && (mask & none)==0) becomes current;
+ * "detect" matches ((mask & all)==all && (mask & none)==0, and the ram byte if
+ * present) becomes current;
  * its world rules drive vb_recolor_world_pixel. A scene with an empty/absent
  * "detect" matches always (order it last as a catch-all). If no scene matches,
  * the frame renders faithfully.
@@ -26,6 +34,7 @@
  * A world rule with a single "ramp" (no "bands") is flat (one band, hi=256).
  */
 #include "recolor.h"
+#include "memory.h"   /* vb_memory_dump — read a game RAM byte for ram predicates */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -41,6 +50,9 @@ typedef struct {
     char     name[24];
     uint32_t detect_all;   /* every one of these world indices must be present */
     uint32_t detect_none;  /* none of these world indices may be present */
+    int      has_ram;      /* optional: also require a game RAM byte to equal a value */
+    uint32_t ram_addr;
+    int      ram_eq;
     int      nrules;
     Rule     rules[MAX_RULES];
 } Scene;
@@ -107,6 +119,16 @@ static uint32_t parse_int_mask(const char* key_pos, const char* end) {
         }
     }
     return mask;
+}
+
+/* Parse the (possibly 0x-prefixed) hex/decimal integer following key_pos's ':'.
+ * The value may be a bare number or a quoted "0x...." string. */
+static uint32_t parse_uint_after(const char* key_pos, const char* end) {
+    const char* c = strchr(key_pos, ':');
+    if (!c || c >= end) return 0;
+    c++;
+    while (c < end && (*c == ' ' || *c == '\t' || *c == '"')) c++;
+    return (uint32_t)strtoul(c, NULL, 0);   /* base 0 -> honors 0x prefix */
 }
 
 /* Bounded strstr: find `needle` in [hay, end). */
@@ -193,6 +215,7 @@ static void load_pack(void) {
 
             Scene* sc = &s_scenes[s_nscenes];
             sc->detect_all = sc->detect_none = 0;
+            sc->has_ram = 0; sc->ram_addr = 0; sc->ram_eq = 0;
             sc->nrules = 0;
             copy_scene_name(sc, n, span_end);
 
@@ -205,6 +228,17 @@ static void load_pack(void) {
                 const char* o = find_in(det, det_end, "\"none\"");
                 if (a) sc->detect_all  = parse_int_mask(a, det_end);
                 if (o) sc->detect_none = parse_int_mask(o, det_end);
+                /* optional ram predicate: {"ram":{"addr":"0x...","eq":N}} */
+                const char* rm = find_in(det, det_end, "\"ram\"");
+                if (rm) {
+                    const char* ad = find_in(rm, det_end, "\"addr\"");
+                    const char* eq = find_in(rm, det_end, "\"eq\"");
+                    if (ad && eq) {
+                        sc->ram_addr = parse_uint_after(ad, det_end);
+                        sc->ram_eq   = (int)parse_uint_after(eq, det_end);
+                        sc->has_ram  = 1;
+                    }
+                }
             }
             parse_rules(n, span_end, sc);
 
@@ -215,6 +249,7 @@ static void load_pack(void) {
         /* Legacy flat form: a single always-matching scene. */
         Scene* sc = &s_scenes[0];
         sc->detect_all = sc->detect_none = 0;
+        sc->has_ram = 0; sc->ram_addr = 0; sc->ram_eq = 0;
         sc->nrules = 0;
         snprintf(sc->name, sizeof(sc->name), "default");
         parse_rules(t, end, sc);
@@ -260,11 +295,19 @@ int vb_recolor_scene_count(void) { return s_nscenes; }
 int vb_recolor_select_scene(uint32_t mask) {
     for (int i = 0; i < s_nscenes; ++i) {
         const Scene* sc = &s_scenes[i];
-        if ((mask & sc->detect_all) == sc->detect_all &&
-            (mask & sc->detect_none) == 0) {
-            s_cur = i;
-            return i;
+        if ((mask & sc->detect_all) != sc->detect_all ||
+            (mask & sc->detect_none) != 0)
+            continue;
+        if (sc->has_ram) {
+            /* Game-state predicate: the address lives in the (per-game) pack,
+             * never in this generic runtime. WRAM is always mapped, so this
+             * read is safe and only runs on the opt-in recolored path. */
+            uint8_t b = 0;
+            vb_memory_dump(sc->ram_addr, &b, 1);
+            if ((int)b != sc->ram_eq) continue;
         }
+        s_cur = i;
+        return i;
     }
     s_cur = -1;
     return -1;
