@@ -28,6 +28,8 @@
 #  define WIN32_LEAN_AND_MEAN
 #  include <windows.h>
 #  include <dbghelp.h>
+#else
+#  include <unistd.h>
 #endif
 
 namespace {
@@ -51,6 +53,14 @@ int    s_sym_initialized = 0;
 constexpr int STALL_MS  = 3000;   /* Win32 flags "Not Responding" at ~5s */
 constexpr int POLL_MS   = 250;
 
+unsigned proc_id() {
+#ifdef _WIN32
+    return (unsigned)GetCurrentProcessId();
+#else
+    return (unsigned)getpid();
+#endif
+}
+
 int64_t now_ms() {
     using namespace std::chrono;
     return duration_cast<milliseconds>(
@@ -66,7 +76,9 @@ void snapshot(int* phase, uint32_t* pc, uint64_t* cyc, uint64_t* frame) {
 
 /* Continuously-overwritten live snapshot. */
 void write_heartbeat(int stalled_ms) {
-    FILE* f = std::fopen("vb_freeze_heartbeat.json", "wb");
+    char path[64];
+    std::snprintf(path, sizeof(path), "vb_freeze_heartbeat_%u.json", proc_id());
+    FILE* f = std::fopen(path, "wb");
     if (!f) return;
     int phase; uint32_t pc; uint64_t cyc, frame;
     snapshot(&phase, &pc, &cyc, &frame);
@@ -155,8 +167,8 @@ void dump_main_stack_json(FILE* f) { std::fputs("[]", f); }
 /* One-shot forensic dump for a stall episode. */
 void write_freeze_dump(int stalled_ms) {
     char path[128];
-    std::snprintf(path, sizeof(path), "vb_freeze_dump_%lld.json",
-                  (long long)std::time(nullptr));
+    std::snprintf(path, sizeof(path), "vb_freeze_dump_%u_%lld.json",
+                  proc_id(), (long long)std::time(nullptr));
     FILE* f = std::fopen(path, "wb");
     if (!f) return;
     int phase; uint32_t pc; uint64_t cyc, frame;

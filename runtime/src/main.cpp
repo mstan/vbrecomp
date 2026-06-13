@@ -629,13 +629,23 @@ int main(int argc, char** argv) {
                 /* Either first present or we fell badly behind; resync. */
                 sdl_deadline = now + sdl_period;
             } else if (!turbo) {
-                while (SDL_GetPerformanceCounter() < sdl_deadline) {
-                    Uint64 left = sdl_deadline - SDL_GetPerformanceCounter();
+                /* Read the perf counter ONCE per iteration. The old code read
+                 * it in the while-condition AND again in `left = deadline -
+                 * counter`; if the counter crossed the deadline between those
+                 * two reads, the unsigned subtraction underflowed to ~1.8e19,
+                 * giving SDL_Delay() a ~49-day argument — a permanent freeze
+                 * ("Not Responding"). Idle windowed runs present every frame,
+                 * so over time the race was inevitable. (Same bug class as
+                 * psxrecomp's freeze_heartbeat note.) */
+                for (;;) {
+                    Uint64 n2 = SDL_GetPerformanceCounter();
+                    if (n2 >= sdl_deadline) break;          /* n2 < deadline ⇒ no underflow */
+                    Uint64 left = sdl_deadline - n2;
                     Uint64 ms = (left * 1000) / sdl_freq;
                     if (ms >= 2) SDL_Delay((Uint32)(ms - 1));
                     else break;
                 }
-                while (SDL_GetPerformanceCounter() < sdl_deadline) { /* spin */ }
+                while (SDL_GetPerformanceCounter() < sdl_deadline) { /* spin remainder */ }
                 sdl_deadline += sdl_period;
             } else {
                 sdl_deadline += sdl_period;
