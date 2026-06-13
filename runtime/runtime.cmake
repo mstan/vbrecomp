@@ -39,6 +39,7 @@ function(vb_add_runtime_target TARGET)
         ${VB_RUNTIME_DIR}/src/stub_abort.c
         ${VB_RUNTIME_DIR}/src/wtrace.c
         ${VB_RUNTIME_DIR}/src/fntrace.c
+        ${VB_RUNTIME_DIR}/src/watchdog.cpp
     )
 
     # Pick exactly one source of dispatch — never both. The build
@@ -114,10 +115,11 @@ function(vb_add_runtime_target TARGET)
         target_compile_options(${TARGET} PRIVATE -Wall -Wextra -Wno-unused-parameter)
     endif()
 
-    # Winsock on Windows. Game-controller support is cross-platform via
-    # SDL_GameController (see main.cpp), so no XInput link is needed.
+    # Winsock on Windows; dbghelp lets the watchdog symbolize the main thread's
+    # stack on a freeze (StackWalk64 / SymFromAddr). Game-controller support is
+    # cross-platform via SDL_GameController (see main.cpp), so no XInput link.
     if(WIN32)
-        target_link_libraries(${TARGET} PRIVATE ws2_32)
+        target_link_libraries(${TARGET} PRIVATE ws2_32 dbghelp)
         # When building with MinGW (the project's primary toolchain),
         # statically link the gcc/stdc++/winpthread runtimes so the
         # release zip ships just vb-runtime.exe + SDL2.dll without

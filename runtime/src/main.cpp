@@ -22,6 +22,7 @@
 #include "timer.h"
 #include "vip.h"
 #include "vsu.h"
+#include "watchdog.h"
 #include "wtrace.h"
 #include "fntrace.h"
 
@@ -459,7 +460,12 @@ int main(int argc, char** argv) {
     constexpr uint64_t IDLE_TICK_CYCLES = 20000;
     bool dispatched_once = false;
     uint32_t dispatch_pc = cpu.pc;
+    uint64_t present_count = 0;
+    /* Always-on hang watchdog (separate thread). Started here, from the main
+     * thread, so it can capture this thread's stack on a freeze. */
+    vb_watchdog_start();
     while (vb_debug_server_poll() == 0 && !sdl_quit) {
+        vb_watchdog_beat(VB_WD_POLL, dispatch_pc, cpu.cycles, present_count);
 #if VB_RUNTIME_HAVE_SDL
         if (!headless) {
             SDL_Event ev;
@@ -530,6 +536,7 @@ int main(int argc, char** argv) {
 
         cpu.step_budget = STEP_BUDGET;
         cpu.yielded = 0;
+        vb_watchdog_beat(VB_WD_DISPATCH, dispatch_pc, cpu.cycles, present_count);
         vb_dispatch(&cpu, dispatch_pc);
 
         const uint64_t bbs_run  = STEP_BUDGET - cpu.step_budget;
@@ -587,6 +594,7 @@ int main(int argc, char** argv) {
 #if VB_RUNTIME_HAVE_SDL
         if (!headless && (cpu.cycles - last_present_cycles) >= VB_CYCLES_PER_FRAME) {
             last_present_cycles = cpu.cycles;
+            vb_watchdog_beat(VB_WD_PRESENT, dispatch_pc, cpu.cycles, ++present_count);
 
             vb_vip_render_framebuffer(0, &tex_pixels[0]);
             if (stereo) {
@@ -635,6 +643,8 @@ int main(int argc, char** argv) {
         }
 #endif
     }
+
+    vb_watchdog_stop();
 
 #if VB_RUNTIME_HAVE_SDL
     if (s_pad) { SDL_GameControllerClose(s_pad); s_pad = nullptr; }

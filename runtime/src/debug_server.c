@@ -23,6 +23,7 @@
 #include "ring_frame.h"
 #include "timer.h"
 #include "vip.h"
+#include "watchdog.h"
 #include "wtrace.h"
 #include "fntrace.h"
 
@@ -375,6 +376,26 @@ static void handle_screenshot(long long id, const char* line) {
                  "\"eye\":%lld,\"path\":\"%s\",\"width\":384,\"height\":224}",
                  id, eye, path);
     }
+    send_response(body);
+}
+
+/* Live watchdog snapshot (main-loop heartbeat). When the main thread is
+ * wedged this command can't answer (the server is on that thread) — read
+ * vb_freeze_heartbeat_<pid>.json / vb_freeze_dump_*.json instead. Useful while
+ * alive to confirm the loop is healthy and see the current phase. */
+static void handle_watchdog(long long id) {
+    int phase = 0, stalled = 0;
+    uint32_t pc = 0;
+    uint64_t cycles = 0, frame = 0, beats = 0;
+    vb_watchdog_status(&phase, &pc, &cycles, &frame, &beats, &stalled);
+    char body[256];
+    snprintf(body, sizeof(body),
+             "{\"ok\":true,\"cmd\":\"watchdog\",\"id\":%lld,\"phase\":\"%s\","
+             "\"pc\":\"0x%08X\",\"cycles\":%llu,\"frame\":%llu,\"beats\":%llu,"
+             "\"stalled_ms\":%d}",
+             id, vb_watchdog_phase_name(phase), pc,
+             (unsigned long long)cycles, (unsigned long long)frame,
+             (unsigned long long)beats, stalled);
     send_response(body);
 }
 
@@ -753,6 +774,7 @@ static void dispatch_line(char* line) {
     else if (strcmp(cmd, "timer_state") == 0)  handle_timer_state(id);
     else if (strcmp(cmd, "vip_state") == 0)    handle_vip_state(id);
     else if (strcmp(cmd, "screenshot") == 0)   handle_screenshot(id, line);
+    else if (strcmp(cmd, "watchdog") == 0)     handle_watchdog(id);
     else if (strcmp(cmd, "memory_map") == 0)   handle_memory_map(id);
     else if (strcmp(cmd, "wtrace_stats") == 0) handle_wtrace_stats(id);
     else if (strcmp(cmd, "wtrace_dump") == 0)  handle_wtrace_dump(id, line);
