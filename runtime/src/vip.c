@@ -210,18 +210,16 @@ static void vip_capture_pass(void);
  * drawn. Gated on VBRECOMP_OVERRIDES at the call site. */
 static void vip_resolve_overrides(void);
 
-/* Forward decl — opt-in recolor LUT build (experiment). Hashes each in-use CHR
- * slot and installs per-(char,palette) RGB ramps for the frame. Gated on the
- * recolor pack at the call site. */
-static void vip_resolve_recolor(void);
-
-/* Recolor attribution (experiment): per-pixel id = char_no | (palette<<11) of
- * the source tile, captured during draw and packed into a full-res per-eye
- * buffer (double-buffered by drawing_fb). Written only when recolor is active;
- * the 2bpp framebuffer output is identical either way (separate memory), so a
- * faithful run is byte-identical. */
+/* Recolor attribution (experiment): per-pixel value = (world index + 1) of the
+ * world that drew the pixel; 0 = none/background. Captured during draw and
+ * packed into a full-res per-eye buffer (double-buffered by drawing_fb).
+ * Keying on WORLD (not tile content) keeps a character colored across its whole
+ * animation. Written only when attribution is active; the 2bpp framebuffer
+ * output is identical either way (separate memory), so a faithful run is
+ * byte-identical. */
 static int      s_attr_on;
-static uint16_t s_attr_fb[2][2][384 * 224];  /* [fb_slot][eye][y*384 + x] */
+static uint16_t s_attr_fb[2][2][384 * 224];  /* [fb_slot][eye][y*384 + x]; world+1 */
+static uint16_t s_attr_val;                   /* world+1 of the world being drawn */
 
 /* Per-OAM suppression for matched OBJ tiles: 0 = draw faithfully; otherwise
  * (char_no + 1) of the matched tile, re-checked in draw_obj so a mid-frame
@@ -345,11 +343,6 @@ static void vip_advance_column(void) {
                      * overlay list for this drawing frame. Gated on
                      * VBRECOMP_OVERRIDES; faithful when off. */
                     if (vb_overrides_active()) vip_resolve_overrides();
-
-                    /* Opt-in recolor: build the per-(char,palette) RGB LUT for
-                     * this frame from the content-hash pack. Gated; faithful
-                     * when off. */
-                    if (vb_recolor_active()) vip_resolve_recolor();
                 }
                 s_game_frame_counter = 0;
             }
@@ -745,7 +738,7 @@ static void draw_bg(uint8_t* target, uint16_t* attr_target, uint16_t real_y, int
         uint32_t vflip_xor       = (bgsc & 0x1000u) ? 7u : 0u;
         uint32_t char_sub_y      = vflip_xor ^ ((uint32_t)source_y & 0x7u);
 
-        uint16_t attr_id = (uint16_t)((char_no & 0x7FFu) | (palette_sel << 11));
+        uint16_t attr_id = s_attr_val;   /* world+1 (set per world by the caller) */
         if (!(source_x_u & 7u) && (x + 7) <= final_x) {
             uint32_t pixels = chr[char_no * 8u + char_sub_y];
             if (bgsc & 0x2000u) {
@@ -847,8 +840,7 @@ static void draw_affine(uint8_t* target, uint16_t* attr_target, uint16_t real_y,
             uint32_t char_sub_x = hflip_xor ^ ((source_x >> 8) & 0xEu);
             uint32_t pixel = (chr[((bgsc & 0x7FFu) * 8u) | char_sub_y] >> char_sub_x) & 0x3u;
             if (pixel) { target[x] = s_gplt_cache[bgsc >> 14][pixel];
-                         if (attr_target) attr_target[x] =
-                             (uint16_t)((bgsc & 0x7FFu) | ((bgsc >> 14) << 11)); }
+                         if (attr_target) attr_target[x] = s_attr_val; }
             source_x = (uint32_t)((int32_t)source_x + dx);
         }
     } else {
@@ -871,8 +863,7 @@ static void draw_affine(uint8_t* target, uint16_t* attr_target, uint16_t real_y,
             uint32_t char_sub_x = hflip_xor ^ ((source_x >> 9) & 0x7u);
             uint8_t pixel = (uint8_t)((chr[char_no * 8u + char_sub_y] >> (char_sub_x * 2u)) & 0x3u);
             if (pixel) { target[x] = s_gplt_cache[palette][pixel];
-                         if (attr_target) attr_target[x] =
-                             (uint16_t)((char_no & 0x7FFu) | (palette << 11)); }
+                         if (attr_target) attr_target[x] = s_attr_val; }
             source_x = (uint32_t)((int32_t)source_x + dx);
             source_y = (uint32_t)((int32_t)source_y + dy);
         }
@@ -922,7 +913,7 @@ static void draw_obj(uint8_t* fb_lr[2], uint16_t* attr_lr[2], uint16_t y, int lr
             if (x >= -7 && x < 384) {
                 uint8_t*  tgt  = &fb_lr[lr][x];
                 uint16_t* atgt = attr_lr[lr] ? &attr_lr[lr][x] : NULL;
-                uint16_t  id   = (uint16_t)((char_no & 0x7FFu) | (palette_sel << 11));
+                uint16_t  id   = s_attr_val;   /* world+1 (set per world) */
                 if (oam_ptr[3] & 0x2000u) {
                     tgt += 7; if (atgt) atgt += 7;
                     for (int m = 8; m; m--) {
@@ -991,6 +982,8 @@ static void vip_draw_block_into(uint8_t block_no,
         uint16_t overplane_chr = wp[10];
 
         if (end) break;
+
+        s_attr_val = (uint16_t)(world + 1);  /* recolor attribution for this world */
 
         for (int y = 0; y < 8; y++) {
             uint8_t* fb[2] = {
@@ -1245,23 +1238,6 @@ static void vip_resolve_overrides(void) {
 }
 
 
-/* ----------------- Recolor resolve pass (experiment, opt-in) ------------ *
- *
- * Builds this frame's per-(char,palette) RGB LUT: hash every CHR slot's
- * content and, for each palette bank, install the matching color-pack ramp.
- * The attribution buffer stores char_no|palette<<11, so present maps each
- * displayed pixel through this LUT. Keyed on content hash ⇒ a character keeps
- * its colors across scenes even as VRAM slots churn. */
-static void vip_resolve_recolor(void) {
-    const uint16_t* chr = chr_u16();
-    vb_recolor_frame_reset();
-    for (uint32_t cn = 0; cn < 2048u; ++cn) {
-        uint32_t h = vb_capture_hash(&chr[cn * 8u]);
-        for (int pal = 0; pal < 4; ++pal)
-            vb_recolor_resolve((uint16_t)(cn | ((uint32_t)pal << 11)), h, pal);
-    }
-}
-
 /* Convert the display-FB to ARGB8888 for screenshot / SDL output.
  *
  * The 2bpp framebuffer stores 4 pixels per byte in the column-major
@@ -1308,16 +1284,32 @@ void vb_vip_render_framebuffer(int eye, uint32_t* argb_out) {
 }
 
 /* Present-time full-screen recolor (experiment, opt-in). Same FB unpack as
- * vb_vip_render_framebuffer, but each pixel is mapped through the per-frame
- * recolor LUT keyed by its attribution id; pixels with no pack entry (or the
- * id==0 sentinel = char0/pal0/background) fall back to the faithful red. Kept
- * separate so vb_vip_render_framebuffer stays byte-identical / oracle-safe. */
+ * vb_vip_render_framebuffer, but each pixel is mapped through the world-based
+ * recolor pack: per displayed frame we compute each world's on-screen vertical
+ * extent, then color each pixel by (world, position within that world, value).
+ * Pixels whose world has no pack rule (or background, attr 0) fall back to the
+ * faithful red. Kept separate so vb_vip_render_framebuffer stays
+ * byte-identical / oracle-safe. */
 void vb_vip_render_framebuffer_recolored(int eye, uint32_t* argb_out) {
     if (!argb_out) return;
     uint32_t base = (eye == 0) ? (s_display_fb ? 0x8000u  : 0x0000u)
                                : (s_display_fb ? 0x18000u : 0x10000u);
     const uint8_t*  fb   = &s_vip_mem[base];
     const uint16_t* attr = s_attr_fb[s_display_fb & 1][eye ? 1 : 0];
+
+    /* Pre-pass: per-world (attr value 1..32) vertical bounding box. */
+    int wy0[33], wy1[33];
+    for (int i = 0; i < 33; ++i) { wy0[i] = 1 << 20; wy1[i] = -1; }
+    for (int y = 0; y < 224; ++y) {
+        const uint16_t* row = &attr[y * 384];
+        for (int x = 0; x < 384; ++x) {
+            uint16_t a = row[x];
+            if (a == 0 || a > 32) continue;
+            if (y < wy0[a]) wy0[a] = y;
+            if (y > wy1[a]) wy1[a] = y;
+        }
+    }
+
     for (int y = 0; y < 224; y++) {
         int block      = y >> 3;
         int row_in_blk = y & 7;
@@ -1326,9 +1318,11 @@ void vb_vip_render_framebuffer_recolored(int eye, uint32_t* argb_out) {
         for (int x = 0; x < 384; x++) {
             uint8_t  b  = fb[x * 64 + byte_off];
             uint32_t v  = (b >> bit_shift) & 3u;
-            uint16_t id = attr[y * 384 + x];
+            uint16_t a  = attr[y * 384 + x];
             uint32_t out;
-            if (id != 0 && vb_recolor_pixel(id, (int)v, &out)) {
+            if (a != 0 && a <= 32 && wy1[a] >= 0 &&
+                vb_recolor_world_pixel((int)a - 1, y - wy0[a],
+                                       wy1[a] - wy0[a] + 1, (int)v, &out)) {
                 argb_out[y * 384 + x] = out;
             } else {
                 int32_t bv = s_brt_cache[v];

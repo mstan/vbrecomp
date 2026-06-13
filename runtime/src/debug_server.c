@@ -417,25 +417,20 @@ static void handle_overrides_state(long long id) {
     send_response(body);
 }
 
-/* List the distinct source tiles currently on screen (for recolor
- * identification): for each attribution id present in the displayed eye's
- * buffer, report its content hash, char_no, palette, pixel count, and bounding
- * box — top N by pixel count. Requires attribution active (capture or recolor).*/
-static void handle_attr_hashes(long long id, const char* line) {
-    long long eye = 0, topn = 48;
+/* Report the per-world on-screen footprint (for recolor identification): for
+ * each world index drawn in the displayed eye, its pixel count + bounding box,
+ * sorted by count. The attribution buffer stores world+1; this maps it back to
+ * world. Requires attribution active (capture or recolor). */
+static void handle_world_map(long long id, const char* line) {
+    long long eye = 0;
     extract_int(line, "\"eye\"", &eye);
-    extract_int(line, "\"top\"", &topn);
-    if (topn < 1) topn = 1;
-    if (topn > 256) topn = 256;
-
     const uint16_t* attr = vb_vip_attr_buffer((int)(eye & 1));
-    static int cnt[8192];
-    static short x0[8192], y0[8192], x1[8192], y1[8192];
-    memset(cnt, 0, sizeof(cnt));
+    int cnt[33] = {0};
+    short x0[33], y0[33], x1[33], y1[33];
     for (int y = 0; y < 224; y++) {
         for (int x = 0; x < 384; x++) {
             uint16_t a = attr[y * 384 + x];
-            if (!a) continue;
+            if (a == 0 || a > 32) continue;
             if (cnt[a] == 0) { x0[a] = x1[a] = (short)x; y0[a] = y1[a] = (short)y; }
             else {
                 if (x < x0[a]) x0[a] = (short)x;
@@ -446,32 +441,27 @@ static void handle_attr_hashes(long long id, const char* line) {
             cnt[a]++;
         }
     }
-
-    char* buf = (char*)malloc(96 * 1024);
-    if (!buf) { send_response("{\"ok\":false,\"error\":\"oom\"}"); return; }
+    char buf[4096];
     char* p = buf;
-    char* end = buf + 96 * 1024;
+    char* end = buf + sizeof(buf);
     p += snprintf(p, (size_t)(end - p),
-                  "{\"ok\":true,\"cmd\":\"attr_hashes\",\"id\":%lld,\"eye\":%lld,"
-                  "\"tiles\":[", id, eye);
+                  "{\"ok\":true,\"cmd\":\"world_map\",\"id\":%lld,\"eye\":%lld,"
+                  "\"worlds\":[", id, eye);
     int used = 0;
-    for (long long k = 0; k < topn; ++k) {
+    for (int k = 0; k < 32; ++k) {
         int best = -1, bestc = 0;
-        for (int a = 1; a < 8192; ++a) if (cnt[a] > bestc) { bestc = cnt[a]; best = a; }
+        for (int a = 1; a <= 32; ++a) if (cnt[a] > bestc) { bestc = cnt[a]; best = a; }
         if (best < 0) break;
-        uint32_t hash = vb_vip_char_hash((uint32_t)(best & 0x7FF));
         p += snprintf(p, (size_t)(end - p),
-                      "%s{\"hash\":\"%08x\",\"char\":%d,\"palette\":%d,"
-                      "\"count\":%d,\"x0\":%d,\"y0\":%d,\"x1\":%d,\"y1\":%d}",
-                      used ? "," : "", hash, best & 0x7FF, (best >> 11) & 3,
-                      cnt[best], x0[best], y0[best], x1[best], y1[best]);
-        cnt[best] = 0;  /* consume */
+                      "%s{\"world\":%d,\"count\":%d,\"x0\":%d,\"y0\":%d,\"x1\":%d,\"y1\":%d}",
+                      used ? "," : "", best - 1, cnt[best],
+                      x0[best], y0[best], x1[best], y1[best]);
+        cnt[best] = 0;
         used++;
-        if (end - p < 256) break;
+        if (end - p < 128) break;
     }
     snprintf(p, (size_t)(end - p), "]}");
     send_response(buf);
-    free(buf);
 }
 
 /* Introspect the opt-in recolor layer (TCP, not printf). */
@@ -956,7 +946,7 @@ static void dispatch_line(char* line) {
     else if (strcmp(cmd, "overrides_state") == 0) handle_overrides_state(id);
     else if (strcmp(cmd, "recolor_state") == 0) handle_recolor_state(id);
     else if (strcmp(cmd, "recolor_reload") == 0) handle_recolor_reload(id);
-    else if (strcmp(cmd, "attr_hashes") == 0)  handle_attr_hashes(id, line);
+    else if (strcmp(cmd, "world_map") == 0)    handle_world_map(id, line);
     else if (strcmp(cmd, "audio_shadow_state") == 0) handle_audio_shadow_state(id);
     else if (strcmp(cmd, "memory_map") == 0)   handle_memory_map(id);
     else if (strcmp(cmd, "wtrace_stats") == 0) handle_wtrace_stats(id);

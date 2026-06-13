@@ -1,35 +1,37 @@
-/* recolor.c — see recolor.h. Faithful-by-default present-time recolor pack. */
+/* recolor.c — see recolor.h. Faithful-by-default world-based recolor pack.
+ *
+ * Pack format (overrides/recolor/palette.json):
+ *   { "worlds": [
+ *       { "world": 24, "label": "mario", "bands": [
+ *           { "hi": 96,  "ramp": ["#000","#7a0000","#c81010","#ff3030"] },
+ *           { "hi": 160, "ramp": [...] },   // bands cover rel-y in 0..256
+ *           { "hi": 256, "ramp": [...] } ] },
+ *       { "world": 30, "label": "court", "ramp": [ ...4 colors... ] }  // flat
+ *   ] }
+ * A world rule with a single "ramp" (no "bands") is flat (one band, hi=256).
+ */
 #include "recolor.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#define MAX_ENTRIES 1024
-#define LUT_SIZE    8192     /* 11-bit char_no + 2-bit palette */
+#define MAX_RULES 64
+#define MAX_BANDS 8
 
-typedef struct {
-    uint32_t hash;
-    int      palette;     /* -1 = any */
-    uint32_t ramp[4];     /* ARGB per brightness value 0..3 */
-} Entry;
+typedef struct { int hi; uint32_t ramp[4]; } Band;        /* hi = rel-y upper bound 0..256 */
+typedef struct { int world; int nbands; Band bands[MAX_BANDS]; } Rule;
 
 static int    s_active = -1;
-static Entry  s_entries[MAX_ENTRIES];
+static Rule   s_rules[MAX_RULES];
 static int    s_count = 0;
 static int    s_loaded = 0;
-
-/* per-frame LUT */
-static uint8_t  s_has[LUT_SIZE];
-static uint32_t s_argb[LUT_SIZE][4];
 
 static const char* overrides_dir(void) {
     const char* env = getenv("VBRECOMP_OVERRIDES");
     return (env && *env) ? env : NULL;
 }
 
-/* Parse "#rrggbb" (or "#aarrggbb") at p; returns ARGB8888, alpha forced 0xFF
- * unless 8 hex digits given. */
 static uint32_t parse_hex_color(const char* p) {
     while (*p == ' ' || *p == '\t' || *p == '"') p++;
     if (*p == '#') p++;
@@ -39,8 +41,27 @@ static uint32_t parse_hex_color(const char* p) {
                      (p[n] >= 'A' && p[n] <= 'F'))) { buf[n] = p[n]; n++; }
     buf[n] = 0;
     unsigned long v = strtoul(buf, NULL, 16);
-    if (n <= 6) return 0xFF000000u | (uint32_t)v;   /* RRGGBB */
-    return (uint32_t)v;                              /* AARRGGBB */
+    if (n <= 6) return 0xFF000000u | (uint32_t)v;
+    return (uint32_t)v;
+}
+
+/* Read 4 "#rrggbb" colors from the array starting at `arr` ('[' expected). */
+static int parse_ramp(const char* arr, const char* end, uint32_t out[4]) {
+    const char* c = strchr(arr, '[');
+    if (!c) return 0;
+    c++;
+    for (int i = 0; i < 4; ++i) {
+        const char* q = strchr(c, '#');
+        if (!q || q >= end) return 0;
+        out[i] = parse_hex_color(q);
+        c = q + 1;
+    }
+    return 1;
+}
+
+static int int_after(const char* key_pos) {
+    const char* c = strchr(key_pos, ':');
+    return c ? (int)strtol(c + 1, NULL, 10) : 0;
 }
 
 static void load_pack(void) {
@@ -56,53 +77,42 @@ static void load_pack(void) {
     if (!t) { fclose(f); return; }
     if (fread(t, 1, (size_t)len, f) != (size_t)len) { free(t); fclose(f); return; }
     t[len] = 0; fclose(f);
-
-    /* Each entry has exactly one "ramp"; anchor on it, read the nearest
-     * preceding "hash" and "palette" and the 4 colors after "ramp". */
-    const char* p = t;
     const char* end = t + len;
-    while (s_count < MAX_ENTRIES) {
-        const char* ramp = strstr(p, "\"ramp\"");
-        if (!ramp) break;
 
-        /* nearest "hash" before this ramp */
-        const char* hk = NULL;
-        for (const char* s = strstr(t, "\"hash\""); s && s < ramp;
-             s = strstr(s + 1, "\"hash\"")) hk = s;
-        uint32_t hash = 0; int have_hash = 0;
-        if (hk) {
-            const char* c = strchr(hk, ':');
-            if (c) { while (*++c == ' ' || *c == '\t' || *c == '"') {}
-                     hash = (uint32_t)strtoul(c, NULL, 16); have_hash = 1; }
-        }
-        /* nearest "palette" before this ramp (optional) */
-        int palette = -1;
-        {
-            const char* pk = NULL;
-            for (const char* s = strstr(t, "\"palette\""); s && s < ramp;
-                 s = strstr(s + 1, "\"palette\"")) pk = s;
-            if (pk) { const char* c = strchr(pk, ':');
-                      if (c) palette = (int)strtol(c + 1, NULL, 10); }
-        }
-        /* 4 hex colors after "ramp": */
-        uint32_t r[4] = {0,0,0,0};
-        const char* c = strchr(ramp, '[');
-        int ok = (c != NULL) && have_hash;
-        if (c) {
-            c++;
-            for (int i = 0; i < 4 && c < end; ++i) {
-                const char* q = strchr(c, '#');
-                if (!q || q >= end) { ok = 0; break; }
-                r[i] = parse_hex_color(q);
-                c = q + 1;
+    /* One rule per "world" key. The rule spans [this "world", next "world"). */
+    const char* w = strstr(t, "\"world\"");
+    while (w && s_count < MAX_RULES) {
+        const char* wnext = strstr(w + 1, "\"world\"");
+        const char* span_end = wnext ? wnext : end;
+
+        Rule* rl = &s_rules[s_count];
+        rl->world = int_after(w);
+        rl->nbands = 0;
+
+        /* Each "ramp" in this span is a band; its upper bound is the nearest
+         * preceding "hi" in the span (or 256 if none → flat). */
+        const char* r = strstr(w, "\"ramp\"");
+        while (r && r < span_end && rl->nbands < MAX_BANDS) {
+            int hi = 256;
+            const char* hk = NULL;
+            for (const char* s = strstr(w, "\"hi\""); s && s < r;
+                 s = strstr(s + 1, "\"hi\"")) { if (s < span_end) hk = s; }
+            if (hk) hi = int_after(hk);
+            uint32_t ramp[4];
+            if (parse_ramp(r, span_end, ramp)) {
+                Band* b = &rl->bands[rl->nbands++];
+                b->hi = hi;
+                for (int i = 0; i < 4; ++i) b->ramp[i] = ramp[i];
             }
+            r = strstr(r + 1, "\"ramp\"");
         }
-        if (ok) {
-            Entry* e = &s_entries[s_count++];
-            e->hash = hash; e->palette = palette;
-            for (int i = 0; i < 4; ++i) e->ramp[i] = r[i];
+        if (rl->nbands > 0) {
+            /* ensure the last band reaches the bottom so all rel-y is covered */
+            if (rl->bands[rl->nbands - 1].hi < 256)
+                rl->bands[rl->nbands - 1].hi = 256;
+            s_count++;
         }
-        p = ramp + 6;
+        w = wnext;
     }
     free(t);
 }
@@ -122,39 +132,32 @@ void vb_recolor_init(void) {
     load_pack();
 }
 
-void vb_recolor_shutdown(void) {
-    s_count = 0; s_loaded = 0; s_active = -1;
-}
+void vb_recolor_shutdown(void) { s_count = 0; s_loaded = 0; s_active = -1; }
 
 void vb_recolor_reload(void) {
     s_count = 0;
     load_pack();
-    /* keep s_active as-is so attribution/present stay enabled across a reload */
+    /* Re-resolve active state so a pack authored live (empty -> non-empty)
+     * turns recolor on without a restart. */
+    s_active = (s_count > 0) ? 1 : 0;
 }
 
 int vb_recolor_entry_count(void) { return s_count; }
 
-void vb_recolor_frame_reset(void) {
-    memset(s_has, 0, sizeof(s_has));
-}
-
-void vb_recolor_resolve(uint16_t id, uint32_t hash, int palette) {
-    if (id >= LUT_SIZE) return;
-    /* Prefer an exact palette match over a wildcard (-1) entry. */
-    const Entry* best = NULL;
-    for (int i = 0; i < s_count; ++i) {
-        const Entry* e = &s_entries[i];
-        if (e->hash != hash) continue;
-        if (e->palette == palette) { best = e; break; }
-        if (e->palette < 0 && !best) best = e;
+int vb_recolor_world_pixel(int world, int rel_num, int rel_den, int value,
+                           uint32_t* argb_out) {
+    const Rule* rl = NULL;
+    for (int i = 0; i < s_count; ++i)
+        if (s_rules[i].world == world) { rl = &s_rules[i]; break; }
+    if (!rl || rl->nbands == 0) return 0;
+    int rel = (rel_den > 0) ? (rel_num * 256) / rel_den : 0;
+    if (rel < 0) rel = 0;
+    if (rel > 255) rel = 255;
+    for (int b = 0; b < rl->nbands; ++b) {
+        if (rel < rl->bands[b].hi) {
+            *argb_out = rl->bands[b].ramp[value & 3];
+            return 1;
+        }
     }
-    if (!best) return;
-    s_has[id] = 1;
-    for (int v = 0; v < 4; ++v) s_argb[id][v] = best->ramp[v];
-}
-
-int vb_recolor_pixel(uint16_t id, int value, uint32_t* argb_out) {
-    if (id >= LUT_SIZE || !s_has[id]) return 0;
-    *argb_out = s_argb[id][value & 3];
-    return 1;
+    return 0;
 }
