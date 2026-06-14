@@ -52,7 +52,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define MAX_SCENES 16
+#define MAX_SCENES 24
 #define MAX_RULES  64   /* per scene */
 #define MAX_BANDS  8
 #define MAX_COLS   12   /* horizontal regions per rule (e.g. a roster strip) */
