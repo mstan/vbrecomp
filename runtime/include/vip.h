@@ -122,6 +122,26 @@ uint64_t vb_vip_cycles(void);
 const uint16_t* vb_vip_attr_buffer(int eye);
 uint32_t        vb_vip_char_hash(uint32_t char_no);
 
+/* Always-on observation rings (experiment / collaborative capture). Sized to
+ * span a whole play session and walked after the fact — never a short window a
+ * probe must race. Both keyed by a per-displayed-frame sequence number, filled
+ * only while the recolor render runs (same precondition as world_map).
+ *   - World ring: per displayed frame, the active-world mask + each present
+ *     world's on-screen bbox (~11 min deep).
+ *   - WRAM anchor ring: a game-state WRAM-window snapshot taken at each
+ *     world-set transition (one entry per distinct on-screen state). Diff the
+ *     window across anchors with different masks to find a sub-state byte.
+ * Index i runs 0 = oldest available .. len-1 = newest. */
+typedef struct { uint8_t world; int16_t x0, y0, x1, y1; uint32_t count; } VbWorldBox;
+uint32_t vb_vip_frame_seq(void);
+int      vb_vip_wring_len(void);
+int      vb_vip_wring_get(int i, uint32_t* seq, uint32_t* mask, VbWorldBox* out, int max);
+int      vb_vip_aring_len(void);
+uint32_t vb_vip_aring_base(void);
+uint32_t vb_vip_aring_window(void);
+int      vb_vip_aring_get(int i, uint32_t off, int len, uint32_t* seq, uint32_t* mask,
+                          uint8_t* out);
+
 #ifdef __cplusplus
 }
 #endif

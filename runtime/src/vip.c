@@ -30,6 +30,7 @@
 
 #include "input.h"
 #include "interrupts.h"
+#include "memory.h"      /* vb_memory_dump — WRAM observation ring */
 #include "red_lut.h"
 #include "stub_abort.h"
 #include "vip_capture.h"
@@ -155,6 +156,78 @@ static int32_t  s_sb_latch;              /* SB_Latch */
 static int64_t  s_sbout_inactive_time;   /* SBOUT_InactiveTime — VIP-cycle absolute */
 static uint64_t s_vip_cycles;            /* monotonic VIP cycle counter */
 
+/* ---- Always-on observation rings (experiment / collaborative capture) ----
+ * Sized to span a whole play session, frame-stamped, walked AFTER the fact —
+ * never a short window a probe must race (mirrors snesrecomp's multi-minute
+ * frame history + WRAM anchors). The user plays freely, pauses whenever, and we
+ * query the recorded history; there is no "arm then catch the event" timing.
+ * Both keyed by a per-displayed-frame sequence number (s_vip_frame_seq, bumped
+ * at the framebuffer flip), so an anchor's WRAM aligns to a world-ring frame.
+ * They fill only while the recolor render runs (overrides on, same precondition
+ * as world_map — the only path that builds the attribution buffer).
+ *   - World ring: per displayed frame, the active-world mask + each present
+ *     world's on-screen bbox. ~11 min deep, for finding e.g. which world draws
+ *     the far opponent during a rally.
+ *   - WRAM anchor ring: a game-state WRAM-window snapshot taken at each
+ *     world-set TRANSITION (one entry per distinct on-screen state, so a whole
+ *     match's states fit). Diff the window across anchors with different masks
+ *     to find the sub-state byte. */
+static uint32_t s_vip_frame_seq = 0;     /* monotonic displayed-frame counter */
+
+#define WRING_FRAMES 32768               /* ~11 min at 50 Hz (~11 MB) */
+#define WRING_MAXW   20
+typedef struct { uint8_t world; int16_t x0, y0, x1, y1; uint32_t count; } WRingBox;
+typedef struct { uint32_t seq, mask; uint8_t nbox; WRingBox box[WRING_MAXW]; } WRingFrame;
+static WRingFrame s_wring[WRING_FRAMES];
+static uint32_t   s_wring_head, s_wring_count, s_wring_last_seq = 0xFFFFFFFFu;
+
+#define ARING_N    1024                  /* distinct-state anchors (~2 MB) */
+#define ARING_BASE 0x05002000u           /* match/player struct lives here */
+#define ARING_LEN  0x800u                /* 2 KB game-state window */
+typedef struct { uint32_t seq, mask; uint8_t buf[ARING_LEN]; } ARingFrame;
+static ARingFrame s_aring[ARING_N];
+static uint32_t   s_aring_head, s_aring_count, s_aring_last_mask = 0xFFFFFFFFu;
+static uint32_t   s_prev_active_mask = 0; /* previous frame's raw mask (flicker) */
+
+/* Record one displayed frame into both rings. Deduped on the frame seq so the
+ * per-eye / per-screenshot calls into the recolor render append only once.
+ * wcnt/wy0/.. are indexed by attr value a (1..32); world == a-1. The WRAM
+ * anchor is taken only when the active-world mask changes. */
+static void vip_rings_record(uint32_t mask, const int* wy0, const int* wy1,
+                             const int* wx0, const int* wx1, const int* wcnt) {
+    if (s_vip_frame_seq == s_wring_last_seq) return;
+    s_wring_last_seq = s_vip_frame_seq;
+
+    WRingFrame* f = &s_wring[s_wring_head];
+    f->seq = s_vip_frame_seq; f->mask = mask; f->nbox = 0;
+    for (int a = 1; a <= 32 && f->nbox < WRING_MAXW; ++a) {
+        if (wcnt[a] < 16 || wy1[a] < 0) continue;
+        WRingBox* b = &f->box[f->nbox++];
+        b->world = (uint8_t)(a - 1);
+        b->x0 = (int16_t)wx0[a]; b->y0 = (int16_t)wy0[a];
+        b->x1 = (int16_t)wx1[a]; b->y1 = (int16_t)wy1[a];
+        b->count = (uint32_t)wcnt[a];
+    }
+    s_wring_head = (s_wring_head + 1) % WRING_FRAMES;
+    if (s_wring_count < WRING_FRAMES) s_wring_count++;
+
+    /* Canonicalize across the alternating-frame redraw: the VB toggles sprite
+     * worlds (near player, net, ball) every other frame, so the raw mask flips
+     * each frame and would make EVERY frame a transition — flooding the anchor
+     * ring and evicting real states within ~10 s. OR two consecutive frames so a
+     * steady scene yields ONE stable signature; anchor only when that changes. */
+    uint32_t canon = mask | s_prev_active_mask;
+    s_prev_active_mask = mask;
+    if (canon != s_aring_last_mask) {
+        s_aring_last_mask = canon;
+        ARingFrame* an = &s_aring[s_aring_head];
+        an->seq = s_vip_frame_seq; an->mask = canon;
+        vb_memory_dump(ARING_BASE, an->buf, ARING_LEN);
+        s_aring_head = (s_aring_head + 1) % ARING_N;
+        if (s_aring_count < ARING_N) s_aring_count++;
+    }
+}
+
 
 static uint32_t vip_offset(uint32_t addr) {
     return addr & (VIP_WINDOW_SIZE - 1u);
@@ -258,6 +331,10 @@ void vb_vip_init(void) {
     s_drawing_fb      = 0;
     s_drawing_block   = 0;
     s_sb_latch        = 0;
+    s_vip_frame_seq   = 0;
+    s_wring_head = s_wring_count = 0; s_wring_last_seq = 0xFFFFFFFFu;
+    s_aring_head = s_aring_count = 0; s_aring_last_mask = 0xFFFFFFFFu;
+    s_prev_active_mask = 0;
     s_sbout_inactive_time = -1;
     s_vip_cycles = 0;
     vb_capture_init();      /* allocates rings only if VBRECOMP_CAPTURE is set */
@@ -332,6 +409,11 @@ static void vip_advance_column(void) {
                     s_drawing_block  = 0;
                     s_drawing_active = 1;
                     s_drawing_counter = 1120 * 4;
+
+                    /* New displayed frame: bump the observation-ring sequence.
+                     * Both rings are recorded later by the recolor render
+                     * (which has the attribution buffer), keyed off this seq. */
+                    s_vip_frame_seq++;
 
                     /* Opt-in capture: snapshot the world/OAM/CHR tables the
                      * about-to-draw blocks will read. Gated on
@@ -1327,6 +1409,10 @@ void vb_vip_render_framebuffer_recolored(int eye, uint32_t* argb_out) {
         if (wcnt[a] >= 16) active_mask |= (1u << (a - 1));
     vb_recolor_select_scene(active_mask);
 
+    /* Feed the always-on observation rings (deduped per displayed frame, so the
+     * eye-1 and screenshot calls here don't double-record). */
+    vip_rings_record(active_mask, wy0, wy1, wx0, wx1, wcnt);
+
     for (int y = 0; y < 224; y++) {
         int block      = y >> 3;
         int row_in_blk = y & 7;
@@ -1400,4 +1486,47 @@ const uint16_t* vb_vip_attr_buffer(int eye) {
 }
 uint32_t vb_vip_char_hash(uint32_t char_no) {
     return vb_capture_hash(&chr_u16()[(char_no & 0x7FFu) * 8u]);
+}
+
+/* ---- Observation-ring introspection (world_trace / wram_anchors) ---- */
+uint32_t vb_vip_frame_seq(void) { return s_vip_frame_seq; }
+
+int vb_vip_wring_len(void) { return (int)s_wring_count; }
+
+/* Copy world-ring frame i (0=oldest .. len-1=newest): sets *seq, *mask and
+ * writes up to `max` boxes into out[]; returns the box count, or -1 if OOR. */
+int vb_vip_wring_get(int i, uint32_t* seq, uint32_t* mask, VbWorldBox* out, int max) {
+    int len = (int)s_wring_count;
+    if (i < 0 || i >= len) return -1;
+    uint32_t base = (s_wring_count < WRING_FRAMES) ? 0 : s_wring_head;
+    const WRingFrame* f = &s_wring[(base + (uint32_t)i) % WRING_FRAMES];
+    if (seq) *seq = f->seq;
+    if (mask) *mask = f->mask;
+    int n = f->nbox; if (n > max) n = max;
+    for (int k = 0; k < n; ++k) {
+        out[k].world = f->box[k].world;
+        out[k].x0 = f->box[k].x0; out[k].y0 = f->box[k].y0;
+        out[k].x1 = f->box[k].x1; out[k].y1 = f->box[k].y1;
+        out[k].count = f->box[k].count;
+    }
+    return n;
+}
+
+int      vb_vip_aring_len(void)    { return (int)s_aring_count; }
+uint32_t vb_vip_aring_base(void)   { return ARING_BASE; }
+uint32_t vb_vip_aring_window(void) { return ARING_LEN; }
+
+/* Copy WRAM anchor i's window slice [off, off+len): sets *seq, *mask, writes
+ * bytes into out; returns bytes copied, or -1 if i out of range / slice OOB. */
+int vb_vip_aring_get(int i, uint32_t off, int len, uint32_t* seq, uint32_t* mask,
+                     uint8_t* out) {
+    int n = (int)s_aring_count;
+    if (i < 0 || i >= n) return -1;
+    if (len < 0 || off + (uint32_t)len > ARING_LEN) return -1;
+    uint32_t base = (s_aring_count < ARING_N) ? 0 : s_aring_head;
+    const ARingFrame* f = &s_aring[(base + (uint32_t)i) % ARING_N];
+    if (seq) *seq = f->seq;
+    if (mask) *mask = f->mask;
+    for (int k = 0; k < len; ++k) out[k] = f->buf[off + k];
+    return len;
 }

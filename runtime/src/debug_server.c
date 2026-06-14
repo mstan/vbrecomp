@@ -183,12 +183,22 @@ static void wprintf_(char** cur, char* end, const char* fmt, ...) {
     if (n > 0) *cur += (size_t)n;
 }
 
+static void send_all(const char* data, size_t n) {
+    size_t off = 0;
+    while (off < n) {
+        int sent = send(s_client, data + off, (int)(n - off), 0);
+        if (sent <= 0) return;   /* socket error/closed — drop the rest */
+        off += (size_t)sent;
+    }
+}
+
 static void send_response(const char* body) {
     if (s_client == VB_BAD_SOCKET) return;
-    size_t n = strlen(body);
-    /* Best-effort send; ignore partial-send for the skeleton. */
-    send(s_client, body, (int)n, 0);
-    send(s_client, "\n", 1, 0);
+    /* Loop until the whole body is flushed: a single send() can transmit fewer
+     * bytes than requested, which would silently truncate large ring dumps
+     * (world_trace / wram_trace). */
+    send_all(body, strlen(body));
+    send_all("\n", 1);
 }
 
 /* ---- Handlers ---- */
@@ -327,6 +337,40 @@ static void handle_screenshot(long long id, const char* line) {
         vb_vip_render_framebuffer_recolored((int)eye, buf);
     else
         vb_vip_render_framebuffer((int)eye, buf);
+
+    /* Opt-in world false-color view (diagnostic): tint each pixel by the world
+     * index that drew it (from the attribution buffer), modulated by the
+     * faithful brightness so sprite shapes stay legible. Lets a probe SEE which
+     * world owns an on-screen object — e.g. whether the far tennis opponent is
+     * its own world or shares the court world. Needs attribution (recolor on). */
+    long long attr = 0;
+    extract_int(line, "\"attr\"", &attr);
+    if (attr && vb_recolor_active()) {
+        /* Self-contained: render recolored to populate the attribution buffer
+         * for THIS exact frame (works headless, no dependence on a live present
+         * loop), then tint each pixel by its world index modulated by the
+         * pixel's brightness so sprite shapes stay legible. */
+        vb_vip_render_framebuffer_recolored((int)eye, buf);
+        /* 32 visually distinct world colors (index = world); 0 = no attribution. */
+        static const uint32_t WC[32] = {
+            0xFF0000,0x00FF00,0x4060FF,0xFFFF00,0xFF00FF,0x00FFFF,0xFF8000,0x8000FF,
+            0x80FF00,0xFF0080,0x00FF80,0x0080FF,0xFF80FF,0x80FFFF,0xFFC080,0xC080FF,
+            0xB00000,0x00B000,0x0000B0,0xB0B000,0xB000B0,0x00B0B0,0xB05000,0x5000B0,
+            0x808080,0xE0E0E0,0x008040,0x804000,0x400080,0x408000,0xFFFFFF,0x80C0FF };
+        const uint16_t* ab = vb_vip_attr_buffer((int)eye);
+        for (int i = 0; i < 384 * 224; ++i) {
+            uint16_t a = ab[i];                 /* 0 = none, else world+1 */
+            uint32_t px = buf[i];
+            uint32_t r0 = (px >> 16) & 0xFF, g0 = (px >> 8) & 0xFF, b0 = px & 0xFF;
+            uint32_t luma = r0 > g0 ? (r0 > b0 ? r0 : b0) : (g0 > b0 ? g0 : b0);
+            if (a == 0 || a > 32) { buf[i] = 0xFF000000u | (luma << 16) | (luma << 8) | luma; continue; }
+            uint32_t c = WC[(a - 1) & 31];
+            uint32_t r = (((c >> 16) & 0xFF) * luma) / 255;
+            uint32_t g = (((c >> 8)  & 0xFF) * luma) / 255;
+            uint32_t b = ( (c        & 0xFF) * luma) / 255;
+            buf[i] = 0xFF000000u | (r << 16) | (g << 8) | b;
+        }
+    }
     /* Opt-in: composite the override overlays into the captured frame so the
      * enhanced result can be inspected headlessly. Default (no "overlay"
      * field) stays the faithful raw render — keeps the oracle compare path
@@ -511,6 +555,87 @@ static void handle_recolor_trace(long long id, const char* line) {
         first = 0;
     }
     snprintf(p, (size_t)(end - p), "]}");
+    send_response(buf);
+    free(buf);
+}
+
+/* Max boxes per world-ring frame (matches vip.c WRING_MAXW; sized for the
+ * stack buffer + payload estimate here). */
+#define WRING_MAXW_HINT 20
+
+/* Dump the last n frames of the session-spanning world ring: per displayed
+ * frame, the active-world mask + each present world's on-screen bbox. Walk this
+ * after the fact (e.g. find which world drew the far opponent during a rally) —
+ * no timing race. n defaults to the whole ring. */
+static void handle_world_trace(long long id, const char* line) {
+    int len = vb_vip_wring_len();
+    long long n = len;
+    extract_int(line, "\"n\"", &n);
+    if (n < 1) n = 1;
+    if (n > len) n = len;
+    size_t cap = (size_t)n * (WRING_MAXW_HINT * 80 + 64) + 160;
+    char* buf = (char*)malloc(cap);
+    if (!buf) { send_response("{\"ok\":false,\"error\":\"oom\"}"); return; }
+    char* p = buf; char* e = buf + cap;
+    p += snprintf(p, (size_t)(e - p),
+                  "{\"ok\":true,\"cmd\":\"world_trace\",\"id\":%lld,\"frames\":[", id);
+    VbWorldBox boxes[WRING_MAXW_HINT];
+    int first = 1;
+    for (int i = len - (int)n; i < len; ++i) {
+        uint32_t seq = 0, mask = 0;
+        int nb = vb_vip_wring_get(i, &seq, &mask, boxes, WRING_MAXW_HINT);
+        if (nb < 0) continue;
+        p += snprintf(p, (size_t)(e - p), "%s{\"seq\":%u,\"mask\":\"0x%08X\",\"w\":[",
+                      first ? "" : ",", seq, mask);
+        first = 0;
+        for (int k = 0; k < nb; ++k)
+            p += snprintf(p, (size_t)(e - p),
+                "%s{\"world\":%d,\"x0\":%d,\"y0\":%d,\"x1\":%d,\"y1\":%d,\"count\":%u}",
+                k ? "," : "", boxes[k].world, boxes[k].x0, boxes[k].y0,
+                boxes[k].x1, boxes[k].y1, boxes[k].count);
+        p += snprintf(p, (size_t)(e - p), "]}");
+    }
+    snprintf(p, (size_t)(e - p), "]}");
+    send_response(buf);
+    free(buf);
+}
+
+/* Dump every WRAM anchor (one per world-set transition) for a byte slice
+ * [addr, addr+len) within the anchor window. Each anchor carries its seq + the
+ * world mask it entered, so diffing the slice across anchors with different
+ * masks pinpoints the byte that encodes the on-screen sub-state. */
+static void handle_wram_anchors(long long id, const char* line) {
+    long long addr = (long long)vb_vip_aring_base(), len = 64;
+    extract_int(line, "\"addr\"", &addr);
+    extract_int(line, "\"len\"", &len);
+    uint32_t base = vb_vip_aring_base(), win = vb_vip_aring_window();
+    if (len < 1 || len > 256 ||
+        (uint64_t)addr < base || (uint64_t)addr + (uint64_t)len > base + win) {
+        send_response("{\"ok\":false,\"error\":\"slice outside anchor window\"}");
+        return;
+    }
+    uint32_t off = (uint32_t)addr - base;
+    int n = vb_vip_aring_len();
+    size_t cap = (size_t)n * ((size_t)len * 2 + 64) + 192;
+    char* buf = (char*)malloc(cap);
+    if (!buf) { send_response("{\"ok\":false,\"error\":\"oom\"}"); return; }
+    char* p = buf; char* e = buf + cap;
+    p += snprintf(p, (size_t)(e - p),
+        "{\"ok\":true,\"cmd\":\"wram_anchors\",\"id\":%lld,\"addr\":\"0x%08X\","
+        "\"len\":%lld,\"anchors\":[", id, (uint32_t)addr, len);
+    uint8_t tmp[256];
+    int first = 1;
+    for (int i = 0; i < n; ++i) {
+        uint32_t seq = 0, mask = 0;
+        int got = vb_vip_aring_get(i, off, (int)len, &seq, &mask, tmp);
+        if (got < 0) continue;
+        p += snprintf(p, (size_t)(e - p), "%s{\"seq\":%u,\"mask\":\"0x%08X\",\"hex\":\"",
+                      first ? "" : ",", seq, mask);
+        first = 0;
+        for (int k = 0; k < got; ++k) p += snprintf(p, (size_t)(e - p), "%02X", tmp[k]);
+        p += snprintf(p, (size_t)(e - p), "\"}");
+    }
+    snprintf(p, (size_t)(e - p), "]}");
     send_response(buf);
     free(buf);
 }
@@ -979,6 +1104,8 @@ static void dispatch_line(char* line) {
     else if (strcmp(cmd, "recolor_reload") == 0) handle_recolor_reload(id);
     else if (strcmp(cmd, "recolor_trace") == 0) handle_recolor_trace(id, line);
     else if (strcmp(cmd, "world_map") == 0)    handle_world_map(id, line);
+    else if (strcmp(cmd, "world_trace") == 0)  handle_world_trace(id, line);
+    else if (strcmp(cmd, "wram_anchors") == 0) handle_wram_anchors(id, line);
     else if (strcmp(cmd, "audio_shadow_state") == 0) handle_audio_shadow_state(id);
     else if (strcmp(cmd, "memory_map") == 0)   handle_memory_map(id);
     else if (strcmp(cmd, "wtrace_stats") == 0) handle_wtrace_stats(id);
