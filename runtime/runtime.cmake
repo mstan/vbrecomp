@@ -34,13 +34,25 @@ function(vb_add_runtime_target TARGET)
         ${VB_RUNTIME_DIR}/src/input.c
         ${VB_RUNTIME_DIR}/src/interrupts.c
         ${VB_RUNTIME_DIR}/src/timer.c
-        ${VB_RUNTIME_DIR}/src/debug_server.c
         ${VB_RUNTIME_DIR}/src/ring_frame.c
         ${VB_RUNTIME_DIR}/src/stub_abort.c
-        ${VB_RUNTIME_DIR}/src/wtrace.c
-        ${VB_RUNTIME_DIR}/src/fntrace.c
         ${VB_RUNTIME_DIR}/src/watchdog.cpp
     )
+
+    # Prod-vs-debug TCP strip. VBRECOMP_DEBUG_TOOLS (option in vbrecomp/CMakeLists.txt,
+    # default ON) keeps the always-on dev tooling: the TCP debug server, the 1M-entry
+    # write-trace ring (wtrace), and the 256K function-entry ring (fntrace). OFF
+    # (release: tools/build-linux.sh --config prod) compiles vb_trace_stub.c instead —
+    # no-op definitions of the same symbols — so the runtime links but opens no port
+    # and carries no rings.
+    if(VBRECOMP_DEBUG_TOOLS)
+        list(APPEND _runtime_sources
+            ${VB_RUNTIME_DIR}/src/debug_server.c
+            ${VB_RUNTIME_DIR}/src/wtrace.c
+            ${VB_RUNTIME_DIR}/src/fntrace.c)
+    else()
+        list(APPEND _runtime_sources ${VB_RUNTIME_DIR}/src/vb_trace_stub.c)
+    endif()
 
     # Pick exactly one source of dispatch — never both. The build
     # fails loudly if a caller asks for both NO_GAME_LINKED and a
