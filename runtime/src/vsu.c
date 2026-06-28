@@ -94,6 +94,17 @@ static uint64_t s_ring_total;
 /* Cycle accumulator -> sample-rate downsample. */
 static int32_t  s_sample_cycle_residue;
 
+/* The VB VSU is clocked at CPU/4 (5 MHz), NOT the full 20 MHz CPU clock.
+ * Mednafen feeds its VSU `(v810_timestamp + CycleFix) >> 2` and runs the
+ * Blip buffer at VB_MASTER_CLOCK/4 (beetle-vb/libretro.cpp:1944,2346).
+ * Our vsu_step_channel is a verbatim port of Mednafen's 5 MHz-domain
+ * update loop (FreqCounter reload = 2048-EffFreq, dividers 4800/4/4/120),
+ * so it MUST be fed 5 MHz cycles. This accumulator carries the sub-4 CPU
+ * cycle remainder across ticks so no VSU clocks are lost (the CycleFix
+ * equivalent). Feeding 20 MHz here clocked every channel 4x too fast =
+ * pitch ~2 octaves sharp. */
+static int32_t  s_vsu_clock_residue;
+
 void vb_vsu_init(void) {
     memset(s_intl_control, 0, sizeof(s_intl_control));
     memset(s_left_level, 0, sizeof(s_left_level));
@@ -128,6 +139,7 @@ void vb_vsu_init(void) {
     s_ring_head = s_ring_tail = 0;
     s_ring_total = 0;
     s_sample_cycle_residue = 0;
+    s_vsu_clock_residue = 0;
 
     vb_vsu_shadow_reset();
 }
@@ -503,14 +515,23 @@ static inline void vsu_emit_one_sample(void) {
 }
 
 void vb_vsu_tick(uint64_t cpu_cycles) {
-    int64_t remaining = (int64_t)cpu_cycles;
+    int64_t remaining = (int64_t)cpu_cycles;          /* 20 MHz CPU domain */
     while (remaining > 0) {
         int32_t need = VSU_CYCLES_PER_SAMPLE - s_sample_cycle_residue;
         if (need <= 0) need = 1;
         int32_t step = (remaining < need) ? (int32_t)remaining : need;
 
-        for (int ch = 0; ch < 6; ++ch)
-            vsu_step_channel(ch, step);
+        /* Channel synthesis runs in the 5 MHz VSU domain (CPU/4). Convert
+         * this chunk of CPU cycles to VSU cycles, carrying the sub-4
+         * remainder so the channel clocks stay phase-exact across calls.
+         * Sample emission below stays in the CPU domain (453 cyc/sample
+         * = 20 MHz/44.1 kHz), so the output rate is unchanged. */
+        s_vsu_clock_residue += step;
+        int32_t vsu_step = s_vsu_clock_residue >> 2;
+        s_vsu_clock_residue &= 3;
+        if (vsu_step > 0)
+            for (int ch = 0; ch < 6; ++ch)
+                vsu_step_channel(ch, vsu_step);
 
         s_sample_cycle_residue += step;
         remaining -= step;
