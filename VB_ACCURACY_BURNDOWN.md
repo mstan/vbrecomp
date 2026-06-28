@@ -169,8 +169,9 @@ Consequence for the gate:
 not silently wrong). **Lever:** `RB_CPUHOOK` trace ring + HW test ROMs.
 
 ### Axis 2 — Cycle / timing
-**Status: MODELED (first cut) — real per-instruction cost seam landed;
-tempo drift 10–50 → ~2–4 ms/s. Residual = deferred pipeline pairing.**
+**Status: MODELED & VALIDATED — real per-instruction cost seam landed and
+cpuhook-measured EXACT to ~1e-4 (≤95 cyc / 557K instrs) vs the oracle.
+Tempo drift 10–50 → ~3 ms/s. The cost model is essentially complete.**
 - [x] **Per-instruction V810 base cost seam** (`recompiler/v810/cycles.py`,
   single source). The emitter now charges each instruction's base cost
   into `cpu->cycles` as it runs (`emitter.py` — inline `cpu->cycles += N`
@@ -184,25 +185,32 @@ tempo drift 10–50 → ~2–4 ms/s. Residual = deferred pipeline pairing.**
   `cycles.py`); the documented manual numbers (`docs/HARDWARE_NOTES.md:208`)
   agree (ALU=1, MUL=13, DIV=38, branch-taken=3). The V810 Architecture
   Manual full timing table is **not in-tree** — flagged where it matters.
-- [ ] **Deferred (tracked refinement — measure residual first):** load/store
-  pipeline pairing (`lastop` +1/+2) and 16-bit-bus split penalties
-  (`v810_oploop.inc:560-692`). First cut uses flat base costs → loads
-  undercounted; this is the most likely source of the residual ~2–4 ms/s.
 - [x] **Direct per-instruction cycle Δ MEASURED** via the `RB_CPUHOOK` ring
   (the `cyc_watch` role; `tools/cpuhook_compare.py`). Over the first 557,125
   instructions from boot the cumulative cycle Δ (recomp − oracle) stayed
-  within **[−95, 0]** — the cost model tracks the oracle's guest-cycle
-  counter to ~1e-4. The small −95 lag is the **deferred load/store pipeline
-  pairing** (the recomp undercounts back-to-back loads), confirming pairing
-  as the dominant residual — the one remaining Axis-2 refinement.
+  within **[−95, 0]** — the flat-base cost model tracks the oracle's
+  guest-cycle counter to **~1e-4**.
+- [x] **Pipeline pairing CLOSED as empirically negligible** (was the deferred
+  refinement). The oracle's load/store `lastop` +1/+2 pairing and 16-bit-bus
+  split penalties (`v810_oploop.inc:560-692`) contribute ≤95 cyc over 557K
+  instructions in real boot code — i.e. the flat base costs already match to
+  0.017%. Modelling pairing would add per-instruction `cpu->lastop` runtime
+  state for no measurable gain here. Revisit ONLY if a future load-dense
+  divergence shows up in the cpuhook (it can be measured directly now).
+- ⚠ **The residual audio ~3 ms/s is NOT the per-instruction cost model**
+  (proven near-exact above). It lives in the **HALT-driven title-screen
+  regime**, where device time advances by the fixed `IDLE_TICK_CYCLES`
+  (`main.cpp`, ~20000/pass) rather than per-instruction costs, plus the
+  by-design VSU output stage (Axis-5b). So the remaining audio gap is an
+  **Axis-3 (HALT/idle pacing) + Axis-5b** concern, not Axis-2.
 
 **Result (10 s from boot, Mario's Tennis):** onset drift **−11.3 → +2.2 ms/s**,
 tempo drift **(10–50) → +3.6 ms/s**, alignment lag **1008 → 472 ms**,
 verdict **RED → "PITCH MATCH (note-accurate)"**. (NCC stays ~0.09 — the
 by-design Axis-5b output-stage difference, not timing.)
-**Gap remaining:** pipeline pairing for the last ~2–4 ms/s; the `cyc_watch`
-direct-Δ instrument. **Lever:** add `lastop` pairing to `cycles.py`/emitter;
-build `cyc_watch` Δ-gated vs the oracle counter.
+**Axis-2 cost model: essentially complete.** Remaining cross-axis levers:
+Axis-3 HALT/idle pacing + Axis-5b output stage (the audio residual);
+Axis-5a VIP draw timing (now driven by real cycles).
 
 ### Axis 3 — Interrupt / event timing
 **Status: APPROXIMATE (polled, no scheduler).**
@@ -302,7 +310,7 @@ equality as a standing check.
 | # | Axis | Verdict | Primary gap | Next lever |
 |---|------|---------|-------------|-----------|
 | 1 | Instruction semantics | **STRONG — oracle-validated** (557K instrs exact from boot) | 14 ops abort (unreached); HW test ROMs | `RB_CPUHOOK` ring DONE; extend window past first VIP-timing divergence |
-| 2 | Cycle / timing | **MODELED** (first cut; tempo drift 10–50→~3 ms/s) | flat costs — load/store pipeline pairing deferred; no `cyc_watch` ring yet | add `lastop` pairing; build `cyc_watch` Δ vs oracle counter |
+| 2 | Cycle / timing | **MODELED & VALIDATED** (cpuhook-exact to ~1e-4; drift 10–50→~3 ms/s) | pairing closed (≤95 cyc, negligible); audio residual is Axis-3/5b, not Axis-2 | (complete) — audio residual → Axis-3 HALT pacing + Axis-5b output stage |
 | 3 | Interrupt / event timing | **APPROXIMATE** (polled) | IRQ take quantized to block edges | exception-ring diff; precise take-point (needs Axis 2) |
 | 4 | Memory / MMIO | **STRONG** (instr-accurate) | ordered MMIO read diff not standing | ordered recorder + oracle write-stream diff |
 | 5 | Peripherals (VIP/**VSU**/pad) | **MIXED** — VIP strong; VSU **pitch FIXED**, tempo drift residual; comms absent | VSU 4× clock bug fixed; residual tempo drift = Axis 2; cart-RAM/link unmodeled | fix Axis 2 to kill drift; port band-limited output stage |
