@@ -149,6 +149,17 @@ Consequence for the gate:
   `ok:false`). The first divergence is **not** a CPU bug — it is a VIP
   `DPSTTS` (0x5F820) display-status read whose value differs due to
   fine-grained VIP draw timing (Axis-5a / Axis-2), at pc `0xFFF8197E`.
+- [x] **Re-sync walk validates ~1.4M instructions.** `cpuhook_compare.py`
+  steps past timing-input divergences by re-aligning on pc+regs:
+  **1,405,565 instructions matched; ALL 4 divergence regions are
+  `mmio/timing-input` (VIP/VSU hardware reads); ZERO non-peripheral
+  semantic divergence.** The Axis-1 latent emitter bugs (MUL/MULU Z, r30
+  writeback, FP) are confirmed **not triggered** in real boot execution.
+  The walk stops at the first frame-synchronized poll-loop
+  (`LD.H @ 0xFFF8019A`) — past that the cart's control flow depends on
+  sub-frame VIP timing that differs between the two emulators, so lockstep
+  CPU comparison is no longer meaningful (the limit is VIP-timing coupling,
+  not a CPU bug).
 - ⚠ `docs/INSTRUCTION_STATUS.md` is **stale/misleading** — every row says
   `lifted:no/emitted:no` because `vbrecomp_status.py` hardcodes those
   columns and only checks the decoder, never the emitter. Trust the

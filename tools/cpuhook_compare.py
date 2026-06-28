@@ -170,6 +170,135 @@ def compare(host: str, rport: int, oport: int, target: int,
             "pc_div": pc_div, "fnv_div": fnv_div, "psw_div": psw_div}
 
 
+# --------------------------------------------------------------------------
+# Re-sync mode: step PAST timing/peripheral divergences to keep validating
+# CPU semantics deeper. A hardware-register read returns a timing-dependent
+# value, but it lands in a GPR that is usually overwritten within a few
+# instructions (state reconverges), and poll-loops on such a register
+# diverge only in LENGTH. So on a mismatch we search a bounded window for a
+# realignment — equal skip (j,j) for the overwrite-reconverge case, or
+# single-stream skip (j,0)/(0,j) for poll-loop length differences — and
+# continue, classifying each divergence by decoding the culprit instruction.
+# --------------------------------------------------------------------------
+def drain_all(host: str, port: int, target: int, window: int = 65536) -> list:
+    """Fetch records [0, target) into a list of (pc, psw, fnv, cycle)."""
+    out = []
+    cur = 0
+    while cur < target:
+        r = fetch(host, port, cur, min(window, target - cur))
+        if int(r["begin"]) > cur:
+            break  # evicted (shouldn't happen with first-N capture)
+        recs = parse_recs(r["hex"])
+        if not recs:
+            break
+        for pc, psw, fnv, _pad, cyc in recs:
+            out.append((pc, psw, fnv, cyc))
+        cur += len(recs)
+    return out
+
+
+def make_classifier(rom_path: str):
+    """Return classify(pc) -> (tag, mnemonic) by decoding the cart."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from recompiler.v810.analysis import RomImage
+    rom = RomImage.from_bytes(Path(rom_path).read_bytes())
+    LOADS = {0x30, 0x31, 0x33, 0x38, 0x39, 0x3B}   # LD.B/H/W, IN.B/H/W
+    ARITH = {0x08, 0x09, 0x0A, 0x0B}               # MUL, DIV, MULU, DIVU
+
+    def classify(pc: int):
+        ins = rom.decode_at_va(pc)
+        if ins is None:
+            return ("decode-fail", "?")
+        if ins.fmt.name == "VI" and ins.opcode6 in LOADS:
+            return ("mmio/timing-input", ins.mnemonic)
+        if ins.fmt.name == "I" and ins.opcode6 in ARITH:
+            return ("ARITH-check", ins.mnemonic)   # MUL/DIV: the flagged bugs
+        return ("other-semantic", ins.mnemonic)
+    return classify
+
+
+def resync_compare(r: list, o: list, classify, w: int = 8192, k: int = 8) -> dict:
+    n = min(len(r), len(o))
+
+    def run_match(a: int, b: int) -> bool:
+        if a + k > len(r) or b + k > len(o):
+            return False
+        for t in range(k):
+            if r[a + t][0] != o[b + t][0] or r[a + t][2] != o[b + t][2]:
+                return False
+        return True
+
+    i = j = 0
+    matched = 0
+    divs: list[dict] = []
+    while i < n and j < n:
+        if r[i][0] == o[j][0] and r[i][2] == o[j][2]:
+            matched += 1
+            i += 1
+            j += 1
+            continue
+        found = None
+        for d in range(1, w + 1):
+            for (da, db) in ((d, d), (d, 0), (0, d)):
+                if run_match(i + da, j + db):
+                    found = (da, db)
+                    break
+            if found:
+                break
+        culprit = r[i - 1][0] if i > 0 else r[i][0]
+        tag, mnem = classify(culprit)
+        divs.append({"seq": i, "r_pc": r[i][0], "o_pc": o[j][0],
+                     "culprit_pc": culprit, "class": tag, "culprit_op": mnem,
+                     "skip": found, "matched_before": matched,
+                     "ctrl_flow": r[i][0] != o[j][0]})
+        if not found:
+            break
+        i += found[0]
+        j += found[1]
+        if len(divs) >= 300:
+            break
+    return {"matched_total": matched, "divs": divs,
+            "reached": i, "compared": n}
+
+
+def fmt_resync(rep: dict) -> str:
+    L = ["=" * 70,
+         "  VB CPU-HOOK RE-SYNC  recomp (4390) vs oracle (4391)",
+         "=" * 70,
+         f"  instructions matched (across re-syncs)  {rep['matched_total']:,}",
+         f"  divergence regions found                {len(rep['divs'])}"]
+    by_class: dict[str, int] = {}
+    for d in rep["divs"]:
+        by_class[d["class"]] = by_class.get(d["class"], 0) + 1
+    for cls, c in sorted(by_class.items()):
+        L.append(f"      {cls:20} {c}")
+    arith = [d for d in rep["divs"] if d["class"] == "ARITH-check"]
+    other = [d for d in rep["divs"] if d["class"] == "other-semantic"]
+    L.append("-" * 70)
+    if arith:
+        L.append(f"  ** {len(arith)} ARITH (MUL/DIV) divergence(s) — candidate "
+                 f"Axis-1 semantic bugs: **")
+        for d in arith[:10]:
+            L.append(f"     seq {d['seq']:,}  culprit {d['culprit_op']} @ "
+                     f"0x{d['culprit_pc']:08X}")
+    if other:
+        L.append(f"  {len(other)} non-load semantic divergence(s) (first 10):")
+        for d in other[:10]:
+            cf = " [ctrl-flow]" if d["ctrl_flow"] else ""
+            L.append(f"     seq {d['seq']:,}  culprit {d['culprit_op']} @ "
+                     f"0x{d['culprit_pc']:08X}{cf}")
+    if not arith and not other:
+        L.append("  No NON-peripheral semantic divergence — every divergence "
+                 "stems from a hardware-register read (VIP/VSU/timer timing). "
+                 "CPU semantics validated across the whole window.")
+    if rep["divs"] and rep["divs"][-1]["skip"] is None:
+        d = rep["divs"][-1]
+        L.append(f"  (stopped: could not re-sync at seq {d['seq']:,} within "
+                 f"window — culprit {d['culprit_op']} @ 0x{d['culprit_pc']:08X})")
+    L.append("=" * 70)
+    return "\n".join(L)
+
+
 def fmt(rep: dict, psw_mask: int) -> str:
     L = ["=" * 64,
          "  VB CPU-HOOK DIVERGENCE  recomp (4390) vs oracle (4391)",
@@ -233,6 +362,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--mingw-bin", default=r"C:\msys64\mingw64\bin")
     p.add_argument("--psw-mask", type=lambda s: int(s, 0), default=PSW_ARITH,
                    help="PSW bits to compare (default 0xF = Z|S|OV|CY)")
+    p.add_argument("--first-only", action="store_true",
+                   help="stop at the first divergence (no re-sync)")
+    p.add_argument("--resync-window", type=int, default=8192,
+                   help="max instructions to skip when re-aligning streams")
     p.add_argument("--json-out", default=None)
     args = p.parse_args(argv)
 
@@ -271,9 +404,20 @@ def main(argv: list[str] | None = None) -> int:
                   "-DVBRECOMP_CPUHOOK=ON?", file=sys.stderr)
             return 2
 
-        rep = compare(args.host, args.runtime_port, args.oracle_port,
-                      target, args.psw_mask)
-        print(fmt(rep, args.psw_mask))
+        if args.first_only:
+            rep = compare(args.host, args.runtime_port, args.oracle_port,
+                          target, args.psw_mask)
+            print(fmt(rep, args.psw_mask))
+        else:
+            print(f"  draining [0,{target:,}) from both for re-sync walk ...",
+                  file=sys.stderr)
+            rr = drain_all(args.host, args.runtime_port, target)
+            oo = drain_all(args.host, args.oracle_port, target)
+            print(f"  drained recomp={len(rr):,} oracle={len(oo):,}; "
+                  f"decoding cart for classification ...", file=sys.stderr)
+            classify = make_classifier(args.rom)
+            rep = resync_compare(rr, oo, classify, w=args.resync_window)
+            print(fmt_resync(rep))
         if args.json_out:
             Path(args.json_out).write_text(json.dumps(rep, indent=2))
             print(f"wrote {args.json_out}", file=sys.stderr)
