@@ -388,6 +388,55 @@ static void handle_audio_pcm(long long id, const char* line) {
     free(pcm);
 }
 
+/* Per-instruction CPU-hook ring (Axis 1/2/3/6), defined in the beetle-vb
+ * core archive (libretro.cpp). RB_CPUHOOK records {pc, psw, regs-FNV,
+ * cumulative cycle} for every retired guest instruction; this streams a
+ * window by absolute retire-seq as little-endian hex of the raw record
+ * (struct below MUST match libretro.cpp's vb_cpuhook_rec). Ring QUERY,
+ * never an armed capture. */
+typedef struct { uint32_t pc, psw, fnv, pad; uint64_t cycle; } vb_cpuhook_rec;
+extern uint64_t vb_oracle_cpuhook_head(void);
+extern uint32_t vb_oracle_cpuhook_query(uint64_t from, uint32_t max,
+                                        vb_cpuhook_rec* out,
+                                        uint64_t* out_resident_lo);
+
+static void handle_cpuhook(long long id, const char* line) {
+    long long start = 0, maxn = 8192;
+    extract_int(line, "\"start\"", &start);
+    extract_int(line, "\"max\"",   &maxn);
+    if (start < 0)    start = 0;
+    if (maxn < 1)     maxn = 1;
+    if (maxn > 65536) maxn = 65536;
+
+    vb_cpuhook_rec* recs =
+        (vb_cpuhook_rec*)malloc((size_t)maxn * sizeof(vb_cpuhook_rec));
+    if (!recs) { send_response("{\"ok\":false,\"error\":\"oom\"}"); return; }
+
+    uint64_t head = vb_oracle_cpuhook_head();
+    uint64_t resident_lo = 0;
+    uint32_t got = vb_oracle_cpuhook_query((uint64_t)start, (uint32_t)maxn,
+                                           recs, &resident_lo);
+    uint64_t begin = ((uint64_t)start < resident_lo)
+                         ? resident_lo : (uint64_t)start;
+
+    char* body = (char*)malloc(256 + (size_t)got * sizeof(vb_cpuhook_rec) * 2);
+    if (!body) { free(recs); send_response("{\"ok\":false,\"error\":\"oom\"}"); return; }
+    char* p = body;
+    p += sprintf(p,
+        "{\"ok\":true,\"cmd\":\"cpuhook\",\"id\":%lld,\"recsize\":%u,"
+        "\"head\":%llu,\"resident_lo\":%llu,\"begin\":%llu,\"returned\":%u,\"hex\":\"",
+        id, (unsigned)sizeof(vb_cpuhook_rec),
+        (unsigned long long)head, (unsigned long long)resident_lo,
+        (unsigned long long)begin, (unsigned)got);
+    const unsigned char* raw = (const unsigned char*)recs;
+    for (size_t i = 0; i < (size_t)got * sizeof(vb_cpuhook_rec); ++i)
+        p += sprintf(p, "%02X", raw[i]);
+    p += sprintf(p, "\"}");
+    send_response(body);
+    free(body);
+    free(recs);
+}
+
 static void handle_pause(long long id, int state) {
     s_paused = state;
     char buf[128];
@@ -455,6 +504,7 @@ static void dispatch_line(char* line) {
     else if (strcmp(cmd, "get_registers") == 0)handle_get_registers(id);
     else if (strcmp(cmd, "vip_state") == 0)    handle_vip_state(id);
     else if (strcmp(cmd, "audio_pcm") == 0)    handle_audio_pcm(id, line);
+    else if (strcmp(cmd, "cpuhook") == 0)      handle_cpuhook(id, line);
     else if (strcmp(cmd, "screenshot") == 0)   handle_screenshot(id, line);
     else if (strcmp(cmd, "pause") == 0)        handle_pause(id, 1);
     else if (strcmp(cmd, "continue") == 0)     handle_pause(id, 0);

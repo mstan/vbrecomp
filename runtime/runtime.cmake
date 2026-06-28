@@ -61,7 +61,8 @@ function(vb_add_runtime_target TARGET)
         list(APPEND _runtime_sources
             ${VB_RUNTIME_DIR}/src/debug_server.c
             ${VB_RUNTIME_DIR}/src/wtrace.c
-            ${VB_RUNTIME_DIR}/src/fntrace.c)
+            ${VB_RUNTIME_DIR}/src/fntrace.c
+            ${VB_RUNTIME_DIR}/src/cpuhook.c)
     else()
         list(APPEND _runtime_sources ${VB_RUNTIME_DIR}/src/vb_trace_stub.c)
     endif()
@@ -130,6 +131,14 @@ function(vb_add_runtime_target TARGET)
 
     if(VBRECOMP_DEBUG_TOOLS)
         target_compile_definitions(${TARGET} PRIVATE VBRECOMP_DEBUG_TOOLS=1)
+        # Opt-in per-instruction CPU-hook ring (cpuhook.c, default OFF).
+        # Enables the generated VB_CPUHOOK(cpu) calls for the recomp-vs-
+        # oracle divergence/cycle harness. Requires the debug tooling
+        # (cpuhook.c is only compiled in this block). Default build is
+        # byte-identical in behavior with VBRECOMP_CPUHOOK unset.
+        if(VBRECOMP_CPUHOOK)
+            target_compile_definitions(${TARGET} PRIVATE VB_CPUHOOK_ENABLE=1)
+        endif()
     endif()
 
     # Warnings — match psxrecomp's discipline.

@@ -179,6 +179,22 @@ static inline void vb_psw_unpack(CPUState* cpu, uint32_t v) {
  * a CPU reset. */
 void vb_cpu_reset(CPUState* cpu);
 
+/* ---- Per-instruction CPU-hook (Axis 1/2/3/6 divergence harness) -------
+ * Built with -DVB_CPUHOOK_ENABLE (CMake: -DVBRECOMP_CPUHOOK=ON), the
+ * emitter's per-instruction VB_CPUHOOK(cpu) records {pc, packed PSW,
+ * regs-FNV, cycle} into an always-on ring (cpuhook.c) for diffing against
+ * the oracle's RB_CPUHOOK stream (first divergence + cycle Delta). The
+ * record is taken BEFORE the instruction's cycle charge and body, so it
+ * captures pre-instruction state/cycle — matching the oracle, which hooks
+ * before execution. Default build: the macro is a no-op (zero overhead,
+ * behavior byte-identical), mirroring the opt-in overrides convention. */
+#ifdef VB_CPUHOOK_ENABLE
+void vb_cpuhook_record(const CPUState* cpu);
+#define VB_CPUHOOK(cpu) vb_cpuhook_record(cpu)
+#else
+#define VB_CPUHOOK(cpu) ((void)0)
+#endif
+
 #ifdef __cplusplus
 }
 #endif

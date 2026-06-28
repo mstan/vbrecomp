@@ -809,6 +809,12 @@ def emit_function(rom: RomImage, fn: FunctionRange,
 
         lines.append(f"    cpu->pc = 0x{ins.pc:08X}u;")
 
+        # Per-instruction CPU-hook (Axis 1/2/3/6 divergence harness). No-op
+        # unless built -DVB_CPUHOOK_ENABLE. Emitted BEFORE the cycle charge
+        # and body so it records pre-instruction {pc,regs,psw,cycle},
+        # matching the oracle's RB_CPUHOOK (which fires before execution).
+        lines.append(f"    VB_CPUHOOK(cpu);")
+
         # Axis-2 cycle model: charge this instruction's V810 base cost
         # (single source: cycles.instr_base_cycles, from the oracle's
         # ADDCLOCK table). Charged BEFORE the body/terminator so it lands
