@@ -241,10 +241,18 @@ Axis 2).
 **Status: MIXED — VIP STRONG, VSU RED (now measured), comms not modeled.**
 
 - **VIP (video):** *scanline/column-accurate* — a genuine 259-cycle/column
-  state machine (`vip.c`), the most accurate subsystem. Validated by
-  `_vip_diff.py` / `_framebuf_diff.py` vs oracle. (But timing is driven by
-  the Axis-2 estimate; pixel content matches, fine-grained draw timing not
-  gated.)
+  state machine (`vip.c`), the most accurate subsystem.
+  - [x] **★ Pixels RECORDED green** (title screen): `_framebuf_diff.py` →
+    **0 / 86016 left-eye pixels differ (0.00%)**. VIP renders content-
+    identical to the oracle — the prior "validated" claim is now an actual
+    recorded result.
+  - [x] **Programmed VIP registers match** (`_vip_diff.py`) EXCEPT `INTPND`
+    (runtime `0x401E` vs oracle `0x001E`) — the difference is solely the
+    `XPEND` bit (0x4000, drawing-finished IRQ). So the residual is **draw-
+    COMPLETION timing phase**, not content: the two are at slightly different
+    sub-frame draw phases. Same root the cpuhook surfaced (the `DPSTTS`
+    divergence). Draw timing rides the Axis-2 cycle stream (now real) but the
+    VIP column/draw-finish scheduling vs the oracle's is not yet phase-gated.
 - **VSU (audio) — 6 channels** (ch0-3 wave, ch4 sweep/FM, ch5 noise; *not*
   16 — that was a brief error; see `docs/HARDWARE_NOTES.md`).
   - [x] Synthesis is a near-verbatim port of Mednafen `vsu.c` — state
