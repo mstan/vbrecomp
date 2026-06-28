@@ -11,7 +11,12 @@ in this burndown.
 - [x] **Blip_Buffer vendored** — `runtime/include/blip/Blip_Buffer.h` +
   `runtime/src/Blip_Buffer.c` (Mednafen 0.4.1, verbatim except an `INLINE`
   fallback `#define`), wired into `runtime.cmake`, compiles+links clean.
-- [ ] `vsu.c` integration (this plan).
+- [x] **`vsu.c` integration DONE** (this plan). `vsu_update_channel` feeds
+  boundary + per-chunk deltas into `s_synth`/`s_bb_l`/`s_bb_r`; `vb_vsu_tick`
+  accumulates a relative VSU-frame timestamp and flushes (`end_frame` +
+  `read_samples`) every `VSU_FLUSH_CLOCKS` (16384) cycles into the existing
+  ring. `-0x20`, `<<2`, and the 453-cadence are gone. `vsu_shadow` is
+  disconnected under Blip (see decision below). **Result:** see Proof.
 
 ## Reference (oracle): `beetle-vb/mednafen/vb/vsu.c`
 - `VSU_Init(bb_l, bb_r)` → `Blip_Synth_set_volume(&Synth, 1.0/6/2, 0x400)`
@@ -65,19 +70,44 @@ in this burndown.
    residue`.
 
 ## Risks / decisions
-- **vsu_shadow coupling**: `vsu_emit_one_sample` feeds the `vsu_shadow`
-  differential verifier the per-sample mix (`vsu.c:490-503`). Band-limited
-  output has no per-sample integer mix to feed. The shadow QoL layer
-  (opt-in, default OFF) is incompatible with Blip as-is — gate it off when
-  Blip output is active, or rework it to compare post-Blip. Decide before
-  removing the point-sample path.
+- **vsu_shadow coupling — DECIDED: disconnected under Blip.** The opt-in
+  `vsu_shadow` verifier (default OFF) compared a per-sample full-precision
+  float mix against the canon per-sample *integer* mix. Band-limited output
+  has no per-sample integer mix, and the shadow's full-precision gain
+  deliberately DIVERGES from the oracle's `(envelope*level>>3)+1`
+  quantization — which is exactly what this output stage is matching. So the
+  shadow is not wired into the Blip path; its source stays and
+  `vb_vsu_init` still resets its status ring, so a future *post-Blip* rework
+  can re-engage it as an overrides-style opt-in. Faithful default behavior
+  is unaffected (the shadow was default-OFF and byte-identical when off).
 - **Determinism**: `Blip_Synth_offset_resampled` is pure integer; volume is a
   one-time `double` at init. Must stay byte-identical across runs (verify).
 - **Headless ring**: keep the same `s_ring` + `audio_pcm`/`vb_vsu_read_abs`
   so `audio_compare.py` and SDL playback are unaffected.
 
-## Proof
-`audio_compare.py`: NCC should jump from ~0.09 (point-sampled) toward the
-envelope-correlation ceiling; level offset (~+3.8 dB) should close toward 0;
-verify two-run determinism (identical RMS) and no freeze. Tempo/onset drift
-(~3 ms/s) is a separate residual and should be ~unchanged.
+## Proof (measured — same-build before/after via `git stash`)
+`audio_compare.py --rom roms/marios_tennis.vb`, deterministic (two 10 s runs
+byte-identical):
+
+| metric | baseline (point-sampled) | Blip | note |
+|---|---|---|---|
+| level offset @10 s | **+3.84 dB** | **+1.09 dB** | closed toward 0 ✓ |
+| RMS (recomp) @10 s | 494.8 (67% of oracle) | **679.1 (92%)** | amplitude convergence ✓ |
+| NCC @10 s | 0.0933 | 0.0905 | flat — tempo-drift-capped |
+| NCC @2 s | 0.2305 | 0.2373 | short window ~2.6× the 10 s value |
+| xcorr tempo drift | +3.6 ms/s | +10.8 ms/s | metric artifact (see below) |
+
+**Outcome:** the predicted amplitude/spectral convergence landed (level
+offset +3.84 → +1.09 dB, RMS 67 → 92% of oracle) — the output stage now
+uses the oracle's exact gain chain. The hoped-for **NCC jump did NOT
+materialize**: NCC is **capped by tempo drift**, not the output stage.
+Evidence: short-window NCC (0.237 @2 s) is ~2.6× the 10 s value (0.091) —
+waveshape correlates well locally but walks out of phase as drift
+accumulates over the clip. The xcorr tempo number shifting (+3.6 → +10.8
+ms/s) is NOT a real timing regression — `vsu.c` is CPU-timing-neutral by
+construction, and the local-xcorr drift estimator responds to the changed
+(now oracle-matched) waveshape; the independent onset-fit estimator
+simultaneously reads −9.2 ms/s (opposite sign), i.e. both are
+noise-dominated on this sparse-onset content. **The audio NCC ceiling is now
+Axis-2/3 tempo drift, not Axis-5b.** No freeze (441000/441000 frames drained
+both sides, 0 lost).

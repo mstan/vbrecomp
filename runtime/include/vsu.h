@@ -1,17 +1,19 @@
 /* vsu.h — Virtual Sound Unit surface.
  *
  * 6-channel V810 sound synthesis. Ports beetle-vb/mednafen/vb/vsu.c
- * (lines 26-547) with the Blip_Synth band-limited path replaced by
- * a direct stereo S16 sample queue suitable for SDL_QueueAudio.
+ * (lines 26-547) INCLUDING the Blip_Synth band-limited output stage:
+ * channels feed amplitude deltas into a 5 MHz Blip_Buffer that drains
+ * 44.1 kHz stereo S16 frames into the internal ring (Axis-5b — see
+ * docs/AXIS5B_BLIP_OUTPUT.md). SDL drains via `vb_vsu_pull_samples`.
  *
  * Channel layout:
  *   ch 0..3 : 32 x 6-bit waveform from WaveData[ram_addr]
  *   ch 4    : waveform + frequency sweep / FM modulation via ModData
  *   ch 5    : 15-bit LFSR noise
  *
- * Audio output is paced by `vb_vsu_tick(cpu_cycles)` from main.cpp:
- * every VSU_CYCLES_PER_SAMPLE V810 cycles produces one stereo S16
- * frame in the internal ring. SDL drains via `vb_vsu_pull_samples`.
+ * Output is driven by `vb_vsu_tick(cpu_cycles)` from main.cpp; the Blip
+ * clock-rate factor (not a cycle-per-sample cadence) sets the 44.1 kHz
+ * rate, so output stays sample-rate-locked independent of tick size.
  */
 #ifndef VB_VSU_H
 #define VB_VSU_H
@@ -24,10 +26,6 @@ extern "C" {
 #endif
 
 #define VSU_OUTPUT_HZ          44100
-#define VSU_CPU_HZ             20000000
-/* 20 000 000 / 44 100 = 453.51 — Bresenham accumulator keeps drift
- * < 1 cycle per output sample, well below audible threshold. */
-#define VSU_CYCLES_PER_SAMPLE  453
 
 void vb_vsu_init(void);
 void vb_vsu_shutdown(void);

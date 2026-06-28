@@ -1,9 +1,14 @@
 /* vsu.c — Virtual Sound Unit.
  *
- * Port of beetle-vb/mednafen/vb/vsu.c (lines 26-470). The Beetle code
- * uses Blip_Synth for band-limited output; we use direct snapshot
- * sampling into a stereo ring buffer, which is plenty for chip audio
- * and avoids pulling in the Blip_Buffer dependency.
+ * Port of beetle-vb/mednafen/vb/vsu.c (lines 26-475), including the
+ * Blip_Synth band-limited output stage. Each VSU channel feeds amplitude
+ * deltas into a Blip_Buffer (clocked at VB_MASTER_CLOCK/4 = 5 MHz, the
+ * same 5 MHz domain as the step machine), exactly as the oracle does
+ * (VSU_Update vsu.c:289-469). The band-limited samples are drained at
+ * 44.1 kHz into the same stereo ring the SDL/accuracy paths already read.
+ * This replaces the earlier point-sampled (-0x20 / <<2 / 453-cadence)
+ * snapshot output, which aliased and did not match the oracle waveshape
+ * (Axis-5b; see docs/AXIS5B_BLIP_OUTPUT.md).
  *
  * Address map (from Beetle VSU_Write, line 135):
  *   0x01000000 + 0x000..0x27F : WaveData[0..4][0..0x1F]  (5 wave tables,
@@ -26,6 +31,7 @@
 #include <stdbool.h>
 #include <string.h>
 
+#include "blip/Blip_Buffer.h"
 #include "stub_abort.h"
 #include "vsu_shadow.h"
 
@@ -91,13 +97,35 @@ static size_t   s_ring_tail;   /* next slot the consumer will read */
  * the SDL drain cursor s_ring_tail. */
 static uint64_t s_ring_total;
 
-/* Cycle accumulator -> sample-rate downsample. */
-static int32_t  s_sample_cycle_residue;
+/* ------------------ Band-limited output (Blip_Synth) -------------- */
+/* One Blip_Buffer per stereo side, clocked at the 5 MHz VSU domain, and
+ * one shared Blip_Synth (the oracle declares a second NoiseSynth but never
+ * uses it). `s_last_output` holds each channel's last-fed (L,R) amplitude
+ * so we can delta-encode transitions, exactly mirroring the oracle's
+ * last_output[6][2] (beetle-vb/mednafen/vb/vsu.c:67,301-304,461-464). */
+static Blip_Buffer s_bb_l, s_bb_r;
+static Blip_Synth  s_synth;
+static int32_t     s_last_output[6][2];
+static bool        s_blip_inited;
+
+/* Relative VSU-cycle timestamp since the last Blip frame flush. Blip feeds
+ * happen at times in [0, s_vsu_frame_ts]; a flush calls end_frame(ts),
+ * drains the band-limited samples into the ring, and resets ts to 0 (the
+ * oracle's VSU_EndFrame last_ts=0). Bounded by VSU_FLUSH_CLOCKS so the
+ * Blip buffer never overruns and the per-flush memmove stays small. */
+static int32_t  s_vsu_frame_ts;
+
+/* Flush cadence in 5 MHz VSU cycles. ~3.3 ms / ~145 output samples per
+ * flush — far under the 50 ms (~2205 sample) buffer the oracle sizes, so
+ * Blip_Synth_offset never writes past the buffer, while keeping the
+ * read_samples memmove cheap. Output rate is locked to 44.1 kHz by Blip's
+ * clock-rate factor regardless of this value (it is NOT a sample cadence). */
+#define VSU_FLUSH_CLOCKS  16384
 
 /* The VB VSU is clocked at CPU/4 (5 MHz), NOT the full 20 MHz CPU clock.
  * Mednafen feeds its VSU `(v810_timestamp + CycleFix) >> 2` and runs the
  * Blip buffer at VB_MASTER_CLOCK/4 (beetle-vb/libretro.cpp:1944,2346).
- * Our vsu_step_channel is a verbatim port of Mednafen's 5 MHz-domain
+ * Our vsu_update_channel is a verbatim port of Mednafen's 5 MHz-domain
  * update loop (FreqCounter reload = 2048-EffFreq, dividers 4800/4/4/120),
  * so it MUST be fed 5 MHz cycles. This accumulator carries the sub-4 CPU
  * cycle remainder across ticks so no VSU clocks are lost (the CycleFix
@@ -138,13 +166,41 @@ void vb_vsu_init(void) {
 
     s_ring_head = s_ring_tail = 0;
     s_ring_total = 0;
-    s_sample_cycle_residue = 0;
     s_vsu_clock_residue = 0;
+
+    /* Band-limited output stage. Mirror the oracle's setup exactly
+     * (beetle-vb/libretro.cpp:2421-2423 + vsu.c:84): 44.1 kHz, 5 MHz clock,
+     * bass-freq 20 (the high-pass that removes the waveform's DC bias — which
+     * is why the channel output keeps the raw unsigned 0..63 sample with NO
+     * -0x20 centering), Synth volume 1/6/2 over a 0x400 range. */
+    if (!s_blip_inited) {
+        Blip_Buffer_init(&s_bb_l);
+        Blip_Buffer_init(&s_bb_r);
+        Blip_Buffer_set_sample_rate(&s_bb_l, 44100, 50);
+        Blip_Buffer_set_sample_rate(&s_bb_r, 44100, 50);
+        Blip_Buffer_set_clock_rate(&s_bb_l, (long)(20000000 / 4));
+        Blip_Buffer_set_clock_rate(&s_bb_r, (long)(20000000 / 4));
+        Blip_Buffer_bass_freq(&s_bb_l, 20);
+        Blip_Buffer_bass_freq(&s_bb_r, 20);
+        Blip_Synth_set_volume(&s_synth, 1.0 / 6 / 2, 0x400);
+        s_blip_inited = true;
+    } else {
+        Blip_Buffer_clear(&s_bb_l, 1);
+        Blip_Buffer_clear(&s_bb_r, 1);
+    }
+    memset(s_last_output, 0, sizeof(s_last_output));
+    s_vsu_frame_ts = 0;
 
     vb_vsu_shadow_reset();
 }
 
-void vb_vsu_shutdown(void) {}
+void vb_vsu_shutdown(void) {
+    if (s_blip_inited) {
+        Blip_Buffer_deinit(&s_bb_l);
+        Blip_Buffer_deinit(&s_bb_r);
+        s_blip_inited = false;
+    }
+}
 
 /* ------------------------- Register writes ----------------------- */
 
@@ -281,11 +337,13 @@ void vb_vsu_write32(uint32_t addr, uint32_t v) {
 
 /* -------------------- Per-channel synthesis core ---------------- */
 
-/* Compute current (left,right) sample contribution for one channel,
- * in the same 0..63 * (envelope*level/8 + 1) scale Beetle emits to
- * Blip_Synth. We bias the waveform by -0x20 so silence is 0 (Beetle
- * leaves DC and lets Blip_Synth high-pass it; for direct emission
- * we need a centered signal). */
+/* Compute current (left,right) amplitude for one channel, in the exact
+ * 0..63 * (envelope*level/8 + 1) scale the oracle feeds to Blip_Synth
+ * (VSU_CalcCurrentOutput, beetle-vb/mednafen/vb/vsu.c:251-287). NO -0x20
+ * centering: the raw unsigned 0..63 waveform is fed and its DC component is
+ * removed downstream by the Blip_Buffer bass-freq high-pass, matching the
+ * oracle (the oracle's `- 0x20` is commented out there for the same reason).
+ * The values are delta-encoded into the Synth, so absolute DC is irrelevant. */
 static inline void vsu_channel_output(int ch, int* left, int* right) {
     if (!(s_intl_control[ch] & 0x80u)) {
         *left = *right = 0;
@@ -298,8 +356,6 @@ static inline void vsu_channel_output(int ch, int* left, int* right) {
         if (s_ram_address[ch] > 4) wd = 0;
         else wd = s_wave_data[s_ram_address[ch]][s_wave_pos[ch]];
     }
-    /* Center the 6-bit unsigned waveform around zero. */
-    wd -= 0x20;
 
     int l = s_envelope[ch] * s_left_level[ch];
     if (l) { l >>= 3; l += 1; }
@@ -309,10 +365,22 @@ static inline void vsu_channel_output(int ch, int* left, int* right) {
     *right = wd * r;
 }
 
-/* Advance one channel by `clocks` CPU cycles. Mirrors the inner
- * while-loop of Beetle's VSU_Update (vsu.c:294-465) verbatim,
- * minus the Blip_Synth_offset calls. */
-static void vsu_step_channel(int ch, int32_t clocks) {
+/* Advance one channel by `clocks` VSU (5 MHz) cycles starting at relative
+ * Blip-frame time `running_timestamp`, feeding band-limited amplitude deltas
+ * into the Synth at each output boundary. A verbatim mirror of the oracle's
+ * VSU_Update inner body for one channel (beetle-vb/mednafen/vb/vsu.c:294-465):
+ * boundary feed at chunk start (even when the channel is off, so a stop edges
+ * the output to 0), step machine, per-chunk feed at the advanced timestamp. */
+static void vsu_update_channel(int ch, int32_t running_timestamp, int32_t clocks) {
+    int left, right;
+
+    /* Output sound here (oracle vsu.c:300-304). */
+    vsu_channel_output(ch, &left, &right);
+    Blip_Synth_offset(&s_synth, running_timestamp, left  - s_last_output[ch][0], &s_bb_l);
+    Blip_Synth_offset(&s_synth, running_timestamp, right - s_last_output[ch][1], &s_bb_r);
+    s_last_output[ch][0] = left;
+    s_last_output[ch][1] = right;
+
     if (!(s_intl_control[ch] & 0x80u)) return;
 
     while (clocks > 0) {
@@ -426,120 +494,91 @@ static void vsu_step_channel(int ch, int32_t clocks) {
             }
         }
         clocks -= chunk;
+        running_timestamp += chunk;
+
+        /* Output sound here too (oracle vsu.c:459-464). */
+        vsu_channel_output(ch, &left, &right);
+        Blip_Synth_offset(&s_synth, running_timestamp, left  - s_last_output[ch][0], &s_bb_l);
+        Blip_Synth_offset(&s_synth, running_timestamp, right - s_last_output[ch][1], &s_bb_r);
+        s_last_output[ch][0] = left;
+        s_last_output[ch][1] = right;
     }
 }
 
-/* Verified-enhancement shadow: float re-render of one channel. Mirrors
- * vsu_channel_output EXACTLY in waveform/envelope/level selection, but keeps
- * the per-channel gain in full precision (no `(envelope*level)>>3 + 1`
- * 4-bit requantize) and accumulates in float. Same notes, same envelopes,
- * same timing — only the gain quantization differs. Present-time only; this
- * never feeds the canon path nor the verify oracle (see vsu_shadow.h). */
-static inline void vsu_channel_output_shadow(int ch, float* left, float* right) {
-    if (!(s_intl_control[ch] & 0x80u)) {
-        *left = *right = 0.0f;
-        return;
-    }
-    int wd;
-    if (ch == 5) {
-        wd = (int)s_noise_latcher;
-    } else {
-        if (s_ram_address[ch] > 4) wd = 0;
-        else wd = s_wave_data[s_ram_address[ch]][s_wave_pos[ch]];
-    }
-    wd -= 0x20;
-    /* Full-precision gain: envelope*level/8 (the canon truncates to int and
-     * adds 1; the shadow keeps the fractional gain and the silence floor). */
-    float fl = (float)(s_envelope[ch] * s_left_level[ch]) / 8.0f;
-    float fr = (float)(s_envelope[ch] * s_right_level[ch]) / 8.0f;
-    *left  = (float)wd * fl;
-    *right = (float)wd * fr;
-}
+/* The opt-in `vsu_shadow` differential verifier (vsu_shadow.h, default OFF)
+ * is INTENTIONALLY not wired into the band-limited path. It compared a
+ * per-sample full-precision float mix against the canon per-sample integer
+ * mix — but band-limited output has no per-sample integer mix to feed, and
+ * its full-precision gain deliberately DIVERGES from the oracle's
+ * (envelope*level>>3)+1 quantization, which is exactly what this Axis-5b
+ * output stage is matching. The shadow's source remains (and vb_vsu_init
+ * still resets its status ring) so a future post-Blip rework can re-engage
+ * it as an overrides-style opt-in; faithful default behavior is unaffected
+ * because the shadow was default-OFF and byte-identical when disabled. */
 
 /* ---------------------- Sample emission ------------------------- */
 
-static inline void vsu_emit_one_sample(void) {
-    int32_t mix_l = 0, mix_r = 0;
-    float   sh_l = 0.0f, sh_r = 0.0f;
-    const bool shadow_on = vb_vsu_shadow_enabled();
-    for (int ch = 0; ch < 6; ++ch) {
-        int l, r;
-        vsu_channel_output(ch, &l, &r);
-        mix_l += l;
-        mix_r += r;
-        if (shadow_on) {
-            float fl, fr;
-            vsu_channel_output_shadow(ch, &fl, &fr);
-            sh_l += fl;
-            sh_r += fr;
-        }
-    }
-    /* Per-channel peak ~= +/- 31 * 30 = +/- 930. Six channels max
-     * out near +/- 5580. Scale by 4 maps the loudest plausible mix
-     * to +/- 22 320, leaving ~30 % headroom before the S16 clip. */
-    mix_l <<= 2;
-    mix_r <<= 2;
-    if (mix_l >  32767) mix_l =  32767;
-    if (mix_l < -32768) mix_l = -32768;
-    if (mix_r >  32767) mix_r =  32767;
-    if (mix_r < -32768) mix_r = -32768;
-
-    int16_t out_l = (int16_t)mix_l;
-    int16_t out_r = (int16_t)mix_r;
-
-    /* Verified-enhancement shadow (default OFF). Feed the canon mix
-     * (pre-clip numeric value) and the float re-render (same *4 scale) to the
-     * differential verifier; it substitutes the shadow only after a proven
-     * window and reverts loudly otherwise. When OFF, this is a no-op and the
-     * stored bytes are byte-identical to the canon path above. */
-    if (shadow_on) {
-        int16_t s_out_l, s_out_r;
-        if (vb_vsu_shadow_substitute((float)(mix_l), (float)(mix_r),
-                                     sh_l * 4.0f, sh_r * 4.0f,
-                                     &s_out_l, &s_out_r)) {
-            out_l = s_out_l;
-            out_r = s_out_r;
-        }
-    }
-
-    /* Drop the oldest frame when the consumer hasn't drained
-     * (happens during `--headless` runs with no SDL audio device). */
+/* Push one band-limited stereo frame to the output ring, evicting the
+ * oldest frame when the consumer (SDL, or none in --headless) is behind.
+ * Same ring contract as before: s_ring_head == s_ring_total & MASK. */
+static inline void ring_push(int16_t l, int16_t r) {
     size_t next_head = (s_ring_head + 1) & VSU_RING_MASK;
-    if (next_head == s_ring_tail) {
+    if (next_head == s_ring_tail)
         s_ring_tail = (s_ring_tail + 1) & VSU_RING_MASK;
-    }
-    s_ring_l[s_ring_head] = out_l;
-    s_ring_r[s_ring_head] = out_r;
+    s_ring_l[s_ring_head] = l;
+    s_ring_r[s_ring_head] = r;
     s_ring_head = next_head;
     s_ring_total++;
 }
 
+/* End the current Blip frame and drain its band-limited 44.1 kHz samples
+ * into the ring, then reset the relative frame timestamp (oracle pattern:
+ * Blip_Buffer_end_frame + Blip_Buffer_read_samples in libretro.cpp:2027-2028,
+ * VSU_EndFrame last_ts=0). Both sides advance identically, so L and R yield
+ * the same count and stay frame-aligned. */
+static void vsu_flush_frame(void) {
+    if (s_vsu_frame_ts <= 0) return;
+    Blip_Buffer_end_frame(&s_bb_l, s_vsu_frame_ts);
+    Blip_Buffer_end_frame(&s_bb_r, s_vsu_frame_ts);
+    s_vsu_frame_ts = 0;
+
+    /* read_samples always strides by 2 (stereo-interleave), so read L into
+     * slot 0 and R into slot 1 of an interleaved scratch, then deinterleave
+     * into the ring. Drain fully in case more than one batch is available. */
+    int16_t inter[256 * 2];
+    for (;;) {
+        long n = Blip_Buffer_read_samples(&s_bb_l, inter + 0, 256);
+        long m = Blip_Buffer_read_samples(&s_bb_r, inter + 1, 256);
+        (void)m;   /* n == m: both buffers share factor/offset */
+        for (long i = 0; i < n; ++i)
+            ring_push(inter[i * 2 + 0], inter[i * 2 + 1]);
+        if (n < 256) break;
+    }
+}
+
 void vb_vsu_tick(uint64_t cpu_cycles) {
-    int64_t remaining = (int64_t)cpu_cycles;          /* 20 MHz CPU domain */
-    while (remaining > 0) {
-        int32_t need = VSU_CYCLES_PER_SAMPLE - s_sample_cycle_residue;
-        if (need <= 0) need = 1;
-        int32_t step = (remaining < need) ? (int32_t)remaining : need;
+    /* Channel synthesis + Blip feeds run in the 5 MHz VSU domain (CPU/4).
+     * Convert this tick's CPU cycles to VSU cycles, carrying the sub-4
+     * remainder so the channel clocks stay phase-exact across ticks (the
+     * oracle's CycleFix). Output rate (44.1 kHz) is locked by Blip's
+     * clock-rate factor, NOT by any cycle-per-sample cadence here. */
+    s_vsu_clock_residue += (int32_t)cpu_cycles;
+    int32_t vsu_cycles = s_vsu_clock_residue >> 2;
+    s_vsu_clock_residue &= 3;
 
-        /* Channel synthesis runs in the 5 MHz VSU domain (CPU/4). Convert
-         * this chunk of CPU cycles to VSU cycles, carrying the sub-4
-         * remainder so the channel clocks stay phase-exact across calls.
-         * Sample emission below stays in the CPU domain (453 cyc/sample
-         * = 20 MHz/44.1 kHz), so the output rate is unchanged. */
-        s_vsu_clock_residue += step;
-        int32_t vsu_step = s_vsu_clock_residue >> 2;
-        s_vsu_clock_residue &= 3;
-        if (vsu_step > 0)
-            for (int ch = 0; ch < 6; ++ch)
-                vsu_step_channel(ch, vsu_step);
+    while (vsu_cycles > 0) {
+        /* Bound the relative frame timestamp so Blip_Synth_offset never
+         * writes past the buffer; flush + reset when the window is full. */
+        int32_t room = VSU_FLUSH_CLOCKS - s_vsu_frame_ts;
+        if (room <= 0) { vsu_flush_frame(); continue; }
 
-        s_sample_cycle_residue += step;
-        remaining -= step;
+        int32_t chunk = (vsu_cycles < room) ? vsu_cycles : room;
+        for (int ch = 0; ch < 6; ++ch)
+            vsu_update_channel(ch, s_vsu_frame_ts, chunk);
+        s_vsu_frame_ts += chunk;
+        vsu_cycles     -= chunk;
 
-        if (s_sample_cycle_residue >= VSU_CYCLES_PER_SAMPLE) {
-            s_sample_cycle_residue -= VSU_CYCLES_PER_SAMPLE;
-            vsu_emit_one_sample();
-        }
+        if (s_vsu_frame_ts >= VSU_FLUSH_CLOCKS) vsu_flush_frame();
     }
 }
 

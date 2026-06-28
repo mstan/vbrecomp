@@ -286,18 +286,37 @@ mid-block take via cycle deadlines.
     (10–50 → +3.6 ms/s) and proven NOT to be HALT pacing (Axis-3 event-
     driven idle left the audio byte-identical). The pitch + tempo are now
     correct.
-  - [ ] **Output stage still differs by design (the dominant remaining
-    audio gap)** — DC-center `-0x20` + `<<2` point-sampling vs Mednafen
-    `Blip_Synth` band-limiting → low waveshape NCC (~0.09), +3.8 dB level,
-    aliasing. **Axis-5b in progress:** `Blip_Buffer` vendored + integration
-    spec'd (`docs/AXIS5B_BLIP_OUTPUT.md`); `vsu.c` rewrite is the next step.
+  - [x] **Output stage now matches the oracle's method (Blip rewrite DONE).**
+    Replaced the `-0x20`/`<<2`/453-cadence point-sampling with the oracle's
+    exact band-limited path: each channel feeds amplitude deltas into a 5 MHz
+    `Blip_Buffer` (Synth volume `1/6/2` over `0x400`, bass-freq 20, no `-0x20`
+    centering — DC removed by the high-pass), drained at 44.1 kHz into the
+    same ring (`runtime/src/vsu.c`, `docs/AXIS5B_BLIP_OUTPUT.md`).
+    **Proof (same-build before/after, deterministic):** level offset
+    **+3.84 → +1.09 dB**, RMS **67% → 92% of oracle** (494.8 → 679.1 vs
+    741.6) — the predicted amplitude/spectral convergence. NCC unchanged
+    (0.093 → 0.091 @10 s; 0.231 → 0.237 @2 s): it is **capped by tempo
+    drift**, not the output stage — short-window NCC is ~2.6× the 10 s value,
+    confirming waveshape correlation walks out of phase as drift accumulates.
+    The xcorr tempo number shifting (+3.6 → +10.8 ms/s) is a measurement
+    artifact of the local-xcorr metric responding to the changed waveshape
+    (the onset-fit estimator simultaneously reads −9.2 ms/s — opposite sign,
+    i.e. both are noise-dominated on this sparse-onset content); `vsu.c` is
+    CPU-timing-neutral by construction. **Residual audio gap is now squarely
+    Axis-2/3 tempo drift**, not the output stage. The opt-in `vsu_shadow`
+    verifier is intentionally disconnected under Blip (no per-sample integer
+    mix to compare; its full-precision gain diverges from the oracle's
+    quantization this axis matches) — default behavior unaffected (it was
+    default-OFF/byte-identical), reworkable post-Blip later.
 - **Timer / game-pad:** faithful (`timer.c`, `input.c`), oracle-matched.
 - **Cartridge RAM / expansion / link port:** **not modeled** (MT never
   touches them — would fatal-abort if it did; correctly out of scope).
 
-**Gap:** pitch + tempo correct; residual = the by-design VSU output stage
-(Axis-5b, in progress). VIP content pixel-exact (5a recorded green);
-cart-RAM/link absent. **Lever:** finish the Axis-5b Blip output port.
+**Gap:** pitch + tempo + output stage now oracle-matched (Axis-5b Blip
+rewrite DONE: level offset +3.84 → +1.09 dB, RMS 67% → 92%). Residual audio
+gap is the Axis-2/3 tempo drift that caps NCC, NOT the VSU output. VIP
+content pixel-exact (5a recorded green); cart-RAM/link absent. **Lever:**
+the audio NCC ceiling is now Axis-2/3 timing drift, not Axis-5b.
 
 ### Axis 6 — Static-vs-dynamic recompiler fidelity
 **Status: PARTIAL.**
@@ -334,7 +353,7 @@ equality as a standing check.
 | 2 | Cycle / timing | **MODELED & VALIDATED** (cpuhook-exact to ~1e-4; drift 10–50→~3 ms/s) | pairing closed (≤95 cyc, negligible); audio residual is Axis-3/5b, not Axis-2 | (complete) — audio residual → Axis-3 HALT pacing + Axis-5b output stage |
 | 3 | Interrupt / event timing | **IMPROVED** — event-driven idle (HALT take ~259 cyc) | active-dispatch take still block-quantized; no exception-ring diff | exception-ring diff (RB_CPUHOOK infra); mid-block cycle deadlines |
 | 4 | Memory / MMIO | **STRONG** (instr-accurate) | ordered MMIO read diff not standing | ordered recorder + oracle write-stream diff |
-| 5 | Peripherals (VIP/**VSU**/pad) | **5a VIP recorded green** (0/86016 px); **5b VSU pitch+tempo FIXED**, output stage in progress; comms absent | 5a draw-timing phase only; 5b band-limited output (Blip vendored, vsu.c rewrite pending); cart-RAM/link unmodeled (out of scope) | finish Axis-5b Blip port (`docs/AXIS5B_BLIP_OUTPUT.md`) |
+| 5 | Peripherals (VIP/**VSU**/pad) | **5a VIP recorded green** (0/86016 px); **5b VSU pitch+tempo+output stage oracle-matched** (Blip rewrite DONE: level +3.84→+1.09 dB, RMS 67→92%); comms absent | 5a draw-timing phase only; 5b NCC now capped by Axis-2/3 tempo drift (not output); cart-RAM/link unmodeled (out of scope) | NCC ceiling → Axis-2/3 timing drift |
 | 6 | Static↔dynamic fidelity | **PARTIAL** | no standing first-divergence harness | fingerprint ring + ordered recorder vs oracle |
 | 7 | Determinism | **GOOD** | no record/replay | cross-run fingerprint equality |
 
