@@ -39,6 +39,11 @@ void vb_timer_init(void);
  * VBIRQ_SOURCE_TIMER via the IRQ controller on underflow. */
 void vb_timer_tick(uint32_t cycles);
 
+/* Cycles until the timer's next divider tick (the next point it could
+ * raise the TIMER IRQ); a large value when disabled. Used by the
+ * event-driven idle loop for precise IRQ-take timing. */
+int32_t vb_timer_cycles_to_next_event(void);
+
 uint8_t  vb_timer_read8 (uint32_t addr);
 uint16_t vb_timer_read16(uint32_t addr);
 uint32_t vb_timer_read32(uint32_t addr);

@@ -160,6 +160,16 @@ void vb_timer_write32(uint32_t addr, uint32_t v) {
     vb_timer_write8(addr, (uint8_t)(v & 0xFFu));
 }
 
+/* Cycles until the timer's next divider tick (where the counter
+ * decrements and ZSTAT may latch → TIMER IRQ). Returns a large value when
+ * the timer is disabled so the event-driven idle loop doesn't gate on it.
+ * The divider already carries sub-tick residue, so this is exact. */
+int32_t vb_timer_cycles_to_next_event(void) {
+    if (!(s_tcr & VB_TCR_TENABLE))
+        return 0x3FFFFFFF;
+    return s_divider > 0 ? s_divider : 1;
+}
+
 uint16_t vb_timer_counter(void) { return s_counter; }
 uint16_t vb_timer_reload(void)  { return s_reload; }
 uint8_t  vb_timer_control(void) { return s_tcr; }

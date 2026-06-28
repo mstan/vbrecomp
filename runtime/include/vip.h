@@ -59,6 +59,11 @@ void vb_vip_shutdown(void);
  * INT_* bits into INTPND and re-assert VBIRQ_SOURCE_VIP. */
 void vb_vip_tick(uint64_t cycles);
 
+/* Cycles until the VIP's next state-machine boundary (column/drawing) —
+ * the next point it could raise an INTPND event. Used by the event-driven
+ * idle loop for precise IRQ-take timing. Always >= 1. */
+int32_t vb_vip_cycles_to_next_event(void);
+
 uint8_t  vb_vip_read8 (uint32_t addr);
 uint16_t vb_vip_read16(uint32_t addr);
 uint32_t vb_vip_read32(uint32_t addr);

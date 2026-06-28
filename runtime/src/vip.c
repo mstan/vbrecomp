@@ -479,6 +479,19 @@ void vb_vip_tick(uint64_t cycles) {
     }
 }
 
+/* Cycles until the VIP's next state-machine boundary (column tick or
+ * drawing-block boundary) — i.e. the next point at which it could set an
+ * INTPND bit (FB_END / FRAME_START / GAME_START / XP_END). The event-
+ * driven idle loop (main.cpp HALT path) steps device time by this so an
+ * IRQ lands within ~one column (259 cyc) instead of a fixed 20000-cycle
+ * chunk. Always >= 1. */
+int32_t vb_vip_cycles_to_next_event(void) {
+    int32_t n = s_column_counter;
+    if (s_drawing_counter > 0 && s_drawing_counter < n)
+        n = s_drawing_counter;
+    return n < 1 ? 1 : n;
+}
+
 
 /* ----------------- Register read/write ----------------- */
 

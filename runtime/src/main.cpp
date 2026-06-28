@@ -451,14 +451,6 @@ int main(int argc, char** argv) {
     // once per BB leader so a tight intra-function loop still yields to the
     // TCP/SDL poll; it no longer feeds the cycle estimate.
     constexpr uint64_t STEP_BUDGET     = 250000;
-    /* While halted, advance device emulation in big chunks. 20MHz
-     * CPU × 20ms wallclock per main-loop iteration ≈ 400k cycles.
-     * A frame is ~397k cycles, so each iteration covers about one
-     * frame — fast enough for ISR-driven title-screen setup to
-     * converge in seconds rather than minutes, without blocking
-     * TCP polling longer than the next main-loop pass. The 1ms
-     * sleep keeps the OS scheduler from pegging a core. */
-    constexpr uint64_t IDLE_TICK_CYCLES = 20000;
     bool dispatched_once = false;
     uint32_t dispatch_pc = cpu.pc;
     uint64_t present_count = 0;
@@ -523,14 +515,31 @@ int main(int argc, char** argv) {
         }
 
         if (cpu.halted) {
-            // Tick devices in idle so the timer / VIP can fire and
-            // break a HALT. Match Beetle's wall-clock progression: a
-            // single 20µs interval per main-loop pass keeps TCP
-            // responsive and the IRQ→ISR→RETI loop converging.
-            cpu.cycles += IDLE_TICK_CYCLES;
-            vb_timer_tick((uint32_t)IDLE_TICK_CYCLES);
-            vb_vip_tick(IDLE_TICK_CYCLES);
-            vb_vsu_tick(IDLE_TICK_CYCLES);
+            // Event-driven idle (Axis-3 IRQ-take precision). Advance device
+            // time to the next device-state boundary (VIP column/drawing,
+            // timer divider) instead of a fixed 20000-cycle chunk, breaking
+            // as soon as an ACCEPTABLE IRQ is pending (same acceptance rule
+            // as vb_irq_check_and_deliver, which the top of the loop then
+            // applies). IRQ-take latency drops from ~20000 cyc to ~one
+            // column (259 cyc), and we sleep once per wake instead of ~20x
+            // per frame. The frame-sized cap bounds a pass when nothing is
+            // deliverable (e.g. all sources masked).
+            uint64_t idle_consumed = 0;
+            while (idle_consumed < VB_CYCLES_PER_FRAME) {
+                int32_t step  = vb_vip_cycles_to_next_event();
+                int32_t tstep = vb_timer_cycles_to_next_event();
+                if (tstep < step) step = tstep;
+                if (step < 1) step = 1;
+                cpu.cycles += (uint64_t)step;
+                vb_timer_tick((uint32_t)step);
+                vb_vip_tick((uint64_t)step);
+                vb_vsu_tick((uint64_t)step);
+                idle_consumed += (uint64_t)step;
+                const int lvl = vb_irq_highest_pending_level();
+                if (lvl >= 0 && !cpu.psw_np && !cpu.psw_ep && !cpu.psw_id
+                    && lvl >= (int)cpu.psw_int_level)
+                    break;   // acceptable IRQ pending — loop top will deliver
+            }
             std::this_thread::sleep_for(1ms);
             continue;
         }
