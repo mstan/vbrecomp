@@ -143,19 +143,37 @@ Consequence for the gate:
 not silently wrong). **Lever:** `RB_CPUHOOK` trace ring + HW test ROMs.
 
 ### Axis 2 — Cycle / timing
-**Status: APPROXIMATE (not modeled).**
-- [ ] No per-instruction cycle costs exist. The main loop estimates
-  `cyc_delta = bbs_run × CYCLES_PER_BB(=3)` (`main.cpp:544-546`,
-  `STEP_BUDGET`/`CYCLES_PER_BB` at `main.cpp:453-454`) and feeds that one
-  number to every device tick (timer, VIP, VSU). `docs/HARDWARE_NOTES.md`
-  documents real V810 costs (mul=13, div=38, …) but they are unused.
-- [ ] No cycle ring, no PC-anchored comparator.
+**Status: MODELED (first cut) — real per-instruction cost seam landed;
+tempo drift 10–50 → ~2–4 ms/s. Residual = deferred pipeline pairing.**
+- [x] **Per-instruction V810 base cost seam** (`recompiler/v810/cycles.py`,
+  single source). The emitter now charges each instruction's base cost
+  into `cpu->cycles` as it runs (`emitter.py` — inline `cpu->cycles += N`
+  after the per-instruction `cpu->pc =`; Bcond taken extra `+2` inside the
+  taken path). `main.cpp` derives the device-tick delta as the `cpu.cycles`
+  advance per pass (`cyc_before`/`cyc_delta`), **replacing `bbs_run × 3`**;
+  `CYCLES_PER_BB` removed. `step_budget` is untouched (still the per-BB
+  yield budget, now decoupled from cycle accounting).
+- [x] **Costs sourced, not guessed** (Rule 12): every value is the oracle's
+  own `ADDCLOCK` constant (`beetle-vb/.../v810_oploop.inc`, cited per op in
+  `cycles.py`); the documented manual numbers (`docs/HARDWARE_NOTES.md:208`)
+  agree (ALU=1, MUL=13, DIV=38, branch-taken=3). The V810 Architecture
+  Manual full timing table is **not in-tree** — flagged where it matters.
+- [ ] **Deferred (tracked refinement — measure residual first):** load/store
+  pipeline pairing (`lastop` +1/+2) and 16-bit-bus split penalties
+  (`v810_oploop.inc:560-692`). First cut uses flat base costs → loads
+  undercounted; this is the most likely source of the residual ~2–4 ms/s.
+- [ ] **`cyc_watch` ring not yet built** — the rigorous always-on cycle-Δ
+  comparator vs the oracle's `V810::Run()` counter. Audio drift is the
+  current (indirect) proof; cyc_watch is the direct one + residual
+  attribution.
 
-**Gap:** guest-visible time is a basic-block count, not V810 cycles —
-the root driver of audio drift and any timing-sensitive behavior.
-**Lever:** `vb_instr_base_cycles()` cost seam + `cyc_watch` ring Δ-gated
-vs the oracle's `V810::Run()` counter (instruction-accurate reference;
-HW manual for the costs themselves).
+**Result (10 s from boot, Mario's Tennis):** onset drift **−11.3 → +2.2 ms/s**,
+tempo drift **(10–50) → +3.6 ms/s**, alignment lag **1008 → 472 ms**,
+verdict **RED → "PITCH MATCH (note-accurate)"**. (NCC stays ~0.09 — the
+by-design Axis-5b output-stage difference, not timing.)
+**Gap remaining:** pipeline pairing for the last ~2–4 ms/s; the `cyc_watch`
+direct-Δ instrument. **Lever:** add `lastop` pairing to `cycles.py`/emitter;
+build `cyc_watch` Δ-gated vs the oracle counter.
 
 ### Axis 3 — Interrupt / event timing
 **Status: APPROXIMATE (polled, no scheduler).**
@@ -255,7 +273,7 @@ equality as a standing check.
 | # | Axis | Verdict | Primary gap | Next lever |
 |---|------|---------|-------------|-----------|
 | 1 | Instruction semantics | **STRONG** (instr-accurate) | per-instr oracle validation; 14 ops abort | `RB_CPUHOOK` trace ring + HW test ROMs |
-| 2 | Cycle / timing | **APPROXIMATE** (not modeled) | time = basic-block count ×3, not V810 cycles | `vb_instr_base_cycles` seam + `cyc_watch` Δ vs oracle counter |
+| 2 | Cycle / timing | **MODELED** (first cut; tempo drift 10–50→~3 ms/s) | flat costs — load/store pipeline pairing deferred; no `cyc_watch` ring yet | add `lastop` pairing; build `cyc_watch` Δ vs oracle counter |
 | 3 | Interrupt / event timing | **APPROXIMATE** (polled) | IRQ take quantized to block edges | exception-ring diff; precise take-point (needs Axis 2) |
 | 4 | Memory / MMIO | **STRONG** (instr-accurate) | ordered MMIO read diff not standing | ordered recorder + oracle write-stream diff |
 | 5 | Peripherals (VIP/**VSU**/pad) | **MIXED** — VIP strong; VSU **pitch FIXED**, tempo drift residual; comms absent | VSU 4× clock bug fixed; residual tempo drift = Axis 2; cart-RAM/link unmodeled | fix Axis 2 to kill drift; port band-limited output stage |
@@ -369,10 +387,14 @@ now the next lever**, and it is the same root that limits axes 3 and 5.
 
 - **P0 (done this session):** VSU pitch divergence root-caused & fixed
   (20 MHz → CPU/4 clock); drift-aligned pitch bias +2590 c → −5 c.
-- **P0 (now active):** Axis 2 cycle model — `vb_instr_base_cycles` seam +
-  `cyc_watch` ring Δ-gated vs the oracle's `V810::Run()` counter. This is
-  the single root behind the residual audio **tempo drift**, the Axis-3
-  IRQ-take quantization, and VIP draw-timing — the highest-leverage fix.
+- **P0 (first cut DONE):** Axis 2 cycle model — `cycles.py` per-instruction
+  base-cost seam consumed by the emitter; `main.cpp` ticks devices by the
+  real `cpu.cycles` delta (no more `bbs_run×3`). Tempo drift 10–50 → ~3 ms/s,
+  verdict RED → "PITCH MATCH (note-accurate)". Remaining: (a) load/store
+  pipeline pairing for the residual ~2–4 ms/s; (b) the `cyc_watch` ring
+  Δ-gated vs the oracle's `V810::Run()` counter for the direct proof +
+  residual attribution. Same root still feeds Axis-3 IRQ-take quantization
+  and VIP draw-timing (now driven by real cycles).
 - **P1:** wire `RB_CPUHOOK` per-instruction oracle trace (Axes 1/3/6).
 - **P2:** exception-ring diff (Axis 3); ordered MMIO read diff (Axis 4);
   first-divergence fingerprint harness (Axis 6).
