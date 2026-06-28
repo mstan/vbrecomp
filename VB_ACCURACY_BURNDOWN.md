@@ -213,17 +213,28 @@ Axis-3 HALT/idle pacing + Axis-5b output stage (the audio residual);
 Axis-5a VIP draw timing (now driven by real cycles).
 
 ### Axis 3 — Interrupt / event timing
-**Status: APPROXIMATE (polled, no scheduler).**
+**Status: IMPROVED — event-driven idle; HALT IRQ-take now ~259 cyc.
+Active-dispatch path still block-quantized.**
 - [x] Faithful, Beetle-mirrored level-triggered controller
   (`interrupts.c`) — cross-ref oracle behavior.
-- [ ] **No event scheduler.** IRQs are delivered only between dispatch
-  passes (`main.cpp:522`), so take-latency is quantized to pass
-  boundaries rather than landing at the exact instruction/cycle.
+- [x] **Event-driven HALT/idle pacing** (replaces the fixed 20000-cycle
+  chunk). The idle loop steps device time to the next device boundary
+  (`vb_vip_cycles_to_next_event` / `vb_timer_cycles_to_next_event`) and
+  breaks on the first acceptable IRQ → HALT take-latency **~20000 → ~259
+  cyc**, matching the oracle's event model (removes a magic-number
+  approximation). No regression: audio byte-identical, framebuffer
+  0/86016. This is the dominant path for MT (HALT-driven from the JMP r31
+  sentinel). The audio being UNCHANGED confirms the ~3 ms/s residual is
+  Axis-5b (VSU output), not HALT pacing.
+- [ ] **Active-dispatch IRQ take still block-quantized** — IRQs are
+  delivered only between dispatch passes (`main.cpp:522`); precise
+  mid-block take needs cycle deadlines in the per-basic-block dispatch
+  model (lower value for this HALT-driven cart).
 - [ ] No exception-record ring diff vs oracle.
 
-**Gap:** IRQ take-point quantized to block edges. **Lever:** exception
-ring diff + (later) precise take-point via cycle deadlines (depends on
-Axis 2).
+**Gap:** active-path take-point still quantized; no exception-ring diff.
+**Lever:** exception-ring diff (the `RB_CPUHOOK` infra can host it);
+mid-block take via cycle deadlines.
 
 ### Axis 4 — Memory map / MMIO
 **Status: STRONG (instruction-accurate).**
@@ -319,7 +330,7 @@ equality as a standing check.
 |---|------|---------|-------------|-----------|
 | 1 | Instruction semantics | **STRONG — oracle-validated** (557K instrs exact from boot) | 14 ops abort (unreached); HW test ROMs | `RB_CPUHOOK` ring DONE; extend window past first VIP-timing divergence |
 | 2 | Cycle / timing | **MODELED & VALIDATED** (cpuhook-exact to ~1e-4; drift 10–50→~3 ms/s) | pairing closed (≤95 cyc, negligible); audio residual is Axis-3/5b, not Axis-2 | (complete) — audio residual → Axis-3 HALT pacing + Axis-5b output stage |
-| 3 | Interrupt / event timing | **APPROXIMATE** (polled) | IRQ take quantized to block edges | exception-ring diff; precise take-point (needs Axis 2) |
+| 3 | Interrupt / event timing | **IMPROVED** — event-driven idle (HALT take ~259 cyc) | active-dispatch take still block-quantized; no exception-ring diff | exception-ring diff (RB_CPUHOOK infra); mid-block cycle deadlines |
 | 4 | Memory / MMIO | **STRONG** (instr-accurate) | ordered MMIO read diff not standing | ordered recorder + oracle write-stream diff |
 | 5 | Peripherals (VIP/**VSU**/pad) | **MIXED** — VIP strong; VSU **pitch FIXED**, tempo drift residual; comms absent | VSU 4× clock bug fixed; residual tempo drift = Axis 2; cart-RAM/link unmodeled | fix Axis 2 to kill drift; port band-limited output stage |
 | 6 | Static↔dynamic fidelity | **PARTIAL** | no standing first-divergence harness | fingerprint ring + ordered recorder vs oracle |
