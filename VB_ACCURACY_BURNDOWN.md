@@ -282,20 +282,22 @@ mid-block take via cycle deadlines.
     cadence (453 cyc/sample) unchanged (`vsu.c` `vb_vsu_tick`,
     `s_vsu_clock_residue`). **Verified:** drift-aligned pitch bias
     +2590 c → **−5 c** (`audio_compare.py` 6b).
-  - [ ] **Residual: tempo drift (~10-50 ms/s)** — note *sequencing*
-    desyncs over the clip because music timing is driven by the coarse
-    Axis-2 cycle estimate (`bbs_run*3`). This is an **Axis-2
-    manifestation**, now the dominant audio gap.
-  - [ ] Output stage still differs by design (DC-center + `<<2` vs
-    Mednafen `Blip_Synth` band-limiting) → low waveshape NCC even at
-    matched pitch; +3 dB level offset; aliasing.
+  - [x] **Tempo drift FIXED to ~3 ms/s** by the Axis-2 cycle model
+    (10–50 → +3.6 ms/s) and proven NOT to be HALT pacing (Axis-3 event-
+    driven idle left the audio byte-identical). The pitch + tempo are now
+    correct.
+  - [ ] **Output stage still differs by design (the dominant remaining
+    audio gap)** — DC-center `-0x20` + `<<2` point-sampling vs Mednafen
+    `Blip_Synth` band-limiting → low waveshape NCC (~0.09), +3.8 dB level,
+    aliasing. **Axis-5b in progress:** `Blip_Buffer` vendored + integration
+    spec'd (`docs/AXIS5B_BLIP_OUTPUT.md`); `vsu.c` rewrite is the next step.
 - **Timer / game-pad:** faithful (`timer.c`, `input.c`), oracle-matched.
-- **Cartridge RAM / expansion / link port:** **not modeled.**
+- **Cartridge RAM / expansion / link port:** **not modeled** (MT never
+  touches them — would fatal-abort if it did; correctly out of scope).
 
-**Gap:** pitch SCALE now correct; residual = tempo drift (Axis 2) +
-by-design output-stage difference; cart-RAM/link absent. **Lever:** fix
-Axis 2 (cycle model) to kill the tempo drift; optionally port Mednafen's
-band-limited output stage to raise waveshape NCC.
+**Gap:** pitch + tempo correct; residual = the by-design VSU output stage
+(Axis-5b, in progress). VIP content pixel-exact (5a recorded green);
+cart-RAM/link absent. **Lever:** finish the Axis-5b Blip output port.
 
 ### Axis 6 — Static-vs-dynamic recompiler fidelity
 **Status: PARTIAL.**
@@ -332,7 +334,7 @@ equality as a standing check.
 | 2 | Cycle / timing | **MODELED & VALIDATED** (cpuhook-exact to ~1e-4; drift 10–50→~3 ms/s) | pairing closed (≤95 cyc, negligible); audio residual is Axis-3/5b, not Axis-2 | (complete) — audio residual → Axis-3 HALT pacing + Axis-5b output stage |
 | 3 | Interrupt / event timing | **IMPROVED** — event-driven idle (HALT take ~259 cyc) | active-dispatch take still block-quantized; no exception-ring diff | exception-ring diff (RB_CPUHOOK infra); mid-block cycle deadlines |
 | 4 | Memory / MMIO | **STRONG** (instr-accurate) | ordered MMIO read diff not standing | ordered recorder + oracle write-stream diff |
-| 5 | Peripherals (VIP/**VSU**/pad) | **MIXED** — VIP strong; VSU **pitch FIXED**, tempo drift residual; comms absent | VSU 4× clock bug fixed; residual tempo drift = Axis 2; cart-RAM/link unmodeled | fix Axis 2 to kill drift; port band-limited output stage |
+| 5 | Peripherals (VIP/**VSU**/pad) | **5a VIP recorded green** (0/86016 px); **5b VSU pitch+tempo FIXED**, output stage in progress; comms absent | 5a draw-timing phase only; 5b band-limited output (Blip vendored, vsu.c rewrite pending); cart-RAM/link unmodeled (out of scope) | finish Axis-5b Blip port (`docs/AXIS5B_BLIP_OUTPUT.md`) |
 | 6 | Static↔dynamic fidelity | **PARTIAL** | no standing first-divergence harness | fingerprint ring + ordered recorder vs oracle |
 | 7 | Determinism | **GOOD** | no record/replay | cross-run fingerprint equality |
 
