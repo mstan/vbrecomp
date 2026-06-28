@@ -109,10 +109,15 @@ Consequence for the gate:
   `v810_timestamp` (public), accumulated per frame in `libretro.cpp`.
   Pairs with a **`vb_instr_base_cycles()` single-source cost seam** (V810
   ISA) consumed by the emitter — Δ-gated vs the oracle. *(Axis 2)*
-- **Per-instruction oracle trace** — redefine Mednafen's `RB_CPUHOOK`
-  (already called every instruction at `v810_oploop.inc`, currently
-  `#define`'d to nothing) to push `{cycle,PC,regs,PSW}` into an always-on
-  ring — the VB analog of the PSX Beetle wtrace patch. *(Axes 1,3,6)*
+- **★ DONE — Per-instruction oracle trace (`RB_CPUHOOK` ring).** Mednafen's
+  `RB_CPUHOOK` (every instruction at `v810_oploop.inc:54`) now records
+  `{pc, PSW, regs-FNV(r1..r30), cumulative cycle}` into an always-on
+  first-N-from-boot ring on both processes (oracle: `libretro.cpp` +
+  `v810_cpu.cpp`, recorded in `tools/ORACLE_CPUHOOK_PATCH.md`; recomp:
+  `cpuhook.c` + the emitter's `VB_CPUHOOK`, built `-DVBRECOMP_CPUHOOK=ON`).
+  Exposed by a `cpuhook` TCP command on both ports; diffed by
+  `tools/cpuhook_compare.py` (first divergence by retire-seq + cycle Δ).
+  Serves Axes 1 (semantics), 2 (cycle Δ) and 3/6. *(Axes 1,2,3,6)*
 - **Exception/IRQ ring diff** — record `{cause, PC, cycle}` on each
   interrupt take, diff vs oracle. *(Axis 3)*
 - **HW test-ROM harness** — run V810/VIP/VSU test ROMs native vs oracle,
@@ -131,9 +136,19 @@ Consequence for the gate:
 - [ ] **Gaps fatal-abort, never stub** (good): `CAXI`, all 12 `BSU`
   bitstring ops, and the FP exception flags (FRO/FIV/FZD/FOV/FUD)
   unimplemented — `vb_stub_abort()` on reach.
-- [ ] Runtime validation against oracle per-instruction is **not yet
-  wired** (needs the `RB_CPUHOOK` trace) — currently validated only
-  end-to-end (pixels) and via decoder cross-check.
+- [x] **Per-instruction oracle validation WIRED & PASSING** (this session).
+  The `RB_CPUHOOK` ring is built on both processes (recomp `cpuhook.c` via
+  the emitter's `VB_CPUHOOK`, built `-DVBRECOMP_CPUHOOK=ON`; oracle
+  `libretro.cpp`/`v810_cpu.cpp`, see `tools/ORACLE_CPUHOOK_PATCH.md`),
+  exposed by a `cpuhook` TCP command on 4390/4391, diffed by
+  `tools/cpuhook_compare.py` (first-divergence by retire-seq + cycle Δ).
+  **Result (Mario's Tennis, from boot): 557,125 instructions matched
+  EXACTLY** — pc + PSW + register-FNV (r1..r30) identical instruction-for-
+  instruction. This is the first true oracle validation of the CPU core
+  (the oracle's regs were previously unexposed — `get_registers` returns
+  `ok:false`). The first divergence is **not** a CPU bug — it is a VIP
+  `DPSTTS` (0x5F820) display-status read whose value differs due to
+  fine-grained VIP draw timing (Axis-5a / Axis-2), at pc `0xFFF8197E`.
 - ⚠ `docs/INSTRUCTION_STATUS.md` is **stale/misleading** — every row says
   `lifted:no/emitted:no` because `vbrecomp_status.py` hardcodes those
   columns and only checks the decoder, never the emitter. Trust the
@@ -162,10 +177,13 @@ tempo drift 10–50 → ~2–4 ms/s. Residual = deferred pipeline pairing.**
   pipeline pairing (`lastop` +1/+2) and 16-bit-bus split penalties
   (`v810_oploop.inc:560-692`). First cut uses flat base costs → loads
   undercounted; this is the most likely source of the residual ~2–4 ms/s.
-- [ ] **`cyc_watch` ring not yet built** — the rigorous always-on cycle-Δ
-  comparator vs the oracle's `V810::Run()` counter. Audio drift is the
-  current (indirect) proof; cyc_watch is the direct one + residual
-  attribution.
+- [x] **Direct per-instruction cycle Δ MEASURED** via the `RB_CPUHOOK` ring
+  (the `cyc_watch` role; `tools/cpuhook_compare.py`). Over the first 557,125
+  instructions from boot the cumulative cycle Δ (recomp − oracle) stayed
+  within **[−95, 0]** — the cost model tracks the oracle's guest-cycle
+  counter to ~1e-4. The small −95 lag is the **deferred load/store pipeline
+  pairing** (the recomp undercounts back-to-back loads), confirming pairing
+  as the dominant residual — the one remaining Axis-2 refinement.
 
 **Result (10 s from boot, Mario's Tennis):** onset drift **−11.3 → +2.2 ms/s**,
 tempo drift **(10–50) → +3.6 ms/s**, alignment lag **1008 → 472 ms**,
@@ -272,7 +290,7 @@ equality as a standing check.
 
 | # | Axis | Verdict | Primary gap | Next lever |
 |---|------|---------|-------------|-----------|
-| 1 | Instruction semantics | **STRONG** (instr-accurate) | per-instr oracle validation; 14 ops abort | `RB_CPUHOOK` trace ring + HW test ROMs |
+| 1 | Instruction semantics | **STRONG — oracle-validated** (557K instrs exact from boot) | 14 ops abort (unreached); HW test ROMs | `RB_CPUHOOK` ring DONE; extend window past first VIP-timing divergence |
 | 2 | Cycle / timing | **MODELED** (first cut; tempo drift 10–50→~3 ms/s) | flat costs — load/store pipeline pairing deferred; no `cyc_watch` ring yet | add `lastop` pairing; build `cyc_watch` Δ vs oracle counter |
 | 3 | Interrupt / event timing | **APPROXIMATE** (polled) | IRQ take quantized to block edges | exception-ring diff; precise take-point (needs Axis 2) |
 | 4 | Memory / MMIO | **STRONG** (instr-accurate) | ordered MMIO read diff not standing | ordered recorder + oracle write-stream diff |
