@@ -91,6 +91,26 @@ typedef struct vb_beetle_vip_state {
 
 void vb_beetle_get_vip_state(vb_beetle_vip_state* out);
 
+/* ---- Always-on audio capture tap (accuracy oracle diff) -----------
+ *
+ * Beetle hands us interleaved S16 stereo PCM via the libretro
+ * audio_batch callback every retro_run(); the driver now records every
+ * frame into an always-on ring from boot instead of discarding it.
+ * `vb_beetle_audio_total()` is the monotonic count of stereo frames
+ * ever produced. `vb_beetle_audio_read_abs()` copies the window
+ * [start_abs, head) (interleaved L,R) addressed by ABSOLUTE frame
+ * index, reporting the oldest still-resident index in
+ * `*out_resident_lo` so a probe that falls behind sees a gap rather
+ * than silently skipping. Output rate is `vb_beetle_audio_rate()` Hz
+ * (44100). This is the oracle-side mirror of the runtime's VSU
+ * capture; same wire shape on port 4391. */
+uint64_t vb_beetle_audio_total(void);
+unsigned vb_beetle_audio_rate(void);
+size_t   vb_beetle_audio_read_abs(uint64_t start_abs, int16_t* dst,
+                                  size_t max_frames,
+                                  uint64_t* out_head_abs,
+                                  uint64_t* out_resident_lo);
+
 /* libretro device-id bit indices that Beetle expects in the
  * input_state callback. The runtime side composes a pad value by OR'ing
  * (1 << VB_BEETLE_PAD_<NAME>) for each pressed button. We translate

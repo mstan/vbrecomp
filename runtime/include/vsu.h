@@ -53,6 +53,31 @@ size_t vb_vsu_pull_samples(int16_t* dst, size_t n_frames);
 /* Number of stereo frames currently buffered. */
 size_t vb_vsu_pending_frames(void);
 
+/* ---- Always-on capture tap (accuracy oracle diff) -----------------
+ *
+ * The output ring is written from boot, one stereo frame per emitted
+ * sample, and `vb_vsu_total_frames()` is the monotonic count of frames
+ * ever emitted (never reset except by vb_vsu_init). The capture read
+ * below addresses frames by ABSOLUTE index, independent of the SDL
+ * consumer's drain cursor (`vb_vsu_pull_samples`), so a debug-server
+ * probe can stream the always-on history without disturbing playback.
+ *
+ * This is the ring-query model (CLAUDE.md Rule 3 / global ring rule):
+ * the probe asks for the window [start_abs, head) it cares about; it
+ * never arms a capture. Frames older than the ring capacity have been
+ * overwritten — `*out_resident_lo` reports the oldest still-readable
+ * absolute index so the caller can detect (and never silently skip) a
+ * gap if it falls behind.
+ *
+ * Returns the number of stereo frames copied into `dst` (interleaved
+ * L,R). `dst` must hold at least `max_frames * 2` int16. */
+uint64_t vb_vsu_total_frames(void);
+size_t   vb_vsu_read_abs(uint64_t start_abs, int16_t* dst,
+                         size_t max_frames,
+                         uint64_t* out_head_abs,
+                         uint64_t* out_resident_lo);
+unsigned vb_vsu_output_hz(void);
+
 #ifdef __cplusplus
 }
 #endif

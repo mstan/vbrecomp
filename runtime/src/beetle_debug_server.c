@@ -175,11 +175,22 @@ static int extract_int(const char* line, const char* key, long long* out) {
     return 1;
 }
 
+static void send_all(const char* data, size_t n) {
+    size_t off = 0;
+    while (off < n) {
+        int sent = send(s_client, data + off, (int)(n - off), 0);
+        if (sent <= 0) return;   /* socket error/closed — drop the rest */
+        off += (size_t)sent;
+    }
+}
+
 static void send_response(const char* body) {
     if (s_client == VBB_BAD_SOCKET) return;
-    size_t n = strlen(body);
-    send(s_client, body, (int)n, 0);
-    send(s_client, "\n", 1, 0);
+    /* Loop until the whole body is flushed: a single send() can transmit
+     * fewer bytes than requested, which would silently truncate large
+     * dumps (e.g. the audio_pcm ring window). */
+    send_all(body, strlen(body));
+    send_all("\n", 1);
 }
 
 
@@ -335,6 +346,48 @@ static void handle_vip_state(long long id) {
     send_response(buf);
 }
 
+/* Stream a window of the always-on Beetle audio ring as little-endian
+ * S16 stereo hex. Oracle-side mirror of vb-runtime's `audio_pcm`
+ * (Rule 14: identical wire shape, different port). Probe-pulls by
+ * absolute frame index — a ring QUERY, never an armed capture. */
+static void handle_audio_pcm(long long id, const char* line) {
+    long long start = 0, maxf = 8192;
+    extract_int(line, "\"start\"", &start);
+    extract_int(line, "\"max\"",   &maxf);
+    if (start < 0) start = 0;
+    if (maxf < 1)      maxf = 1;
+    if (maxf > 16384)  maxf = 16384;
+
+    int16_t* pcm = (int16_t*)malloc((size_t)maxf * 2 * sizeof(int16_t));
+    if (!pcm) { send_response("{\"ok\":false,\"error\":\"oom\"}"); return; }
+
+    uint64_t head = 0, resident_lo = 0;
+    size_t got = vb_beetle_audio_read_abs((uint64_t)start, pcm, (size_t)maxf,
+                                          &head, &resident_lo);
+    uint64_t begin = ((uint64_t)start < resident_lo)
+                         ? resident_lo : (uint64_t)start;
+
+    char* body = (char*)malloc(256 + (size_t)got * 2 * 4);
+    if (!body) { free(pcm); send_response("{\"ok\":false,\"error\":\"oom\"}"); return; }
+    char* p = body;
+    p += sprintf(p,
+        "{\"ok\":true,\"cmd\":\"audio_pcm\",\"id\":%lld,\"rate\":%u,"
+        "\"channels\":2,\"format\":\"s16le\",\"head\":%llu,"
+        "\"resident_lo\":%llu,\"begin\":%llu,\"returned\":%u,\"hex\":\"",
+        id, vb_beetle_audio_rate(),
+        (unsigned long long)head, (unsigned long long)resident_lo,
+        (unsigned long long)begin, (unsigned)got);
+    for (size_t i = 0; i < got * 2; ++i) {
+        uint16_t s = (uint16_t)pcm[i];
+        p += sprintf(p, "%02X%02X", (unsigned)(s & 0xFF),
+                                    (unsigned)((s >> 8) & 0xFF));
+    }
+    p += sprintf(p, "\"}");
+    send_response(body);
+    free(body);
+    free(pcm);
+}
+
 static void handle_pause(long long id, int state) {
     s_paused = state;
     char buf[128];
@@ -401,6 +454,7 @@ static void dispatch_line(char* line) {
     else if (strcmp(cmd, "memory_map") == 0)   handle_memory_map(id);
     else if (strcmp(cmd, "get_registers") == 0)handle_get_registers(id);
     else if (strcmp(cmd, "vip_state") == 0)    handle_vip_state(id);
+    else if (strcmp(cmd, "audio_pcm") == 0)    handle_audio_pcm(id, line);
     else if (strcmp(cmd, "screenshot") == 0)   handle_screenshot(id, line);
     else if (strcmp(cmd, "pause") == 0)        handle_pause(id, 1);
     else if (strcmp(cmd, "continue") == 0)     handle_pause(id, 0);

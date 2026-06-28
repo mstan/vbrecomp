@@ -76,6 +76,18 @@ bool     s_loaded = false;
 const uint8_t* s_rom_ptr = nullptr;
 size_t         s_rom_size = 0;
 
+/* ---- always-on audio capture ring ----
+ * Beetle delivers interleaved S16 stereo PCM via audio_batch_cb every
+ * retro_run(). Pre-accuracy work discarded it; we now record every
+ * frame from boot into a power-of-two ring so the accuracy harness can
+ * pull a window by absolute index (the oracle side of the recomp's VSU
+ * capture). 1<<20 frames ≈ 23.8 s @ 44.1 kHz = 4 MiB static. */
+constexpr size_t   kAudioRingFrames = 1u << 20;
+constexpr size_t   kAudioRingMask   = kAudioRingFrames - 1;
+constexpr unsigned kAudioRateHz     = 44100;
+int16_t  s_audio_ring[kAudioRingFrames * 2];  /* interleaved L,R */
+uint64_t s_audio_total = 0;                   /* frames ever written */
+
 /* Beetle requests pixel format via the environment callback. We always
  * say "XRGB8888" because libretro-cpp's WANT_32BPP build path expects
  * that and the framebuffer width/pitch are 32 bpp. */
@@ -152,11 +164,24 @@ void video_refresh_cb(const void* data, unsigned width, unsigned height,
 }
 
 void audio_sample_cb(int16_t /*l*/, int16_t /*r*/) {
-    /* Discard; no audio output in P2.5. */
+    /* mednafen-vb delivers audio exclusively through the batch callback
+     * (libretro.cpp audio_batch_cb), so this per-sample entry is never
+     * invoked. Left as a discard to avoid double-counting the ring. */
 }
 
-size_t audio_batch_cb(const int16_t* /*data*/, size_t frames) {
-    /* Discard, return success-accept-all. */
+size_t audio_batch_cb(const int16_t* data, size_t frames) {
+    /* Always-on capture: record every interleaved (L,R) frame into the
+     * ring from boot. The accuracy harness pulls a window by absolute
+     * index via vb_beetle_audio_read_abs — a ring QUERY, never an armed
+     * capture (global ring-buffer rule). */
+    if (data) {
+        for (size_t i = 0; i < frames; ++i) {
+            size_t slot = (size_t)(s_audio_total & kAudioRingMask);
+            s_audio_ring[slot * 2 + 0] = data[i * 2 + 0];
+            s_audio_ring[slot * 2 + 1] = data[i * 2 + 1];
+            s_audio_total++;
+        }
+    }
     return frames;
 }
 
@@ -242,6 +267,7 @@ int vb_beetle_init(const uint8_t* rom_bytes, size_t rom_size) {
 
     s_loaded = true;
     s_frame_count.store(0);
+    s_audio_total = 0;
     return 0;
 }
 
@@ -278,6 +304,34 @@ uint32_t vb_beetle_frame_count(void) {
     return s_frame_count.load(std::memory_order_relaxed);
 }
 size_t   vb_beetle_rom_size(void)        { return s_rom_size; }
+
+uint64_t vb_beetle_audio_total(void)     { return s_audio_total; }
+unsigned vb_beetle_audio_rate(void)      { return kAudioRateHz; }
+
+size_t vb_beetle_audio_read_abs(uint64_t start_abs, int16_t* dst,
+                                size_t max_frames,
+                                uint64_t* out_head_abs,
+                                uint64_t* out_resident_lo) {
+    const uint64_t head = s_audio_total;
+    /* Frame i is overwritten at write (i + capacity); anything >=
+     * head - capacity is still in its slot. */
+    const uint64_t resident_lo =
+        (head > (uint64_t)kAudioRingFrames) ? head - (uint64_t)kAudioRingFrames : 0;
+    if (out_head_abs)    *out_head_abs    = head;
+    if (out_resident_lo) *out_resident_lo = resident_lo;
+    if (!dst || !max_frames) return 0;
+
+    uint64_t cur = start_abs < resident_lo ? resident_lo : start_abs;
+    size_t produced = 0;
+    while (produced < max_frames && cur < head) {
+        size_t slot = (size_t)(cur & kAudioRingMask);
+        dst[produced * 2 + 0] = s_audio_ring[slot * 2 + 0];
+        dst[produced * 2 + 1] = s_audio_ring[slot * 2 + 1];
+        produced++;
+        cur++;
+    }
+    return produced;
+}
 
 size_t vb_beetle_read_memory(uint32_t va, uint8_t* out, size_t len) {
     if (!out || !len) return 0;

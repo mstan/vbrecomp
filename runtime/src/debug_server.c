@@ -21,6 +21,7 @@
 #include "interrupts.h"
 #include "memory.h"
 #include "png_write.h"
+#include "vsu.h"
 #include "vsu_shadow.h"
 #include "ring_frame.h"
 #include "timer.h"
@@ -794,6 +795,49 @@ static void handle_audio_shadow_state(long long id) {
     free(body);
 }
 
+/* Stream a window of the always-on VSU output ring as little-endian S16
+ * stereo hex. Probe-pulls by ABSOLUTE frame index so the accuracy
+ * harness can drain continuously from boot without disturbing SDL
+ * playback (vb_vsu_read_abs is non-destructive). Mirrors the oracle's
+ * `audio_pcm` on port 4391 — same wire shape, different ring. */
+static void handle_audio_pcm(long long id, const char* line) {
+    long long start = 0, maxf = 8192;
+    extract_int(line, "\"start\"", &start);
+    extract_int(line, "\"max\"",   &maxf);
+    if (start < 0) start = 0;
+    if (maxf < 1)      maxf = 1;
+    if (maxf > 16384)  maxf = 16384;   /* bound the response body */
+
+    int16_t* pcm = (int16_t*)malloc((size_t)maxf * 2 * sizeof(int16_t));
+    if (!pcm) { send_response("{\"ok\":false,\"error\":\"oom\"}"); return; }
+
+    uint64_t head = 0, resident_lo = 0;
+    size_t got = vb_vsu_read_abs((uint64_t)start, pcm, (size_t)maxf,
+                                 &head, &resident_lo);
+    uint64_t begin = ((uint64_t)start < resident_lo)
+                         ? resident_lo : (uint64_t)start;
+
+    char* body = (char*)malloc(256 + (size_t)got * 2 * 4);
+    if (!body) { free(pcm); send_response("{\"ok\":false,\"error\":\"oom\"}"); return; }
+    char* p = body;
+    p += sprintf(p,
+        "{\"ok\":true,\"cmd\":\"audio_pcm\",\"id\":%lld,\"rate\":%u,"
+        "\"channels\":2,\"format\":\"s16le\",\"head\":%llu,"
+        "\"resident_lo\":%llu,\"begin\":%llu,\"returned\":%u,\"hex\":\"",
+        id, vb_vsu_output_hz(),
+        (unsigned long long)head, (unsigned long long)resident_lo,
+        (unsigned long long)begin, (unsigned)got);
+    for (size_t i = 0; i < got * 2; ++i) {
+        uint16_t s = (uint16_t)pcm[i];
+        p += sprintf(p, "%02X%02X", (unsigned)(s & 0xFF),
+                                    (unsigned)((s >> 8) & 0xFF));
+    }
+    p += sprintf(p, "\"}");
+    send_response(body);
+    free(body);
+    free(pcm);
+}
+
 static void handle_memory_map(long long id) {
     char buf[512];
     snprintf(buf, sizeof(buf),
@@ -1107,6 +1151,7 @@ static void dispatch_line(char* line) {
     else if (strcmp(cmd, "world_trace") == 0)  handle_world_trace(id, line);
     else if (strcmp(cmd, "wram_anchors") == 0) handle_wram_anchors(id, line);
     else if (strcmp(cmd, "audio_shadow_state") == 0) handle_audio_shadow_state(id);
+    else if (strcmp(cmd, "audio_pcm") == 0)    handle_audio_pcm(id, line);
     else if (strcmp(cmd, "memory_map") == 0)   handle_memory_map(id);
     else if (strcmp(cmd, "wtrace_stats") == 0) handle_wtrace_stats(id);
     else if (strcmp(cmd, "wtrace_dump") == 0)  handle_wtrace_dump(id, line);

@@ -71,14 +71,25 @@ static const unsigned s_tap_lut[8] = {
 };
 
 /* ------------------------ Sample-output ring --------------------- */
-/* Sized to ~1.5 s @ 44.1 kHz stereo (= 131 072 frames). Powers of two
- * make modulo cheap. */
-#define VSU_RING_FRAMES 131072
+/* Power-of-two stereo output ring. Sized at ~95 s @ 44.1 kHz
+ * (= 4 194 304 frames, 16 MiB). The SDL path only ever needs ~1.5 s,
+ * but in a `--headless` accuracy run the dispatch loop free-runs at
+ * ~30x realtime with no consumer, so the ring must be large enough that
+ * a from-boot capture window [0, N) survives until the accuracy harness
+ * drains it via vb_vsu_read_abs (see tools/audio_compare.py). */
+#define VSU_RING_FRAMES (1u << 22)
 #define VSU_RING_MASK   (VSU_RING_FRAMES - 1)
 static int16_t  s_ring_l[VSU_RING_FRAMES];
 static int16_t  s_ring_r[VSU_RING_FRAMES];
 static size_t   s_ring_head;   /* next slot the producer will fill */
 static size_t   s_ring_tail;   /* next slot the consumer will read */
+/* Monotonic count of frames ever emitted. s_ring_head == s_ring_total &
+ * VSU_RING_MASK always holds (both step by one per emit, neither resets
+ * except in vb_vsu_init), so absolute frame index i lives in slot
+ * (i & VSU_RING_MASK) until it is overwritten at write (i + capacity).
+ * The accuracy capture tap reads by this absolute index, decoupled from
+ * the SDL drain cursor s_ring_tail. */
+static uint64_t s_ring_total;
 
 /* Cycle accumulator -> sample-rate downsample. */
 static int32_t  s_sample_cycle_residue;
@@ -115,6 +126,7 @@ void vb_vsu_init(void) {
     s_lfsr = 0;
 
     s_ring_head = s_ring_tail = 0;
+    s_ring_total = 0;
     s_sample_cycle_residue = 0;
 
     vb_vsu_shadow_reset();
@@ -487,6 +499,7 @@ static inline void vsu_emit_one_sample(void) {
     s_ring_l[s_ring_head] = out_l;
     s_ring_r[s_ring_head] = out_r;
     s_ring_head = next_head;
+    s_ring_total++;
 }
 
 void vb_vsu_tick(uint64_t cpu_cycles) {
@@ -527,4 +540,36 @@ size_t vb_vsu_pull_samples(int16_t* dst, size_t n_frames) {
 
 size_t vb_vsu_pending_frames(void) {
     return (s_ring_head - s_ring_tail) & VSU_RING_MASK;
+}
+
+uint64_t vb_vsu_total_frames(void) {
+    return s_ring_total;
+}
+
+unsigned vb_vsu_output_hz(void) {
+    return VSU_OUTPUT_HZ;
+}
+
+size_t vb_vsu_read_abs(uint64_t start_abs, int16_t* dst, size_t max_frames,
+                       uint64_t* out_head_abs, uint64_t* out_resident_lo) {
+    const uint64_t head = s_ring_total;
+    /* Oldest still-readable absolute index: frame i is overwritten at
+     * write (i + VSU_RING_FRAMES), so anything >= head - capacity is
+     * still in its slot. (head - 1 is the newest written frame.) */
+    const uint64_t resident_lo =
+        (head > (uint64_t)VSU_RING_FRAMES) ? head - (uint64_t)VSU_RING_FRAMES : 0;
+    if (out_head_abs)    *out_head_abs    = head;
+    if (out_resident_lo) *out_resident_lo = resident_lo;
+    if (!dst || !max_frames) return 0;
+
+    uint64_t cur = start_abs < resident_lo ? resident_lo : start_abs;
+    size_t produced = 0;
+    while (produced < max_frames && cur < head) {
+        size_t slot = (size_t)(cur & VSU_RING_MASK);
+        dst[produced * 2 + 0] = s_ring_l[slot];
+        dst[produced * 2 + 1] = s_ring_r[slot];
+        produced++;
+        cur++;
+    }
+    return produced;
 }
