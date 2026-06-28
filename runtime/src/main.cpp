@@ -443,15 +443,14 @@ int main(int argc, char** argv) {
     // IRQ controller and route to an interrupt vector when one is
     // pending and accepted.
     //
-    // Cycle accounting: the BB-leader yield-budget decrements
-    // cpu.step_budget once per basic block. Residue after a yield
-    // therefore measures BBs executed; we scale by ~3 to estimate
-    // V810 cycles (average BB ≈ 3 instructions × ~1 cycle each).
-    // This is coarse but sufficient for the timer/IRQ work — the
-    // VIP state machine (P4-B) will demand cycle accuracy and the
-    // residue scaling will be revisited then.
+    // Cycle accounting (Axis-2 cycle model): the recompiled code charges
+    // each instruction's real V810 base cost into cpu.cycles as it runs
+    // (recompiler/v810/cycles.py). The per-pass device-tick delta is the
+    // cpu.cycles advance, captured around vb_dispatch below. cpu.step_budget
+    // is a SEPARATE concern — the per-basic-block yield budget, decremented
+    // once per BB leader so a tight intra-function loop still yields to the
+    // TCP/SDL poll; it no longer feeds the cycle estimate.
     constexpr uint64_t STEP_BUDGET     = 250000;
-    constexpr uint32_t CYCLES_PER_BB   = 3;
     /* While halted, advance device emulation in big chunks. 20MHz
      * CPU × 20ms wallclock per main-loop iteration ≈ 400k cycles.
      * A frame is ~397k cycles, so each iteration covers about one
@@ -539,11 +538,16 @@ int main(int argc, char** argv) {
         cpu.step_budget = STEP_BUDGET;
         cpu.yielded = 0;
         vb_watchdog_beat(VB_WD_DISPATCH, dispatch_pc, cpu.cycles, present_count);
+        const uint64_t cyc_before = cpu.cycles;
         vb_dispatch(&cpu, dispatch_pc);
 
-        const uint64_t bbs_run  = STEP_BUDGET - cpu.step_budget;
-        const uint64_t cyc_delta = bbs_run * CYCLES_PER_BB;
-        cpu.cycles += cyc_delta;
+        // Axis-2 cycle model: the recompiled code now accumulates each
+        // instruction's real V810 base cost into cpu.cycles as it runs
+        // (recompiler/v810/cycles.py), so the device-tick delta is just
+        // how far cpu.cycles advanced this pass — no more bbs_run*3
+        // estimate. step_budget is unchanged: it remains the per-basic-
+        // block yield budget, fully decoupled from cycle accounting.
+        const uint64_t cyc_delta = cpu.cycles - cyc_before;
         vb_timer_tick((uint32_t)cyc_delta);
         vb_vip_tick(cyc_delta);
         vb_vsu_tick(cyc_delta);

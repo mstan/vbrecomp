@@ -59,6 +59,7 @@ from .analysis import (
     discover_functions,
     trace_reset_trampoline,
 )
+from .cycles import BCOND_TAKEN_EXTRA, instr_base_cycles
 from .decoder import DecodedInstruction
 from .isa import Format
 
@@ -607,6 +608,10 @@ def _emit_terminator(ins: DecodedInstruction,
         cond_expr = _BCOND_C_EXPR[ins.cond]
         target = ins.branch_target
         out.append(f"if ({cond_expr}) {{")
+        # Axis-2: a taken conditional branch costs BCOND_TAKEN_EXTRA more
+        # than the not-taken base (1) already charged inline (oracle
+        # v810_oploop.inc:420 taken=3 / :430 not-taken=1).
+        out.append(f"    cpu->cycles += {BCOND_TAKEN_EXTRA};")
         if target in leader_set:
             out.append(f"    goto {_bb_label(target)};")
         else:
@@ -803,6 +808,15 @@ def emit_function(rom: RomImage, fn: FunctionRange,
             break
 
         lines.append(f"    cpu->pc = 0x{ins.pc:08X}u;")
+
+        # Axis-2 cycle model: charge this instruction's V810 base cost
+        # (single source: cycles.instr_base_cycles, from the oracle's
+        # ADDCLOCK table). Charged BEFORE the body/terminator so it lands
+        # even for control transfers that leave the block. For a Bcond
+        # this is the not-taken base (1); the taken extra is added inside
+        # the taken path by _emit_terminator. Replaces main.cpp's old
+        # bbs_run*3 estimate, which is now derived as the cpu->cycles delta.
+        lines.append(f"    cpu->cycles += {instr_base_cycles(ins)};")
 
         # Straight-line body (if any).
         body = _emit_straight_line(ins) if (
