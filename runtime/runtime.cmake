@@ -37,6 +37,9 @@ function(vb_add_runtime_target TARGET)
         ${VB_RUNTIME_DIR}/src/png_read.c
         ${VB_RUNTIME_DIR}/src/recolor.c
         ${VB_RUNTIME_DIR}/src/vsu.c
+        # Vendored band-limited synthesis buffer (Mednafen Blip_Buffer 0.4.1,
+        # from beetle-vb/mednafen). Used by the VSU output stage (Axis-5b).
+        ${VB_RUNTIME_DIR}/src/Blip_Buffer.c
         # Verified-enhancement shadow QoL layer (opt-in, default OFF;
         # byte-identical with VBRECOMP_AUDIO_SHADOW / VBRECOMP_SCREEN unset).
         ${VB_RUNTIME_DIR}/src/audio_shadow.c
