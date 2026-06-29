@@ -435,6 +435,10 @@ int main(int argc, char** argv) {
      * frame's worth, which still leaves TCP/SDL polls responsive. */
     constexpr uint64_t VB_CYCLES_PER_FRAME = 397853;
     uint64_t last_present_cycles = 0;
+    /* Cycle-driven frame counter (Axis-6). Independent of the SDL present
+     * path so cpu.frame advances in --headless too; cpu.frame was previously
+     * stuck at 0 (the `frame` TCP command and the frame ring both read it). */
+    uint64_t last_frame_cycles = 0;
     bool sdl_quit = false;
 
     // P4-A main loop: alternate between recompiled-code dispatch
@@ -459,6 +463,18 @@ int main(int argc, char** argv) {
     vb_watchdog_start();
     while (vb_debug_server_poll() == 0 && !sdl_quit) {
         vb_watchdog_beat(VB_WD_POLL, dispatch_pc, cpu.cycles, present_count);
+
+        /* Axis-6 frame ring: advance the VIP-frame counter from elapsed
+         * cycles (covers both the active-dispatch and HALT-idle paths, which
+         * both pass through here) and record a per-frame {pc,gpr,psw}
+         * fingerprint into the always-on ring. The ring is queried, never
+         * armed (debug `frame` command reports the seq). Catch-up loop in
+         * case a single pass spanned more than one frame period. */
+        while (cpu.cycles - last_frame_cycles >= VB_CYCLES_PER_FRAME) {
+            last_frame_cycles += VB_CYCLES_PER_FRAME;
+            cpu.frame++;
+            vb_ring_frame_record(&cpu);
+        }
 #if VB_RUNTIME_HAVE_SDL
         if (!headless) {
             SDL_Event ev;

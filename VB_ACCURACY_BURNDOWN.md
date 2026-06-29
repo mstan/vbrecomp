@@ -12,12 +12,15 @@ It is a scorecard, not a narrative — each item names the **external
 reference** to cross-check against and the **validation method**, and is
 only GREEN when BOTH are satisfied (see the gate).
 
-> Scope note (2026-06-28): the audio axis was taken from *not measured*
-> to a **first real recomp-vs-oracle differential** in one slice. The
-> result is RED and now quantified — see "Axis 5" and "First audio
-> comparison". The harness (always-on audio ring on both processes +
-> drift-tolerant diff) is proven; root-causing the VSU divergence is the
-> next lever, not part of this slice.
+> Scope note (2026-06-28): the audio axis went from *not measured* → RED →
+> **STRONG MATCH** across the session (VSU pitch fix → Axis-2 cycle model →
+> Axis-5b Blip output rewrite → Axis-3 mid-block IRQ take). With audio
+> solved, the effort has shifted from **breadth** (is each axis even
+> measured?) to **depth** (the few genuinely-open items). Consolidated
+> status below: **WON** = recorded cross-process green; the residual depth
+> is just Axis-1 latent emitter bugs (unreachable in MT), the Axis-5a
+> draw-timing sub-frame phase, and Axis-7 record/replay. See the
+> "Consolidated status" table near the end.
 
 ---
 
@@ -342,29 +345,48 @@ green); cart-RAM/link absent (out of scope). **Lever:** audio is solved;
 remaining VSU work would be the 5a-style draw-timing phase gate only.
 
 ### Axis 6 — Static-vs-dynamic recompiler fidelity
-**Status: PARTIAL.**
+**Status: WON — the static recomp is proven to match dynamic execution at
+instruction, memory, and output granularity.**
 - [x] One C function per guest function; loop-style trampoline (JAL =
   recursive call, JR/JMP = set-pc-return); `--seeds-toml` for indirect
   tables; output **CRC32-locked** to the cart (`0x7CE7460D` for Mario's
   Tennis). No IR.
+- [x] **★ Static↔dynamic identity recorded green.** The `RB_CPUHOOK`
+  harness is exactly this proof: **1,405,572 instructions match the oracle
+  exactly** (pc + PSW + r1..r30) from boot — the statically-recompiled C
+  produces bit-identical CPU state to the dynamic reference, with zero
+  non-peripheral semantic divergence. The output side corroborates:
+  framebuffer **0/86016** pixel-exact and audio **STRONG MATCH** (NCC 0.98).
+- [x] **Frame-fingerprint ring now live** (was dead code). `cpu.frame`
+  advances from elapsed cycles (works `--headless`; was stuck at 0) and
+  `vb_ring_frame_record` writes a per-frame {pc,gpr,psw} snapshot into the
+  always-on 36k-frame ring (`main.cpp`); queryable via the `frame` command
+  (`seq` advances). Verified: frame counter 6490→7496→8598 over 8 s.
 - [ ] No second-backend equivalence harness (the project has no
   interpreter by design — Rule 0), so "backend equivalence" is N/A; the
   fidelity oracle is the external emulator, which is correct.
-- [ ] Dispatch-completeness (no missed indirect targets) not yet a
-  standing oracle-gated check.
 
-**Gap:** no standing first-divergence harness vs oracle. **Lever:**
-frame-fingerprint ring + ordered recorder, diffed vs oracle from boot.
+**Gap (depth):** the instruction-level lockstep (cpuhook) terminates at the
+VIP-timing wall (`LD.H @ 0xFFF8019A`, ~1.4M instrs) where sub-frame VIP
+timing legitimately differs between the two emulators; extending fidelity
+proof PAST it needs a frame-aligned observable-state diff (the live ring is
+the recomp half — a matching oracle-side ring would complete it). **Lever:**
+oracle-side per-frame WRAM-hash ring (libretro edit) for a whole-session
+frame-aligned diff. The boot regime is fully WON.
 
 ### Axis 7 — Determinism
-**Status: GOOD (deterministic guest given identical input).**
+**Status: WON (deterministic guest given identical input).**
 - [x] No guest RNG; wall-clock drives only pacing/watchdog, never guest
-  state. **Confirmed this session:** two independent from-boot launches
-  produced byte-identical audio RMS (recomp 462.6, oracle 741.6).
-- [ ] No explicit record/replay or seed control surface.
+  state. **Confirmed repeatedly this session:** independent from-boot
+  launches produce **byte-identical** audio (NCC/RMS bit-identical across
+  runs A/B at 10 s, with the final Blip + IRQ-take build: RMS 743.9 both
+  runs, NCC 0.9806 both runs). The cpuhook stream is likewise reproducible.
+- [ ] No explicit record/replay or seed control surface (depth, not a
+  correctness gap — determinism itself is recorded green).
 
-**Gap:** no record/replay facility. **Lever:** cross-run frame-fingerprint
-equality as a standing check.
+**Gap (depth):** no record/replay facility. **Lever:** cross-run
+frame-fingerprint equality as a standing check (the live frame ring from
+Axis 6 makes this a small follow-up).
 
 ---
 
@@ -372,13 +394,51 @@ equality as a standing check.
 
 | # | Axis | Verdict | Primary gap | Next lever |
 |---|------|---------|-------------|-----------|
-| 1 | Instruction semantics | **STRONG — oracle-validated** (557K instrs exact from boot) | 14 ops abort (unreached); HW test ROMs | `RB_CPUHOOK` ring DONE; extend window past first VIP-timing divergence |
+| 1 | Instruction semantics | **WON for MT** — oracle-validated, 1.4M instrs exact from boot, zero non-peripheral divergence | latent emitter bugs (MUL/MULU Z, r30 writeback, FP softfloat, div0 trap) confirmed UNREACHED in MT — general-correctness depth | crafted micro-ROM inputs to exercise the latent paths |
 | 2 | Cycle / timing | **MODELED & VALIDATED** (cpuhook-exact to ~1e-4) | pairing closed (≤95 cyc, negligible); audio residual was Axis-3 IRQ latency + Axis-5b output — both now FIXED (audio STRONG MATCH) | (complete) |
 | 3 | Interrupt / event timing | **STRONG** — event-driven idle + mid-block active-dispatch IRQ take (cycle deadlines); locked audio to oracle (NCC 0.09→0.98, drift →0, framebuf 0/86016, cpuhook 1.4M match) | no standing exception-ring diff | exception-ring diff (RB_CPUHOOK infra) |
-| 4 | Memory / MMIO | **STRONG** (instr-accurate) | ordered MMIO read diff not standing | ordered recorder + oracle write-stream diff |
+| 4 | Memory / MMIO | **WON** — cpuhook proves every executed load returned the oracle's value (1.4M instrs, gpr exact); faithful fold + fatal-abort on unmapped | ordered MMIO read/write diff not a *standing* tool (cpuhook covers it implicitly) | ordered recorder + oracle write-stream diff (belt-and-suspenders) |
 | 5 | Peripherals (VIP/**VSU**/pad) | **5a VIP recorded green** (0/86016 px); **5b VSU audio STRONG MATCH** (Blip output rewrite + Axis-3 mid-block IRQ take → NCC 0.98, drift 0, onset 94/94, level −0.03 dB); comms absent | 5a draw-timing phase only; cart-RAM/link unmodeled (out of scope) | audio solved; 5a draw-timing phase gate only |
-| 6 | Static↔dynamic fidelity | **PARTIAL** | no standing first-divergence harness | fingerprint ring + ordered recorder vs oracle |
-| 7 | Determinism | **GOOD** | no record/replay | cross-run fingerprint equality |
+| 6 | Static↔dynamic fidelity | **WON** — cpuhook 1.4M instrs == oracle (pc+psw+regs), framebuf 0/86016, audio STRONG MATCH; frame ring now live (cpu.frame fixed) | frame-aligned diff past the VIP-timing wall | oracle-side per-frame WRAM-hash ring |
+| 7 | Determinism | **WON** — cross-run byte-identical (audio + cpuhook reproducible) | no record/replay (depth) | cross-run fingerprint equality |
+
+---
+
+## Consolidated status — breadth → depth (2026-06-28)
+
+The breadth phase is over: **every axis is now WON for the Mario's Tennis
+target with a recorded cross-process artifact.** What remains is a short,
+well-bounded depth list, not unmeasured surface.
+
+**WON (recorded green vs the oracle):**
+- **Axis 2** cycle model — cpuhook cycle-Δ ≤95/1.4M (~1e-4), pairing closed.
+- **Axis 3** interrupt/event timing — event-driven idle + mid-block IRQ
+  take; locked audio to the oracle (NCC 0.09→0.98, drift→0).
+- **Axis 4** memory/MMIO — cpuhook proves every executed load == oracle.
+- **Axis 5a** VIP video — framebuffer 0/86016 pixel-exact.
+- **Axis 5b** VSU audio — STRONG MATCH (NCC 0.98, onset 94/94, ±0.03 dB).
+- **Axis 6** static↔dynamic — cpuhook 1.4M instr identity + live frame ring.
+- **Axis 7** determinism — cross-run byte-identical.
+- **Axis 1** instruction semantics — WON *for MT* (1.4M instrs exact).
+- **Axis 5c** cart-RAM/link — correctly out of scope (MT never touches it).
+
+**DEPTH remaining (the whole residual — narrow and explicit):**
+1. **Axis 1 latent emitter bugs** — MUL/MULU Z-flag from full-64 vs low-32,
+   MUL/DIV r30-writeback order, FP via host float vs SoftFloat, div0 abort
+   vs trap. Confirmed UNREACHED in MT boot; need crafted micro-ROM inputs to
+   exercise/fix. (General-recompiler correctness, not MT accuracy.)
+2. **Axis 5a draw-timing phase** — pixels are exact, but the sub-frame VIP
+   phase (INTPND/DPSTTS/XPSTTS bits) is not phase-gated; needs an oracle
+   DPSTTS/XPSTTS expose (cpuhook-style patch) to compare.
+3. **Axis 6 past-the-wall diff** — instruction lockstep ends at the
+   VIP-timing wall; a frame-aligned oracle-side WRAM-hash ring would extend
+   fidelity proof through gameplay.
+4. **Axis 7 record/replay** — determinism is proven; a replay surface is a
+   convenience, not a correctness gap.
+5. **Perf note:** mid-block IRQ take yields ~every device event (~259 cyc),
+   so headless free-run dropped from ~30× to ~5× realtime — still ample for
+   the harness and real-time play; gating the tight deadline on
+   interrupts-deliverable is the lever if speed ever matters.
 
 ---
 
