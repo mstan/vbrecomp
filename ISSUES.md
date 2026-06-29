@@ -27,25 +27,54 @@ so each emitted instruction increments a per-call cycle counter
 that main.cpp consumes instead of the BB count. Decision pending
 the first cart that visibly drifts.
 
-## V810 FP exception machinery (deferred)
+## V810 floating-point fidelity — host float vs SoftFloat (deferred)
 
-`recompiler/v810/emitter.py::_emit_format_vii` implements ADDF.S,
-SUBF.S, MULF.S, DIVF.S, CMPF.S, CVT.WS, CVT.SW, TRNC.SW with
-correct PSW Z/S/CY/OV semantics but does NOT model the V810's
-FRO / FIV / FZD / FOV / FUD / FPR exception flags or their
-INVALID_OP_HANDLER_ADDR / FPU_HANDLER_ADDR delivery paths. Beetle
-implements these in
-`beetle-vb/mednafen/hw_cpu/v810/v810_cpu.cpp::CheckFPInputException`
-and `FPU_DoException` (lines 837-902).
+> **What to look for if this ever bites:** wrong/odd FP results, or a
+> missing FP exception, in a cart that does real floating-point math
+> (3D, physics). Search `recompiler/v810/emitter.py::_emit_format_vii`.
 
-In practice this means a cart that feeds a subnormal / NaN /
-infinity to an FP op will silently get a host-float result rather
-than the V810 exception. Mario's Tennis never does this. Any cart
-that relies on FP exceptions for error handling (none known) would
-need this implemented.
+**Where it lives:** every V810 FP op — `CMPF.S`, `CVT.WS`, `CVT.SW`,
+`TRNC.SW`, `ADDF.S`, `SUBF.S`, `MULF.S`, `DIVF.S` (Format VII / FPP,
+primary opcode `0x3E`) — is emitted using the **host x86 `float`**, via
+the `union { uint32_t u; float f; }` reinterpret idiom and native C float
+arithmetic (`_a.f == _b.f`, `(float)_i`, `_a.f * _b.f`, …). The PSW
+Z/S/CY/OV semantics ARE oracle-correct (mirror Beetle's
+`SetFPUOPNonFPUFlags`); only the float *value* path can differ.
 
-**Estimated work:** ~50 lines per FPP op, plus an FPU_HANDLER_ADDR
-exception delivery path mirroring `interrupts.c::vb_irq_force_handler`.
+**Why it can diverge from the oracle / real hardware:** the V810 (and the
+Beetle/Mednafen oracle) compute FP with an exact IEEE-754 single-precision
+**SoftFloat** (`beetle-vb/mednafen/hw_cpu/v810/fpu-new/softfloat.*`). Host
+`float` is *usually* bit-identical for normal finite inputs but can differ
+on: NaN/Inf payload + sign propagation; subnormals (flush-to-zero);
+rounding-mode / intermediate-precision edges (x87 80-bit vs SSE, FMA
+contraction, last-bit rounding of borderline results). Two sub-gaps:
+
+1. **Precision / rounding** — even finite inputs can yield a 1-ULP
+   difference vs SoftFloat.
+2. **FP exception machinery NOT modeled** — the FRO / FIV / FZD / FOV /
+   FUD / FPR flags and their `INVALID_OP_HANDLER_ADDR` /
+   `FPU_HANDLER_ADDR` delivery are absent (Beetle:
+   `v810_cpu.cpp::CheckFPInputException` / `FPU_DoException`, lines
+   837-902). A cart feeding a subnormal/NaN/Inf gets a silent host-float
+   result instead of the V810 FP exception. NB: *unimplemented* FPP
+   sub-ops abort via `vb_stub_abort`; the *implemented* ones above never
+   abort — they silently use host float.
+
+**Status for Mario's Tennis:** not a problem. The 1.4M-instruction cpuhook
+match (Axis-1, `VB_ACCURACY_BURNDOWN.md`) would have caught any FP
+divergence in the boot window — MT either doesn't exercise the divergent
+edges or doesn't use FP there.
+
+**How to fix (when a target needs it):** vendor a SoftFloat (reuse
+mednafen's `fpu-new/softfloat`) and route every `_emit_format_vii` FP op
+through it instead of host `float`; then add the FP-exception delivery
+path (mirror `interrupts.c::vb_exception` with `FPU_HANDLER_ADDR`). Add
+crafted-input regression cases to `tools/isa_semantics_check.py`
+(compile-and-run the emitted C vs oracle-derived golden) — the same
+harness that validated the MUL/DIV fixes.
+
+**Estimated work:** SoftFloat vendor + wire-through ~150 lines; exception
+delivery ~50 lines per op.
 
 ## CAXI — compare-and-exchange (stubbed)
 

@@ -444,7 +444,7 @@ Axis 6 makes this a small follow-up).
 
 | # | Axis | Verdict | Primary gap | Next lever |
 |---|------|---------|-------------|-----------|
-| 1 | Instruction semantics | **WON** — 1.4M instrs exact from boot; latent MUL/DIV bugs (Z-flag, r30 order, ÷0 trap) FIXED + validated (isa_semantics_check 10/10, no MT regression) | FP host-float vs SoftFloat on non-finite (separate, larger; aborts not silently wrong) | route FP through SoftFloat (if a target needs it) |
+| 1 | Instruction semantics | **WON** — 1.4M instrs exact from boot; latent MUL/DIV bugs (Z-flag, r30 order, ÷0 trap) FIXED + validated (isa_semantics_check 10/10, no MT regression) | FP host-float vs SoftFloat (silent divergence on non-finite/rounding; unreached by MT) — see ISSUES.md | route FP through SoftFloat (if a target needs it) |
 | 2 | Cycle / timing | **MODELED & VALIDATED** (cpuhook-exact to ~1e-4) | pairing closed (≤95 cyc, negligible); audio residual was Axis-3 IRQ latency + Axis-5b output — both now FIXED (audio STRONG MATCH) | (complete) |
 | 3 | Interrupt / event timing | **STRONG** — event-driven idle + mid-block active-dispatch IRQ take (cycle deadlines); locked audio to oracle (NCC 0.09→0.98, drift →0, framebuf 0/86016, cpuhook 1.4M match) | no standing exception-ring diff | exception-ring diff (RB_CPUHOOK infra) |
 | 4 | Memory / MMIO | **WON** — cpuhook proves every executed load returned the oracle's value (1.4M instrs, gpr exact); faithful fold + fatal-abort on unmapped | ordered MMIO read/write diff not a *standing* tool (cpuhook covers it implicitly) | ordered recorder + oracle write-stream diff (belt-and-suspenders) |
@@ -477,11 +477,14 @@ well-bounded depth list, not unmeasured surface.
 - **Axis 5c** cart-RAM/link — correctly out of scope (MT never touches it).
 
 **DEPTH remaining (the whole residual — narrow and explicit):**
-1. **FP via host float vs SoftFloat** — the V810 FP ops use the x86 host FPU;
-   they diverge from the oracle's SoftFloat only on non-finite / rounding
-   edges (and the FP exception flags currently abort, never silently wrong).
+1. **FP via host float vs SoftFloat** — the implemented V810 FP ops emit
+   host x86 `float` and can **silently** diverge from the oracle's SoftFloat
+   on non-finite / subnormal / rounding edges; the FP exception flags
+   (FRO/FIV/…) are unmodeled (only *unimplemented* FPP sub-ops abort).
    Larger than the MUL/DIV fixes (needs a SoftFloat path) and unreached by
-   MT; do it only if a target needs it. (General-recompiler correctness.)
+   MT. **Fully documented in `ISSUES.md` → "V810 floating-point fidelity"**
+   (where/why/how-to-fix). General-recompiler correctness; do it only if a
+   target needs it.
 2. **Axis 7 record/replay** — determinism is proven; a replay surface is a
    convenience, not a correctness gap.
 3. **Perf note:** mid-block IRQ take yields ~every device event (~259 cyc),
