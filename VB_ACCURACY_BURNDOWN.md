@@ -270,6 +270,16 @@ take. The active-path fix locked audio to the oracle (NCC 0.09 → 0.98).**
     **1,405,572 instructions match the oracle**, zero non-peripheral
     semantic divergence (same VIP-timing wall); perf fine (28 s wall for a
     10 s from-boot capture despite ~259-cyc yields).
+  - **★ Side effect — wall-clock play speed corrected to exactly 50.27 Hz.**
+    The windowed runtime paces *presents* to 50.27 Hz but advances emulated
+    cycles per dispatch pass. Before the deadline yield, a pass over-ran the
+    frame boundary by ~a full extra frame (250000-block passes ≈ ~2 frames of
+    cycles), so each paced present consumed ~2 emulated frames → the game ran
+    **~2× too fast** (display capped at 50.27 Hz, internal clock ~94 Hz).
+    With the deadline yield the loop stops within one frame of the boundary,
+    so one present ≈ one emulated frame. **Measured (windowed, `frame` TCP
+    command): 50.27 Hz, ratio 1.000× real hardware** (was ~2× fast). The same
+    fix corrected audio waveshape, tempo drift, AND real-time speed.
 - [ ] No exception-record ring diff vs oracle (separate observability item).
 
 **Gap:** no standing exception-record ring diff (IRQ take is now timing-
