@@ -30,6 +30,24 @@ uint32_t vb_rom_size(void) { return s_rom_size; }
 const uint8_t* vb_rom_data(void) { return s_rom; }
 const uint8_t* vb_wram_data(void) { return s_wram; }
 
+/* Per-region FNV-1a over WRAM (Axis-6 whole-session fidelity ring): 64
+ * regions of 1 KiB over the 64 KiB WRAM. Regional (not one whole-RAM hash) so
+ * a single volatile timing-derived cell can't avalanche the entire frame to
+ * "divergent" — the comparator localizes which 1 KiB region differs and shows
+ * the rest stays in lockstep. MUST match the oracle's hash
+ * (beetle-vb/libretro.cpp, same region layout + FNV-1a constants). */
+void vb_wram_region_fnv(uint32_t out[VB_WRAM_FNV_REGIONS]) {
+    for (int r = 0; r < VB_WRAM_FNV_REGIONS; ++r) {
+        const uint8_t* p = s_wram + (size_t)r * VB_WRAM_FNV_REGION_BYTES;
+        uint32_t h = 2166136261u;
+        for (int i = 0; i < VB_WRAM_FNV_REGION_BYTES; ++i) {
+            h ^= p[i];
+            h *= 16777619u;
+        }
+        out[r] = h;
+    }
+}
+
 int vb_memory_init(const char* rom_path) {
     if (!rom_path || !*rom_path) {
         return -1;

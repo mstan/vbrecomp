@@ -34,6 +34,7 @@
 #include "fntrace.h"
 #include "cpuhook.h"
 #include "vip_phase.h"
+#include "wram_hash.h"
 
 #if defined(_WIN32)
 #  include <winsock2.h>
@@ -921,6 +922,45 @@ static void handle_vip_phase(long long id, const char* line) {
     free(recs);
 }
 
+/* Stream a window of the always-on per-game-frame WRAM fingerprint ring as
+ * hex of the raw records (wram_hash.h vb_wramhash_rec; byte-identical to the
+ * oracle's wram_hash ring on 4391). Ring QUERY by absolute GAME_START seq. */
+static void handle_wram_hash(long long id, const char* line) {
+    long long start = 0, maxn = 8192;
+    extract_int(line, "\"start\"", &start);
+    extract_int(line, "\"max\"",   &maxn);
+    if (start < 0)    start = 0;
+    if (maxn < 1)     maxn = 1;
+    if (maxn > 65536) maxn = 65536;
+
+    vb_wramhash_rec* recs =
+        (vb_wramhash_rec*)malloc((size_t)maxn * sizeof(vb_wramhash_rec));
+    if (!recs) { send_response("{\"ok\":false,\"error\":\"oom\"}"); return; }
+
+    uint64_t head = 0, resident_lo = 0;
+    size_t got = vb_wram_hash_read_abs((uint64_t)start, recs, (size_t)maxn,
+                                       &head, &resident_lo);
+    uint64_t begin = ((uint64_t)start < resident_lo)
+                         ? resident_lo : (uint64_t)start;
+
+    char* body = (char*)malloc(256 + got * sizeof(vb_wramhash_rec) * 2);
+    if (!body) { free(recs); send_response("{\"ok\":false,\"error\":\"oom\"}"); return; }
+    char* p = body;
+    p += sprintf(p,
+        "{\"ok\":true,\"cmd\":\"wram_hash\",\"id\":%lld,\"recsize\":%u,"
+        "\"head\":%llu,\"resident_lo\":%llu,\"begin\":%llu,\"returned\":%u,\"hex\":\"",
+        id, (unsigned)sizeof(vb_wramhash_rec),
+        (unsigned long long)head, (unsigned long long)resident_lo,
+        (unsigned long long)begin, (unsigned)got);
+    const unsigned char* raw = (const unsigned char*)recs;
+    for (size_t i = 0; i < got * sizeof(vb_wramhash_rec); ++i)
+        p += sprintf(p, "%02X", raw[i]);
+    p += sprintf(p, "\"}");
+    send_response(body);
+    free(body);
+    free(recs);
+}
+
 static void handle_memory_map(long long id) {
     char buf[512];
     snprintf(buf, sizeof(buf),
@@ -1237,6 +1277,7 @@ static void dispatch_line(char* line) {
     else if (strcmp(cmd, "audio_pcm") == 0)    handle_audio_pcm(id, line);
     else if (strcmp(cmd, "cpuhook") == 0)      handle_cpuhook(id, line);
     else if (strcmp(cmd, "vip_phase") == 0)    handle_vip_phase(id, line);
+    else if (strcmp(cmd, "wram_hash") == 0)    handle_wram_hash(id, line);
     else if (strcmp(cmd, "memory_map") == 0)   handle_memory_map(id);
     else if (strcmp(cmd, "wtrace_stats") == 0) handle_wtrace_stats(id);
     else if (strcmp(cmd, "wtrace_dump") == 0)  handle_wtrace_dump(id, line);

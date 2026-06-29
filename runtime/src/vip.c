@@ -35,6 +35,7 @@
 #include "stub_abort.h"
 #include "vip_capture.h"
 #include "vip_phase.h"
+#include "wram_hash.h"
 #include "asset_pack.h"
 #include "recolor.h"
 
@@ -305,6 +306,7 @@ static uint16_t s_obj_suppress[1024];
 void vb_vip_init(void) {
     memset(s_vip_mem, 0, sizeof(s_vip_mem));
     vb_vip_phase_reset();
+    vb_wram_hash_reset();
     /* Beetle VIP_Power (vip.c:399). */
     s_intpnd = 0;
     s_intenb = 0;
@@ -406,6 +408,14 @@ static void vip_advance_column(void) {
                 vip_check_irq();
                 vb_vip_phase_record(VB_VIP_INT_GAME_START,
                                     vb_vip_dpstts(), vb_vip_xpstts());
+                /* Axis-6 whole-session fidelity: fingerprint WRAM at the
+                 * game-frame boundary (1:1-aligned with the oracle via the
+                 * proven GAME_START sequence). */
+                {
+                    uint32_t wr_fnv[VB_WRAM_FNV_REGIONS];
+                    vb_wram_region_fnv(wr_fnv);
+                    vb_wram_hash_record(wr_fnv);
+                }
 
                 /* Advance any frame-counted debug press once per game frame
                  * (deterministic headless navigation; auto-releases). */

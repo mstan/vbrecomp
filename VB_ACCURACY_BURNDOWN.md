@@ -373,17 +373,30 @@ instruction, memory, and output granularity.**
   `vb_ring_frame_record` writes a per-frame {pc,gpr,psw} snapshot into the
   always-on 36k-frame ring (`main.cpp`); queryable via the `frame` command
   (`seq` advances). Verified: frame counter 6490→7496→8598 over 8 s.
+- [x] **★ Whole-session WRAM fidelity recorded green** (`wramhash_compare.py`),
+  extending fidelity proof PAST the instruction-level wall. Both processes
+  FNV-1a-hash WRAM (64 × 1 KiB regions) at each GAME_START — the game-frame
+  boundary the vipphase gate proved 1:1-aligned — into an always-on from-boot
+  ring; the comparator aligns by GAME_START index. Result: **62 of 64 regions
+  in PERFECT lockstep across all frames** (5777+ game frames; 98.44% of
+  region-cells). Divergence is confined to two regions and is **benign by
+  construction**: region 15 (0x3C00-0x3FFF = top of the cart stack) holds the
+  recomp's deliberate `0xDEAD0000` `lp`/r31 sentinel (which the cpuhook
+  already excludes) plus ~4-8 volatile stack locals carrying the ≤95-cycle
+  Axis-2 sub-frame timing jitter; region 0 blips in 2/5777 frames (one timing
+  cell). **The recomp's computed game state is byte-identical to the oracle
+  across the whole session** — only the stack sentinel + timing-jitter locals
+  differ. Oracle side via a libretro.cpp ring
+  (`tools/ORACLE_VIP_PHASE_PATCH.md §3`); observability-only, audio STRONG
+  MATCH unchanged.
 - [ ] No second-backend equivalence harness (the project has no
   interpreter by design — Rule 0), so "backend equivalence" is N/A; the
   fidelity oracle is the external emulator, which is correct.
 
-**Gap (depth):** the instruction-level lockstep (cpuhook) terminates at the
-VIP-timing wall (`LD.H @ 0xFFF8019A`, ~1.4M instrs) where sub-frame VIP
-timing legitimately differs between the two emulators; extending fidelity
-proof PAST it needs a frame-aligned observable-state diff (the live ring is
-the recomp half — a matching oracle-side ring would complete it). **Lever:**
-oracle-side per-frame WRAM-hash ring (libretro edit) for a whole-session
-frame-aligned diff. The boot regime is fully WON.
+**Gap:** NONE for fidelity — instruction-level lockstep to the VIP-timing
+wall (cpuhook 1.4M), THEN region-level WRAM lockstep through gameplay past it
+(62/64 regions, residual = stack sentinel + timing jitter). Static↔dynamic
+fidelity is proven both before and after the wall.
 
 ### Axis 7 — Determinism
 **Status: WON (deterministic guest given identical input).**
@@ -410,7 +423,7 @@ Axis 6 makes this a small follow-up).
 | 3 | Interrupt / event timing | **STRONG** — event-driven idle + mid-block active-dispatch IRQ take (cycle deadlines); locked audio to oracle (NCC 0.09→0.98, drift →0, framebuf 0/86016, cpuhook 1.4M match) | no standing exception-ring diff | exception-ring diff (RB_CPUHOOK infra) |
 | 4 | Memory / MMIO | **WON** — cpuhook proves every executed load returned the oracle's value (1.4M instrs, gpr exact); faithful fold + fatal-abort on unmapped | ordered MMIO read/write diff not a *standing* tool (cpuhook covers it implicitly) | ordered recorder + oracle write-stream diff (belt-and-suspenders) |
 | 5 | Peripherals (VIP/**VSU**/pad) | **5a VIP WON** — pixels 0/86016 + draw-timing PHASE MATCH (DPSTTS/XPSTTS identical at every event, 17k+ events); **5b VSU audio STRONG MATCH** (NCC 0.98, drift 0, onset 94/94); comms absent | cart-RAM/link unmodeled (out of scope) | (5a/5b complete) |
-| 6 | Static↔dynamic fidelity | **WON** — cpuhook 1.4M instrs == oracle (pc+psw+regs), framebuf 0/86016, audio STRONG MATCH; frame ring now live (cpu.frame fixed) | frame-aligned diff past the VIP-timing wall | oracle-side per-frame WRAM-hash ring |
+| 6 | Static↔dynamic fidelity | **WON (both sides of the wall)** — cpuhook 1.4M instrs == oracle pre-wall; WRAM region-lockstep 62/64 regions through gameplay post-wall (residual = stack sentinel + timing jitter); framebuf 0/86016; audio STRONG MATCH | (none — fidelity proven pre- and post-wall) | (complete) |
 | 7 | Determinism | **WON** — cross-run byte-identical (audio + cpuhook reproducible) | no record/replay (depth) | cross-run fingerprint equality |
 
 ---
@@ -429,7 +442,8 @@ well-bounded depth list, not unmeasured surface.
 - **Axis 5a** VIP video — framebuffer 0/86016 pixel-exact AND draw-timing
   PHASE MATCH (DPSTTS/XPSTTS identical at every VIP event from boot).
 - **Axis 5b** VSU audio — STRONG MATCH (NCC 0.98, onset 94/94, ±0.03 dB).
-- **Axis 6** static↔dynamic — cpuhook 1.4M instr identity + live frame ring.
+- **Axis 6** static↔dynamic — cpuhook 1.4M instr identity pre-wall + WRAM
+  region-lockstep (62/64 regions) through gameplay post-wall.
 - **Axis 7** determinism — cross-run byte-identical.
 - **Axis 1** instruction semantics — WON *for MT* (1.4M instrs exact).
 - **Axis 5c** cart-RAM/link — correctly out of scope (MT never touches it).
@@ -439,12 +453,9 @@ well-bounded depth list, not unmeasured surface.
    MUL/DIV r30-writeback order, FP via host float vs SoftFloat, div0 abort
    vs trap. Confirmed UNREACHED in MT boot; need crafted micro-ROM inputs to
    exercise/fix. (General-recompiler correctness, not MT accuracy.)
-2. **Axis 6 past-the-wall diff** — instruction lockstep ends at the
-   VIP-timing wall; a frame-aligned oracle-side WRAM-hash ring would extend
-   fidelity proof through gameplay.
-3. **Axis 7 record/replay** — determinism is proven; a replay surface is a
+2. **Axis 7 record/replay** — determinism is proven; a replay surface is a
    convenience, not a correctness gap.
-4. **Perf note:** mid-block IRQ take yields ~every device event (~259 cyc),
+3. **Perf note:** mid-block IRQ take yields ~every device event (~259 cyc),
    so headless free-run dropped from ~30× to ~5× realtime — still ample for
    the harness and real-time play; gating the tight deadline on
    interrupts-deliverable is the lever if speed ever matters.
@@ -456,7 +467,7 @@ well-bounded depth list, not unmeasured surface.
 Per vbrecomp CLAUDE.md Rule 3 and the global ring rule: probes QUERY a
 buffer for a window; they never arm-record-run-dump, and never pause/step
 to synchronize observers. Rings on `vb-runtime`, all from boot:
-`frame` snapshots, `vip_phase` (draw-timing events), `wtrace` (1M stores), `fntrace`, crash/freeze
+`frame` snapshots, `vip_phase` (draw-timing events), `wram_hash` (per-frame WRAM regions), `wtrace` (1M stores), `fntrace`, crash/freeze
 heartbeat, `vsu_shadow`, and **`audio_pcm` (new)**. The oracle host
 mirrors `audio_pcm` (and `vip_state`, `read_ram`) on port 4391.
 

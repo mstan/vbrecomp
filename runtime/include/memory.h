@@ -50,6 +50,11 @@ uint32_t vb_rom_size(void);
 const uint8_t* vb_rom_data(void);
 const uint8_t* vb_wram_data(void);
 
+/* Axis-6 WRAM fidelity ring: 64 regions of 1 KiB over the 64 KiB WRAM. */
+#define VB_WRAM_FNV_REGIONS      64
+#define VB_WRAM_FNV_REGION_BYTES 1024
+void vb_wram_region_fnv(uint32_t out[VB_WRAM_FNV_REGIONS]);
+
 #ifdef __cplusplus
 }
 #endif

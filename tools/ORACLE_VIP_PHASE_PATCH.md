@@ -84,6 +84,38 @@ so the event sequences align index-for-index.
 
 ---
 
+## 3. `beetle-vb/libretro.cpp` — WRAM fingerprint ring (Axis-6 fidelity)
+
+Folded into the same `vb_oracle_vipphase` recorder: at `event == GAME_START`
+(0x0008), hash WRAM into a parallel first-N ring of 64 per-1KiB-region FNV-1a
+values (so one volatile cell doesn't avalanche the whole frame). `WRAM` is the
+file-scope `static uint8 *WRAM` already in libretro.cpp. Record layout matches
+`runtime/include/wram_hash.h` (264 bytes: `seq:u64 + fnv[64]:u32`).
+
+```cpp
+#define VB_WRAMHASH_REGIONS 64
+typedef struct { uint64_t seq; uint32_t fnv[VB_WRAMHASH_REGIONS]; } vb_wramhash_rec;
+#define VB_WRAMHASH_RING (1u << 15)
+static vb_wramhash_rec s_vb_wh_ring[VB_WRAMHASH_RING];
+static uint64_t        s_vb_wh_total;
+/* inside vb_oracle_vipphase(), before the vipphase record: */
+if (event == 0x0008 && WRAM && s_vb_wh_total < VB_WRAMHASH_RING) {
+   vb_wramhash_rec *w = &s_vb_wh_ring[s_vb_wh_total];
+   w->seq = s_vb_wh_total;
+   for (int r = 0; r < VB_WRAMHASH_REGIONS; ++r) {
+      const uint8_t *p = WRAM + r * 1024;
+      uint32_t h = 2166136261u;
+      for (int i = 0; i < 1024; ++i) { h ^= p[i]; h *= 16777619u; }
+      w->fnv[r] = h;
+   }
+   s_vb_wh_total++;
+}
+/* + extern "C" vb_oracle_wramhash_head()/_query() (mirror the vipphase ones). */
+```
+Recomp half: `runtime/src/wram_hash.c` + `.h`, `vb_wram_region_fnv` in
+memory.c, the GAME_START call in vip.c, and the `wram_hash` TCP command on
+both servers. Compared by `tools/wramhash_compare.py`.
+
 ## Result
 
 `tools/vipphase_compare.py --rom roms/marios_tennis.vb`: **PHASE MATCH** —
