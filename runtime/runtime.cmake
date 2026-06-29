@@ -30,6 +30,9 @@ function(vb_add_runtime_target TARGET)
         ${VB_RUNTIME_DIR}/src/main.cpp
         ${VB_RUNTIME_DIR}/src/memory.c
         ${VB_RUNTIME_DIR}/src/vip.c
+        # VIP draw-timing phase event ring (Axis-5a phase gate; always-on,
+        # observability-only — does not touch emulation).
+        ${VB_RUNTIME_DIR}/src/vip_phase.c
         # Runtime graphics-capture + override experiment (opt-in, default OFF;
         # byte-identical with VBRECOMP_CAPTURE / VBRECOMP_OVERRIDES unset).
         ${VB_RUNTIME_DIR}/src/vip_capture.c

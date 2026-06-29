@@ -34,6 +34,7 @@
 #include "red_lut.h"
 #include "stub_abort.h"
 #include "vip_capture.h"
+#include "vip_phase.h"
 #include "asset_pack.h"
 #include "recolor.h"
 
@@ -303,6 +304,7 @@ static uint16_t s_obj_suppress[1024];
 
 void vb_vip_init(void) {
     memset(s_vip_mem, 0, sizeof(s_vip_mem));
+    vb_vip_phase_reset();
     /* Beetle VIP_Power (vip.c:399). */
     s_intpnd = 0;
     s_intenb = 0;
@@ -378,9 +380,11 @@ static void vip_advance_column(void) {
 
         /* End of an active display half — fire L/R FB_END. */
         if (s_display_active && (s_display_region & 1)) {
-            if (s_display_region & 2) s_intpnd |= VB_VIP_INT_RFB_END;
-            else                       s_intpnd |= VB_VIP_INT_LFB_END;
+            uint16_t fbend = (s_display_region & 2) ? VB_VIP_INT_RFB_END
+                                                    : VB_VIP_INT_LFB_END;
+            s_intpnd |= fbend;
             vip_check_irq();
+            vb_vip_phase_record(fbend, vb_vip_dpstts(), vb_vip_xpstts());
         }
 
         s_display_region = (s_display_region + 1) & 3;
@@ -391,6 +395,8 @@ static void vip_advance_column(void) {
             if (s_display_active) {
                 s_intpnd |= VB_VIP_INT_FRAME_START;
                 vip_check_irq();
+                vb_vip_phase_record(VB_VIP_INT_FRAME_START,
+                                    vb_vip_dpstts(), vb_vip_xpstts());
             }
 
             /* Game-frame divider per FRMCYC. */
@@ -398,6 +404,8 @@ static void vip_advance_column(void) {
             if (s_game_frame_counter > (int32_t)s_frmcyc) {
                 s_intpnd |= VB_VIP_INT_GAME_START;
                 vip_check_irq();
+                vb_vip_phase_record(VB_VIP_INT_GAME_START,
+                                    vb_vip_dpstts(), vb_vip_xpstts());
 
                 /* Advance any frame-counted debug press once per game frame
                  * (deterministic headless navigation; auto-releases). */
@@ -452,6 +460,8 @@ static void vip_advance_chunk(int32_t chunk_clocks) {
                 s_drawing_active = 0;
                 s_intpnd |= VB_VIP_INT_XP_END;
                 vip_check_irq();
+                vb_vip_phase_record(VB_VIP_INT_XP_END,
+                                    vb_vip_dpstts(), vb_vip_xpstts());
             } else {
                 s_drawing_counter += 1120 * 4;
             }

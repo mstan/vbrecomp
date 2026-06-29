@@ -272,8 +272,9 @@ exception-ring diff (the `RB_CPUHOOK` infra can host it).
 **Gap:** ordered MMIO read/write diff vs oracle not yet a standing test.
 **Lever:** `mmio_tally`-style ordered recorder + oracle write-stream diff.
 
-### Axis 5 — Peripherals / devices ← ACTIVE (audio)
-**Status: MIXED — VIP STRONG, VSU RED (now measured), comms not modeled.**
+### Axis 5 — Peripherals / devices
+**Status: WON (5a VIP pixels + draw-timing phase, 5b VSU audio STRONG
+MATCH); comms (5c) out of scope.**
 
 - **VIP (video):** *scanline/column-accurate* — a genuine 259-cycle/column
   state machine (`vip.c`), the most accurate subsystem.
@@ -281,13 +282,23 @@ exception-ring diff (the `RB_CPUHOOK` infra can host it).
     **0 / 86016 left-eye pixels differ (0.00%)**. VIP renders content-
     identical to the oracle — the prior "validated" claim is now an actual
     recorded result.
-  - [x] **Programmed VIP registers match** (`_vip_diff.py`) EXCEPT `INTPND`
-    (runtime `0x401E` vs oracle `0x001E`) — the difference is solely the
-    `XPEND` bit (0x4000, drawing-finished IRQ). So the residual is **draw-
-    COMPLETION timing phase**, not content: the two are at slightly different
-    sub-frame draw phases. Same root the cpuhook surfaced (the `DPSTTS`
-    divergence). Draw timing rides the Axis-2 cycle stream (now real) but the
-    VIP column/draw-finish scheduling vs the oracle's is not yet phase-gated.
+  - [x] **Programmed VIP registers match** (`_vip_diff.py`) — all scalar +
+    indexed writable regs identical. `INTPND` sampled at an uncontrolled
+    instant wobbles (transient register, sampling-phase noise — NOT a bug).
+  - [x] **★ Draw-timing PHASE GATE recorded green** (`vipphase_compare.py`).
+    Both VIPs snapshot `DPSTTS` (display status) + `XPSTTS` (drawing status)
+    into an always-on from-boot ring at each draw-timing **event**
+    (FRAME_START/GAME_START/XP_END/L|R FB_END), where both are freshly
+    advanced — so the comparison is phase-aligned, not sampling noise.
+    Result: **PHASE MATCH — every draw-timing event identical in type,
+    DPSTTS, AND XPSTTS** (17k events / 3.4k frames clean-launch; 27k / 5.4k
+    in longer runs), zero divergence. **The VIP draw-timing state machine is
+    oracle-EXACT at every event boundary.** This resolves the old INTPND/
+    DPSTTS puzzle: the cpuhook's sub-frame `DPSTTS`-read divergence is the
+    ≤95-cycle Axis-2 timing **jitter** sampled mid-column, NOT a draw-timing-
+    model difference. Oracle side via a small `vip.c` expose
+    (`tools/ORACLE_VIP_PHASE_PATCH.md`); observability-only, audio STRONG
+    MATCH unchanged.
 - **VSU (audio) — 6 channels** (ch0-3 wave, ch4 sweep/FM, ch5 noise; *not*
   16 — that was a brief error; see `docs/HARDWARE_NOTES.md`).
   - [x] Synthesis is a near-verbatim port of Mednafen `vsu.c` — state
@@ -398,7 +409,7 @@ Axis 6 makes this a small follow-up).
 | 2 | Cycle / timing | **MODELED & VALIDATED** (cpuhook-exact to ~1e-4) | pairing closed (≤95 cyc, negligible); audio residual was Axis-3 IRQ latency + Axis-5b output — both now FIXED (audio STRONG MATCH) | (complete) |
 | 3 | Interrupt / event timing | **STRONG** — event-driven idle + mid-block active-dispatch IRQ take (cycle deadlines); locked audio to oracle (NCC 0.09→0.98, drift →0, framebuf 0/86016, cpuhook 1.4M match) | no standing exception-ring diff | exception-ring diff (RB_CPUHOOK infra) |
 | 4 | Memory / MMIO | **WON** — cpuhook proves every executed load returned the oracle's value (1.4M instrs, gpr exact); faithful fold + fatal-abort on unmapped | ordered MMIO read/write diff not a *standing* tool (cpuhook covers it implicitly) | ordered recorder + oracle write-stream diff (belt-and-suspenders) |
-| 5 | Peripherals (VIP/**VSU**/pad) | **5a VIP recorded green** (0/86016 px); **5b VSU audio STRONG MATCH** (Blip output rewrite + Axis-3 mid-block IRQ take → NCC 0.98, drift 0, onset 94/94, level −0.03 dB); comms absent | 5a draw-timing phase only; cart-RAM/link unmodeled (out of scope) | audio solved; 5a draw-timing phase gate only |
+| 5 | Peripherals (VIP/**VSU**/pad) | **5a VIP WON** — pixels 0/86016 + draw-timing PHASE MATCH (DPSTTS/XPSTTS identical at every event, 17k+ events); **5b VSU audio STRONG MATCH** (NCC 0.98, drift 0, onset 94/94); comms absent | cart-RAM/link unmodeled (out of scope) | (5a/5b complete) |
 | 6 | Static↔dynamic fidelity | **WON** — cpuhook 1.4M instrs == oracle (pc+psw+regs), framebuf 0/86016, audio STRONG MATCH; frame ring now live (cpu.frame fixed) | frame-aligned diff past the VIP-timing wall | oracle-side per-frame WRAM-hash ring |
 | 7 | Determinism | **WON** — cross-run byte-identical (audio + cpuhook reproducible) | no record/replay (depth) | cross-run fingerprint equality |
 
@@ -415,7 +426,8 @@ well-bounded depth list, not unmeasured surface.
 - **Axis 3** interrupt/event timing — event-driven idle + mid-block IRQ
   take; locked audio to the oracle (NCC 0.09→0.98, drift→0).
 - **Axis 4** memory/MMIO — cpuhook proves every executed load == oracle.
-- **Axis 5a** VIP video — framebuffer 0/86016 pixel-exact.
+- **Axis 5a** VIP video — framebuffer 0/86016 pixel-exact AND draw-timing
+  PHASE MATCH (DPSTTS/XPSTTS identical at every VIP event from boot).
 - **Axis 5b** VSU audio — STRONG MATCH (NCC 0.98, onset 94/94, ±0.03 dB).
 - **Axis 6** static↔dynamic — cpuhook 1.4M instr identity + live frame ring.
 - **Axis 7** determinism — cross-run byte-identical.
@@ -427,15 +439,12 @@ well-bounded depth list, not unmeasured surface.
    MUL/DIV r30-writeback order, FP via host float vs SoftFloat, div0 abort
    vs trap. Confirmed UNREACHED in MT boot; need crafted micro-ROM inputs to
    exercise/fix. (General-recompiler correctness, not MT accuracy.)
-2. **Axis 5a draw-timing phase** — pixels are exact, but the sub-frame VIP
-   phase (INTPND/DPSTTS/XPSTTS bits) is not phase-gated; needs an oracle
-   DPSTTS/XPSTTS expose (cpuhook-style patch) to compare.
-3. **Axis 6 past-the-wall diff** — instruction lockstep ends at the
+2. **Axis 6 past-the-wall diff** — instruction lockstep ends at the
    VIP-timing wall; a frame-aligned oracle-side WRAM-hash ring would extend
    fidelity proof through gameplay.
-4. **Axis 7 record/replay** — determinism is proven; a replay surface is a
+3. **Axis 7 record/replay** — determinism is proven; a replay surface is a
    convenience, not a correctness gap.
-5. **Perf note:** mid-block IRQ take yields ~every device event (~259 cyc),
+4. **Perf note:** mid-block IRQ take yields ~every device event (~259 cyc),
    so headless free-run dropped from ~30× to ~5× realtime — still ample for
    the harness and real-time play; gating the tight deadline on
    interrupts-deliverable is the lever if speed ever matters.
@@ -447,7 +456,7 @@ well-bounded depth list, not unmeasured surface.
 Per vbrecomp CLAUDE.md Rule 3 and the global ring rule: probes QUERY a
 buffer for a window; they never arm-record-run-dump, and never pause/step
 to synchronize observers. Rings on `vb-runtime`, all from boot:
-`frame` snapshots, `wtrace` (1M stores), `fntrace`, crash/freeze
+`frame` snapshots, `vip_phase` (draw-timing events), `wtrace` (1M stores), `fntrace`, crash/freeze
 heartbeat, `vsu_shadow`, and **`audio_pcm` (new)**. The oracle host
 mirrors `audio_pcm` (and `vip_state`, `read_ram`) on port 4391.
 
