@@ -793,10 +793,18 @@ def emit_function(rom: RomImage, fn: FunctionRange,
             # at every basic-block leader so a tight goto-bb_X loop
             # eventually yields to the main TCP loop.
             #
+            # The cycle_deadline arm (Axis-3 mid-block IRQ take) yields the
+            # moment cpu->cycles reaches the next device-event cycle the main
+            # loop set, so a pending IRQ is delivered within one basic block
+            # of the true event instead of up to a whole 250000-block pass
+            # later — cutting the interrupt-latency the music engine's timer
+            # re-arm would otherwise accumulate into tempo drift.
+            #
             # Cost: one mem-load + compare + decrement per BB. The
             # compiler can typically keep step_budget in a register
             # across straight-line code, so the overhead is small.
-            lines.append(f"    if (cpu->step_budget == 0) "
+            lines.append(f"    if (cpu->step_budget == 0 "
+                         f"|| cpu->cycles >= cpu->cycle_deadline) "
                          f"{{ cpu->yielded = 1; "
                          f"cpu->pc = 0x{pc & 0xFFFFFFFF:08X}u; return; }}")
             lines.append(f"    cpu->step_budget--;")

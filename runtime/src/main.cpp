@@ -544,6 +544,23 @@ int main(int argc, char** argv) {
             continue;
         }
 
+        // Axis-3 mid-block IRQ take: bound this dispatch pass to the next
+        // device-event cycle (VIP column / timer divider — the same
+        // boundaries the HALT idle loop steps to). The recompiled per-BB
+        // check yields once cpu.cycles reaches the deadline, so an IRQ that
+        // becomes pending mid-pass is delivered (top-of-loop
+        // vb_irq_check_and_deliver) within one basic block of the true
+        // event instead of up to a 250000-block pass later. This removes the
+        // interrupt-latency a timer-re-arming music ISR would accumulate
+        // into tempo drift. STEP_BUDGET remains the backstop for the case
+        // where no device event is near (both sources disabled).
+        {
+            int32_t vip_next = vb_vip_cycles_to_next_event();
+            int32_t tmr_next = vb_timer_cycles_to_next_event();
+            int32_t ev_next  = vip_next < tmr_next ? vip_next : tmr_next;
+            if (ev_next < 1) ev_next = 1;
+            cpu.cycle_deadline = cpu.cycles + (uint64_t)ev_next;
+        }
         cpu.step_budget = STEP_BUDGET;
         cpu.yielded = 0;
         vb_watchdog_beat(VB_WD_DISPATCH, dispatch_pc, cpu.cycles, present_count);

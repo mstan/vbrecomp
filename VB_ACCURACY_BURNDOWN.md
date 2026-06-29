@@ -203,18 +203,23 @@ Tempo drift 10–50 → ~3 ms/s. The cost model is essentially complete.**
   (`main.cpp`, ~20000/pass) rather than per-instruction costs, plus the
   by-design VSU output stage (Axis-5b). So the remaining audio gap is an
   **Axis-3 (HALT/idle pacing) + Axis-5b** concern, not Axis-2.
+  **→ RESOLVED (later sessions):** Axis-5b Blip output rewrite + Axis-3
+  mid-block active-dispatch IRQ take together took audio to **STRONG MATCH
+  (NCC 0.98, tempo drift 0, onset 94/94)**. The drift was active-path
+  interrupt-latency accumulation, not HALT pacing.
 
 **Result (10 s from boot, Mario's Tennis):** onset drift **−11.3 → +2.2 ms/s**,
 tempo drift **(10–50) → +3.6 ms/s**, alignment lag **1008 → 472 ms**,
-verdict **RED → "PITCH MATCH (note-accurate)"**. (NCC stays ~0.09 — the
-by-design Axis-5b output-stage difference, not timing.)
+verdict **RED → "PITCH MATCH (note-accurate)"**. (NCC was ~0.09 here — later
+taken to **0.98 / STRONG MATCH** by the Axis-5b Blip output rewrite + the
+Axis-3 mid-block IRQ take that removed the residual tempo drift.)
 **Axis-2 cost model: essentially complete.** Remaining cross-axis levers:
 Axis-3 HALT/idle pacing + Axis-5b output stage (the audio residual);
 Axis-5a VIP draw timing (now driven by real cycles).
 
 ### Axis 3 — Interrupt / event timing
-**Status: IMPROVED — event-driven idle; HALT IRQ-take now ~259 cyc.
-Active-dispatch path still block-quantized.**
+**Status: STRONG — event-driven idle AND mid-block active-dispatch IRQ
+take. The active-path fix locked audio to the oracle (NCC 0.09 → 0.98).**
 - [x] Faithful, Beetle-mirrored level-triggered controller
   (`interrupts.c`) — cross-ref oracle behavior.
 - [x] **Event-driven HALT/idle pacing** (replaces the fixed 20000-cycle
@@ -226,15 +231,31 @@ Active-dispatch path still block-quantized.**
   0/86016. This is the dominant path for MT (HALT-driven from the JMP r31
   sentinel). The audio being UNCHANGED confirms the ~3 ms/s residual is
   Axis-5b (VSU output), not HALT pacing.
-- [ ] **Active-dispatch IRQ take still block-quantized** — IRQs are
-  delivered only between dispatch passes (`main.cpp:522`); precise
-  mid-block take needs cycle deadlines in the per-basic-block dispatch
-  model (lower value for this HALT-driven cart).
-- [ ] No exception-record ring diff vs oracle.
+- [x] **★ Mid-block active-dispatch IRQ take (cycle deadlines).** The
+  emitter's per-basic-block yield check now also yields when
+  `cpu->cycles >= cpu->cycle_deadline` (`emitter.py`); `main.cpp` sets that
+  deadline before each pass to `cpu.cycles + cycles-to-next-device-event`
+  (VIP column / timer divider — the same boundaries the idle loop uses), so
+  a mid-pass IRQ is delivered within **one basic block** of the true event
+  instead of up to a 250000-block pass later. `cpu_state.h` carries the new
+  `cycle_deadline` field; `STEP_BUDGET` stays as the no-event backstop.
+  **This eliminated the interrupt-latency the music ISR's timer re-arm was
+  accumulating into tempo drift.**
+  - **Proof (audio_compare, deterministic, 10 s & 30 s):** tempo drift
+    **+10.8 → −0.0 ms/s**, onset timing **6/33 → 94/94 matched, std 0.00
+    ms**, **NCC 0.0905 → 0.9806**, level offset **+1.09 → −0.03 dB**, RMS
+    743.9 vs oracle 741.6 → verdict **STRONG MATCH**. This simultaneously
+    closed the Axis-5b NCC ceiling (the Blip output was correct; only the
+    timing drift was masking it).
+  - **No regression:** framebuffer **0/86016** pixel-exact; cpuhook stream
+    **1,405,572 instructions match the oracle**, zero non-peripheral
+    semantic divergence (same VIP-timing wall); perf fine (28 s wall for a
+    10 s from-boot capture despite ~259-cyc yields).
+- [ ] No exception-record ring diff vs oracle (separate observability item).
 
-**Gap:** active-path take-point still quantized; no exception-ring diff.
-**Lever:** exception-ring diff (the `RB_CPUHOOK` infra can host it);
-mid-block take via cycle deadlines.
+**Gap:** no standing exception-record ring diff (IRQ take is now timing-
+accurate; this would be a belt-and-suspenders cross-check). **Lever:**
+exception-ring diff (the `RB_CPUHOOK` infra can host it).
 
 ### Axis 4 — Memory map / MMIO
 **Status: STRONG (instruction-accurate).**
@@ -312,11 +333,13 @@ mid-block take via cycle deadlines.
 - **Cartridge RAM / expansion / link port:** **not modeled** (MT never
   touches them — would fatal-abort if it did; correctly out of scope).
 
-**Gap:** pitch + tempo + output stage now oracle-matched (Axis-5b Blip
-rewrite DONE: level offset +3.84 → +1.09 dB, RMS 67% → 92%). Residual audio
-gap is the Axis-2/3 tempo drift that caps NCC, NOT the VSU output. VIP
-content pixel-exact (5a recorded green); cart-RAM/link absent. **Lever:**
-the audio NCC ceiling is now Axis-2/3 timing drift, not Axis-5b.
+**Gap:** NONE for the audio chain — pitch + tempo + output stage all
+oracle-matched. The Axis-5b Blip rewrite fixed the output stage; the Axis-3
+mid-block IRQ take then removed the tempo drift that had been masking it,
+and the two together took audio to **STRONG MATCH** (NCC **0.98**, drift
+**0**, onset 94/94, level −0.03 dB). VIP content pixel-exact (5a recorded
+green); cart-RAM/link absent (out of scope). **Lever:** audio is solved;
+remaining VSU work would be the 5a-style draw-timing phase gate only.
 
 ### Axis 6 — Static-vs-dynamic recompiler fidelity
 **Status: PARTIAL.**
@@ -350,10 +373,10 @@ equality as a standing check.
 | # | Axis | Verdict | Primary gap | Next lever |
 |---|------|---------|-------------|-----------|
 | 1 | Instruction semantics | **STRONG — oracle-validated** (557K instrs exact from boot) | 14 ops abort (unreached); HW test ROMs | `RB_CPUHOOK` ring DONE; extend window past first VIP-timing divergence |
-| 2 | Cycle / timing | **MODELED & VALIDATED** (cpuhook-exact to ~1e-4; drift 10–50→~3 ms/s) | pairing closed (≤95 cyc, negligible); audio residual is Axis-3/5b, not Axis-2 | (complete) — audio residual → Axis-3 HALT pacing + Axis-5b output stage |
-| 3 | Interrupt / event timing | **IMPROVED** — event-driven idle (HALT take ~259 cyc) | active-dispatch take still block-quantized; no exception-ring diff | exception-ring diff (RB_CPUHOOK infra); mid-block cycle deadlines |
+| 2 | Cycle / timing | **MODELED & VALIDATED** (cpuhook-exact to ~1e-4) | pairing closed (≤95 cyc, negligible); audio residual was Axis-3 IRQ latency + Axis-5b output — both now FIXED (audio STRONG MATCH) | (complete) |
+| 3 | Interrupt / event timing | **STRONG** — event-driven idle + mid-block active-dispatch IRQ take (cycle deadlines); locked audio to oracle (NCC 0.09→0.98, drift →0, framebuf 0/86016, cpuhook 1.4M match) | no standing exception-ring diff | exception-ring diff (RB_CPUHOOK infra) |
 | 4 | Memory / MMIO | **STRONG** (instr-accurate) | ordered MMIO read diff not standing | ordered recorder + oracle write-stream diff |
-| 5 | Peripherals (VIP/**VSU**/pad) | **5a VIP recorded green** (0/86016 px); **5b VSU pitch+tempo+output stage oracle-matched** (Blip rewrite DONE: level +3.84→+1.09 dB, RMS 67→92%); comms absent | 5a draw-timing phase only; 5b NCC now capped by Axis-2/3 tempo drift (not output); cart-RAM/link unmodeled (out of scope) | NCC ceiling → Axis-2/3 timing drift |
+| 5 | Peripherals (VIP/**VSU**/pad) | **5a VIP recorded green** (0/86016 px); **5b VSU audio STRONG MATCH** (Blip output rewrite + Axis-3 mid-block IRQ take → NCC 0.98, drift 0, onset 94/94, level −0.03 dB); comms absent | 5a draw-timing phase only; cart-RAM/link unmodeled (out of scope) | audio solved; 5a draw-timing phase gate only |
 | 6 | Static↔dynamic fidelity | **PARTIAL** | no standing first-divergence harness | fingerprint ring + ordered recorder vs oracle |
 | 7 | Determinism | **GOOD** | no record/replay | cross-run fingerprint equality |
 

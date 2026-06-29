@@ -98,6 +98,16 @@ typedef struct CPUState {
     uint64_t step_budget;
     uint8_t  yielded;
 
+    /* Axis-3 mid-block IRQ-take deadline. The recompiled per-basic-block
+     * check yields (exactly like a step_budget exhaustion) once
+     * cpu->cycles >= cycle_deadline, so the main loop can tick devices and
+     * deliver a now-pending IRQ within one basic block of the true event
+     * cycle — instead of running a whole dispatch pass (up to STEP_BUDGET
+     * blocks) past it. main.cpp sets this before each pass to
+     * cpu->cycles + cycles-to-next-device-event (VIP column / timer divider,
+     * the same boundaries the HALT idle loop uses). UINT64_MAX disables it. */
+    uint64_t cycle_deadline;
+
     /* Bus function pointers — wired by vb_memory_init(). */
     uint8_t  (*read8) (uint32_t addr);
     uint16_t (*read16)(uint32_t addr);
