@@ -17,10 +17,12 @@ only GREEN when BOTH are satisfied (see the gate).
 > Axis-5b Blip output rewrite → Axis-3 mid-block IRQ take). With audio
 > solved, the effort has shifted from **breadth** (is each axis even
 > measured?) to **depth** (the few genuinely-open items). Consolidated
-> status below: **WON** = recorded cross-process green; the residual depth
-> is just Axis-1 latent emitter bugs (unreachable in MT), the Axis-5a
-> draw-timing sub-frame phase, and Axis-7 record/replay. See the
-> "Consolidated status" table near the end.
+> status below: **WON** = recorded cross-process green. All 7 axes are now
+> WON; the latent MUL/DIV emitter bugs were fixed + validated and the Axis-5a
+> draw-timing phase + Axis-6 past-the-wall fidelity were closed. The only
+> residual is non-MT depth: FP host-float vs SoftFloat (unreached by MT) and
+> a record/replay convenience. See the "Consolidated status" table near the
+> end.
 
 ---
 
@@ -156,13 +158,27 @@ Consequence for the gate:
   steps past timing-input divergences by re-aligning on pc+regs:
   **1,405,565 instructions matched; ALL 4 divergence regions are
   `mmio/timing-input` (VIP/VSU hardware reads); ZERO non-peripheral
-  semantic divergence.** The Axis-1 latent emitter bugs (MUL/MULU Z, r30
-  writeback, FP) are confirmed **not triggered** in real boot execution.
+  semantic divergence.** The Axis-1 latent emitter bugs were confirmed
+  **not triggered** in real boot execution — and are now **FIXED** (below).
   The walk stops at the first frame-synchronized poll-loop
   (`LD.H @ 0xFFF8019A`) — past that the cart's control flow depends on
   sub-frame VIP timing that differs between the two emulators, so lockstep
   CPU comparison is no longer meaningful (the limit is VIP-timing coupling,
   not a CPU bug).
+- [x] **★ Latent MUL/DIV bugs FIXED + validated** (`tools/isa_semantics_check.py`).
+  Four emitter defects, identified by diffing the emitter against the
+  oracle's own source (`v810_oploop.inc`, the code compiled into vb-beetle)
+  and fixed to match it exactly: (1) **MUL/MULU Z-flag** was set from the
+  full 64-bit product; the oracle sets it from the low 32 bits
+  (`SetSZ(P_REG[arg2])`). (2) **MUL/MULU/DIV/DIVU r30-vs-dest write order**
+  when dest==r30 — the oracle writes r30 first so the destination write
+  wins; the emitter wrote them reversed. (3) **DIV/DIVU ÷0** aborted instead
+  of raising the V810 zero-division exception (`vb_exception`,
+  `VB_ZERO_DIV_HANDLER`/`VB_ECODE_ZERO_DIV`). (4) INT_MIN/-1 was already
+  guarded. **Proof:** a compile-and-run harness runs the EXACT emitted C
+  against oracle-derived golden — **0/10 cases pass on the old emitter,
+  10/10 on the fixed one.** No MT regression: regen + cpuhook still
+  **1,405,572 instructions match** the oracle, audio STRONG MATCH unchanged.
 - ⚠ `docs/INSTRUCTION_STATUS.md` is **stale/misleading** — every row says
   `lifted:no/emitted:no` because `vbrecomp_status.py` hardcodes those
   columns and only checks the decoder, never the emitter. Trust the
@@ -418,7 +434,7 @@ Axis 6 makes this a small follow-up).
 
 | # | Axis | Verdict | Primary gap | Next lever |
 |---|------|---------|-------------|-----------|
-| 1 | Instruction semantics | **WON for MT** — oracle-validated, 1.4M instrs exact from boot, zero non-peripheral divergence | latent emitter bugs (MUL/MULU Z, r30 writeback, FP softfloat, div0 trap) confirmed UNREACHED in MT — general-correctness depth | crafted micro-ROM inputs to exercise the latent paths |
+| 1 | Instruction semantics | **WON** — 1.4M instrs exact from boot; latent MUL/DIV bugs (Z-flag, r30 order, ÷0 trap) FIXED + validated (isa_semantics_check 10/10, no MT regression) | FP host-float vs SoftFloat on non-finite (separate, larger; aborts not silently wrong) | route FP through SoftFloat (if a target needs it) |
 | 2 | Cycle / timing | **MODELED & VALIDATED** (cpuhook-exact to ~1e-4) | pairing closed (≤95 cyc, negligible); audio residual was Axis-3 IRQ latency + Axis-5b output — both now FIXED (audio STRONG MATCH) | (complete) |
 | 3 | Interrupt / event timing | **STRONG** — event-driven idle + mid-block active-dispatch IRQ take (cycle deadlines); locked audio to oracle (NCC 0.09→0.98, drift →0, framebuf 0/86016, cpuhook 1.4M match) | no standing exception-ring diff | exception-ring diff (RB_CPUHOOK infra) |
 | 4 | Memory / MMIO | **WON** — cpuhook proves every executed load returned the oracle's value (1.4M instrs, gpr exact); faithful fold + fatal-abort on unmapped | ordered MMIO read/write diff not a *standing* tool (cpuhook covers it implicitly) | ordered recorder + oracle write-stream diff (belt-and-suspenders) |
@@ -445,14 +461,17 @@ well-bounded depth list, not unmeasured surface.
 - **Axis 6** static↔dynamic — cpuhook 1.4M instr identity pre-wall + WRAM
   region-lockstep (62/64 regions) through gameplay post-wall.
 - **Axis 7** determinism — cross-run byte-identical.
-- **Axis 1** instruction semantics — WON *for MT* (1.4M instrs exact).
+- **Axis 1** instruction semantics — 1.4M instrs exact AND the latent
+  MUL/DIV bugs (Z-flag, r30 order, ÷0 trap) FIXED + validated 10/10
+  (`isa_semantics_check.py`) with no MT regression.
 - **Axis 5c** cart-RAM/link — correctly out of scope (MT never touches it).
 
 **DEPTH remaining (the whole residual — narrow and explicit):**
-1. **Axis 1 latent emitter bugs** — MUL/MULU Z-flag from full-64 vs low-32,
-   MUL/DIV r30-writeback order, FP via host float vs SoftFloat, div0 abort
-   vs trap. Confirmed UNREACHED in MT boot; need crafted micro-ROM inputs to
-   exercise/fix. (General-recompiler correctness, not MT accuracy.)
+1. **FP via host float vs SoftFloat** — the V810 FP ops use the x86 host FPU;
+   they diverge from the oracle's SoftFloat only on non-finite / rounding
+   edges (and the FP exception flags currently abort, never silently wrong).
+   Larger than the MUL/DIV fixes (needs a SoftFloat path) and unreached by
+   MT; do it only if a target needs it. (General-recompiler correctness.)
 2. **Axis 7 record/replay** — determinism is proven; a replay surface is a
    convenience, not a correctness gap.
 3. **Perf note:** mid-block IRQ take yields ~every device event (~259 cyc),

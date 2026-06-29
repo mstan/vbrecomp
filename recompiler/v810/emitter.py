@@ -176,42 +176,61 @@ def _emit_format_i(ins: DecodedInstruction) -> str:
         # terminator. If we do reach, emit a fatal abort.
         return f"vb_stub_abort_simple(\"unexpected JMP r{r1} in straight-line emit\", 0x{ins.pc:08X}u);"
     if op == 0x08:  # MUL — signed 32x32 -> 64; r30:reg2 = result
+        # Oracle order (v810_oploop.inc:816-819): write r30 (high word)
+        # FIRST, then the destination (low word) — so when dest==r30 the
+        # destination write WINS. Z/S come from the destination's FINAL
+        # value (the low word, or 0 when dest is r0), NOT the full 64-bit
+        # product. OV = the product doesn't fit a signed 32.
         body = (f"int64_t _s=(int64_t)(int32_t)cpu->gpr[{r2}]*"
                 f"(int64_t)(int32_t)cpu->gpr[{r1}]; "
                 "uint32_t _lo=(uint32_t)_s; "
+                "cpu->gpr[30]=(uint32_t)((uint64_t)_s>>32); "
                 + (f"cpu->gpr[{r2}]=_lo; " if write_dest else "")
-                + "cpu->gpr[30]=(uint32_t)((uint64_t)_s>>32); "
-                  "cpu->psw_z=(_s==0); cpu->psw_s=(_lo>>31)&1; "
+                + f"cpu->psw_z=(cpu->gpr[{r2}]==0); "
+                  f"cpu->psw_s=(cpu->gpr[{r2}]>>31)&1; "
                   "cpu->psw_ov=(_s!=(int64_t)(int32_t)_lo);")
         return "{ " + body + " }"
     if op == 0x0A:  # MULU — unsigned 32x32 -> 64
+        # Same r30-first / dest-last order and low-word Z/S as MUL
+        # (v810_oploop.inc:827-831). OV = high word non-zero.
         body = (f"uint64_t _s=(uint64_t)cpu->gpr[{r2}]*(uint64_t)cpu->gpr[{r1}]; "
                 "uint32_t _lo=(uint32_t)_s; "
+                "cpu->gpr[30]=(uint32_t)(_s>>32); "
                 + (f"cpu->gpr[{r2}]=_lo; " if write_dest else "")
-                + "cpu->gpr[30]=(uint32_t)(_s>>32); "
-                  "cpu->psw_z=(_s==0); cpu->psw_s=(_lo>>31)&1; "
+                + f"cpu->psw_z=(cpu->gpr[{r2}]==0); "
+                  f"cpu->psw_s=(cpu->gpr[{r2}]>>31)&1; "
                   "cpu->psw_ov=((_s>>32)!=0);")
         return "{ " + body + " }"
     if op == 0x09:  # DIV — signed; quotient in reg2, remainder in r30
+        # Oracle (v810_oploop.inc:858-883): ÷0 raises the V810 zero-division
+        # EXCEPTION (not an abort — the cart's handler runs); INT_MIN/-1 is
+        # special-cased (OV=1, avoids C UB); r30 (remainder) is written
+        # FIRST, dest (quotient) LAST so dest wins when dest==r30; Z/S from
+        # the dest's final value. cpu->pc is already this DIV's address, so
+        # vb_exception saves it as EIPC (matching the oracle's RB_DECPCBY2).
         body = (f"int32_t _a=(int32_t)cpu->gpr[{r2}], _b=(int32_t)cpu->gpr[{r1}]; "
-                "if (_b == 0) { vb_stub_abort_simple(\"DIV by zero\", "
-                f"0x{ins.pc:08X}u); }} "
+                "if (_b == 0) { vb_exception(cpu, VB_ZERO_DIV_HANDLER, "
+                "VB_ECODE_ZERO_DIV); return; } "
                 "int32_t _q,_r; "
                 "if (_a == INT32_MIN && _b == -1) { _q=INT32_MIN; _r=0; "
                 "  cpu->psw_ov=1; } else { _q=_a/_b; _r=_a%_b; "
                 "  cpu->psw_ov=0; } "
+                "cpu->gpr[30]=(uint32_t)_r; "
                 + (f"cpu->gpr[{r2}]=(uint32_t)_q; " if write_dest else "")
-                + "cpu->gpr[30]=(uint32_t)_r; "
-                  "cpu->psw_z=(_q==0); cpu->psw_s=((uint32_t)_q>>31)&1;")
+                + f"cpu->psw_z=(cpu->gpr[{r2}]==0); "
+                  f"cpu->psw_s=(cpu->gpr[{r2}]>>31)&1;")
         return "{ " + body + " }"
     if op == 0x0B:  # DIVU — unsigned
+        # Same ÷0 exception and r30-first / dest-last order as DIV
+        # (v810_oploop.inc:835-856).
         body = (f"uint32_t _a=cpu->gpr[{r2}], _b=cpu->gpr[{r1}]; "
-                "if (_b == 0) { vb_stub_abort_simple(\"DIVU by zero\", "
-                f"0x{ins.pc:08X}u); }} "
+                "if (_b == 0) { vb_exception(cpu, VB_ZERO_DIV_HANDLER, "
+                "VB_ECODE_ZERO_DIV); return; } "
                 "uint32_t _q=_a/_b, _r=_a%_b; "
+                "cpu->gpr[30]=_r; "
                 + (f"cpu->gpr[{r2}]=_q; " if write_dest else "")
-                + "cpu->gpr[30]=_r; "
-                  "cpu->psw_z=(_q==0); cpu->psw_s=(_q>>31)&1; cpu->psw_ov=0;")
+                + f"cpu->psw_z=(cpu->gpr[{r2}]==0); "
+                  f"cpu->psw_s=(cpu->gpr[{r2}]>>31)&1; cpu->psw_ov=0;")
         return "{ " + body + " }"
     if op in (0x0C, 0x0D, 0x0E):
         # OR / AND / XOR — reg2 ← reg2 OP reg1; Z/S updated, CY/OV unchanged.
