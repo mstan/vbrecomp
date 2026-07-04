@@ -101,3 +101,13 @@ vbrecomp shares conventions with [`psxrecomp`](https://github.com/mstan/psxrecom
 MIT (see [LICENSE](LICENSE)). The cart ROMs and any data derived from
 them remain © their original publishers and are never included in
 this repo or any of its per-game consumers' histories.
+
+---
+
+<p align="center">
+  <sub><b>R.A.I.D. — Retro AI Development</b> · a Discord for AI-assisted retro reverse-engineering, decomp &amp; recomp</sub>
+</p>
+
+<p align="center">
+  <a href="https://discord.gg/Ad9BwSzctP"><img src=".github/raid-discord.png" alt="Join the Retro AI Development (R.A.I.D.) Discord" width="200"></a>
+</p>
