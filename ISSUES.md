@@ -6,27 +6,6 @@ larger pieces of work that have been *consciously deferred* and the
 reason. Mario's Tennis ships without these; the next commercial cart
 may demand any subset of them.
 
-## Cycle accounting — per-opcode table (deferred)
-
-`runtime/src/main.cpp` advances device emulation with a constant
-`CYCLES_PER_BB = 3`. Real V810 instruction timing varies from 1
-cycle (most ALU ops, register MOV) to 38+ cycles (DIVU) and 43 for
-DIVF.S. The current approximation is good enough that Mario's
-Tennis plays at roughly real-time speed against the VIP frame
-clock; frame-perfect timing parity with Beetle would need a per-
-opcode table.
-
-**Source of truth:** Beetle's `v810_op_table_msvc.inc` and the
-`timestamp +=` increments scattered through
-`beetle-vb/mednafen/hw_cpu/v810/v810_cpu.cpp::fpu_subop`,
-`Step_RB_DEBUG()`, and the per-format dispatcher.
-
-**Estimated work:** ~200 lines: a `uint8_t v810_cycles[64][/*subop*/]`
-table indexed by Format + opcode, threaded through `emit_function`
-so each emitted instruction increments a per-call cycle counter
-that main.cpp consumes instead of the BB count. Decision pending
-the first cart that visibly drifts.
-
 ## V810 floating-point fidelity — host float vs SoftFloat (deferred)
 
 > **What to look for if this ever bites:** wrong/odd FP results, or a

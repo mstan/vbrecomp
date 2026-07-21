@@ -2,22 +2,24 @@
 
 ## Prerequisites
 
-- **Python 3.11+** (for `tomllib` in the stdlib)
+- **Python 3.10+**. Python 3.10 installs the declared `tomli` dependency;
+  Python 3.11+ uses `tomllib` from the standard library.
 - **CMake 3.20+**
 - **C/C++ compiler.** On Windows: MSVC (Visual Studio 2022) OR MinGW-w64
   via MSYS2 (`mingw64/bin` on PATH). Both supported. The runtime is
   C99 + C++17.
-- **SDL2 development package** (for Phase 4+ runtime; not required to
-  build the Phase 1 skeleton). Where to put it:
+- **SDL2 development package** (for the live runtime window and audio). A
+  headless TCP-only `vb-runtime` build still configures when SDL2 is absent.
+  Where to put it:
   - MSVC: `sdl2-msvc/SDL2-X.Y.Z/` next to the project (download
     `SDL2-devel-X.Y.Z-VC.zip` from libsdl.org)
   - MinGW: install via `pacman -S mingw-w64-x86_64-SDL2` or pkg-config
 - **Git**, **bash** (MSYS2 ships it on Windows)
 
-## First build — Phase 1 skeleton
+## First build
 
 ```bash
-cd F:/Projects/virtualboyrecomp/virtualboyrecomp
+cd F:/Projects/virtualboyrecomp/vbrecomp
 
 # Python recompiler tests
 python -m unittest discover recompiler/tests
@@ -34,8 +36,9 @@ cmake --build build --target vb-runtime
 python tools/_ping.py --port 4390
 ```
 
-The Phase 1 runtime does NOT link any generated C. It opens the TCP
-server and idles. This is enough to validate the harness.
+Without `-DVBRECOMP_GAME=<module>`, `vb-runtime` links the no-game stub and
+opens the TCP server. Pass `-DVBRECOMP_GAME=<module>` after generating
+`generated/<module>_full.c`, `_dispatch.c`, and `.h` to run recompiled code.
 
 ## Acquiring the Beetle VB oracle (Phase 2+)
 
@@ -87,11 +90,12 @@ oracle's job.
 
 ## Troubleshooting
 
-- **"python: command not found"** — ensure 3.11+ is on PATH. `py -3.11
-  -m unittest discover recompiler/tests` is a fallback on Windows.
-- **`tomllib` ImportError** — you're on 3.10 or older. Upgrade.
-- **CMake can't find SDL2** — only an issue from Phase 4 onward. The
-  skeleton target does not link SDL2.
+- **"python: command not found"** — ensure Python 3.10+ is on PATH.
+  `py -3.11 -m unittest discover recompiler/tests` is a fallback on Windows.
+- **`tomllib` ImportError** — on Python 3.10, install the declared project
+  dependencies so the `tomli` compatibility package is available.
+- **CMake can't find SDL2** — the runtime falls back to a TCP-only build.
+  Install SDL2 when a live window or audio output is needed.
 - **`vb_stub_abort` fired on first run** — that's the system working
   as designed. Read the banner, find the named subsystem (e.g.
   `"unmapped read at 0x02000028"`), and either:

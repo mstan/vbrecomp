@@ -1,9 +1,8 @@
 # Shadow Audio + Screen Enhancements (Virtual Boy backport)
 
 Backport of the gbarecomp / snesrecomp "verified-enhancement" QoL layer to
-vbrecomp. All work lives on the `feat/shadow-enhancements` branch /
-`_shadow_virtualboyrecomp` worktree — it does not touch `master` or any other
-worktree.
+vbrecomp. The implemented layer lives in this core repository and remains
+opt-in, default-off functionality.
 
 ## Governing principle (the carve-out)
 
@@ -49,7 +48,7 @@ thing being diffed.
 | Present-path color LUT | **DONE (red-channel)** — `runtime/{src,include}/red_lut.{c,h}` + `vip.c` hook | VB-specific: NOT a BGR555/CIE gamut LUT. A 256-entry intensity→ARGB LUT keyed on the same 0..255 brightness scalar the canon renderer uses. RAW (default) is an exact passthrough. |
 | GBA/SNES color-science core (xyY→XYZ, primaries, Bradford, sRGB OETF) | **N/A** | Does not apply — monochrome red display has no gamut to map. Documented, not ported. |
 
-## Integration points (file:line, on `feat/shadow-enhancements`)
+## Integration points
 
 - **Canon audio render:** `runtime/src/vsu.c`
   - `vsu_channel_output()` (`vsu.c:265`) — canon per-channel integer render

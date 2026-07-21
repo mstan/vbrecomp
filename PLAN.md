@@ -1,5 +1,10 @@
 # PLAN.md — vbrecomp Milestones
 
+> Historical milestone plan. The per-instruction cycle model, event-driven
+> timing, VIP renderer, and SDL runtime described here have since landed.
+> Consult `VB_ACCURACY_BURNDOWN.md` for the maintained implementation status;
+> retain this document for its original sequencing and design rationale.
+
 The plan deliberately front-loads **visual ground truth** so you, the
 user, get incremental visible progress instead of waiting until P5
 for the first pixel. Every milestone below is *real* work — no

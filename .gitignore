@@ -48,6 +48,8 @@ starvation_dump.jsonl
 *.png
 # ...except the logo used by README.md.
 !docs/vbrecomp-logo.png
+# README.md also embeds this tracked Discord banner.
+!.github/raid-discord.png
 
 # Editor
 .vscode/
