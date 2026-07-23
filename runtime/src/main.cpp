@@ -31,6 +31,9 @@
 #if VB_RUNTIME_HAVE_SDL
 #  include <SDL.h>
 #endif
+#if defined(RECOMP_LAUNCHER) && VB_RUNTIME_HAVE_SDL
+#  include "recomp_runtime_ui.h"
+#endif
 
 #ifndef VB_DEFAULT_DEBUG_PORT
 #define VB_DEFAULT_DEBUG_PORT 4390
@@ -82,6 +85,116 @@ static constexpr int VB_RT_EYE_W = 384;
 static constexpr int VB_RT_EYE_H = 224;
 static constexpr double VB_RT_FRAME_HZ = 50.27;
 static constexpr int VB_RT_WIN_SCALE = 2;   /* legibility default */
+
+#if defined(RECOMP_LAUNCHER)
+struct VbRuntimeUiContext {
+    SDL_Window* window;
+    SDL_Texture* texture;
+    SDL_AudioDeviceID audio;
+    int window_scale;
+    int linear_filter;
+    int audio_enabled;
+    int volume;
+};
+static RecompRuntimeUi* s_runtime_ui = nullptr;
+static int s_runtime_audio_volume = 100;
+static int vb_runtime_ui_get(void* opaque, const RecompRuntimeUiItem* item, int* out) {
+    auto* c = static_cast<VbRuntimeUiContext*>(opaque);
+    if (!c || !item || !out) return 0;
+    if (std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_FULLSCREEN) == 0) {
+        const Uint32 flags = SDL_GetWindowFlags(c->window);
+        *out = (flags & SDL_WINDOW_FULLSCREEN_DESKTOP) == SDL_WINDOW_FULLSCREEN_DESKTOP ? 1
+             : (flags & SDL_WINDOW_FULLSCREEN) ? 2 : 0;
+    } else if (std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_WINDOW_SCALE) == 0) *out = c->window_scale;
+    else if (std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_LINEAR_FILTER) == 0) *out = c->linear_filter;
+    else if (std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_AUDIO) == 0) *out = c->audio_enabled;
+    else if (std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_VOLUME) == 0) *out = c->volume;
+    else return 0;
+    return 1;
+}
+
+static int vb_runtime_ui_set(void* opaque, const RecompRuntimeUiItem* item, int value) {
+    auto* c = static_cast<VbRuntimeUiContext*>(opaque);
+    if (!c || !item) return 0;
+    if (std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_FULLSCREEN) == 0) {
+        Uint32 flag = value == 2 ? SDL_WINDOW_FULLSCREEN
+                    : value == 1 ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0;
+        if (SDL_SetWindowFullscreen(c->window, flag) != 0) return 0;
+    } else if (std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_WINDOW_SCALE) == 0) {
+        c->window_scale = value < 1 ? 1 : value > 6 ? 6 : value;
+        int w = 0, h = 0;
+        SDL_QueryTexture(c->texture, nullptr, nullptr, &w, &h);
+        SDL_SetWindowSize(c->window, w * c->window_scale, h * c->window_scale);
+    } else if (std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_LINEAR_FILTER) == 0) {
+        c->linear_filter = value != 0;
+#if SDL_VERSION_ATLEAST(2, 0, 12)
+        SDL_SetTextureScaleMode(c->texture, c->linear_filter ? SDL_ScaleModeLinear : SDL_ScaleModeNearest);
+#endif
+    } else if (std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_AUDIO) == 0) {
+        c->audio_enabled = value != 0;
+        if (c->audio) SDL_PauseAudioDevice(c->audio, c->audio_enabled ? 0 : 1);
+    } else if (std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_VOLUME) == 0) {
+        c->volume = value < 0 ? 0 : value > 100 ? 100 : value;
+        s_runtime_audio_volume = c->volume;
+    } else return 0;
+    return 1;
+}
+
+static int vb_runtime_ui_action(void*, const RecompRuntimeUiItem* item) {
+    if (item && std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_RESUME) == 0) {
+        recomp_runtime_ui_close(s_runtime_ui);
+        return 1;
+    }
+    return 0;
+}
+
+static bool vb_runtime_ui_event(const SDL_Event& ev) {
+    if (!s_runtime_ui) return false;
+    if (ev.type == SDL_KEYDOWN && ev.key.keysym.scancode == SDL_SCANCODE_ESCAPE &&
+        !recomp_runtime_ui_is_open(s_runtime_ui)) {
+        recomp_runtime_ui_open(s_runtime_ui);
+        return true;
+    }
+    if (ev.type != SDL_KEYDOWN && ev.type != SDL_KEYUP &&
+        ev.type != SDL_CONTROLLERBUTTONDOWN && ev.type != SDL_CONTROLLERBUTTONUP)
+        return false;
+    RecompRuntimeUiInput input;
+    bool mapped = true;
+    int pressed = ev.type == SDL_KEYDOWN || ev.type == SDL_CONTROLLERBUTTONDOWN;
+    int repeat = ev.type == SDL_KEYDOWN ? ev.key.repeat : 0;
+    if (ev.type == SDL_KEYDOWN || ev.type == SDL_KEYUP) {
+        switch (ev.key.keysym.scancode) {
+            case SDL_SCANCODE_ESCAPE: input = RECOMP_RUNTIME_UI_INPUT_BACK; break;
+            case SDL_SCANCODE_UP: input = RECOMP_RUNTIME_UI_INPUT_UP; break;
+            case SDL_SCANCODE_DOWN: input = RECOMP_RUNTIME_UI_INPUT_DOWN; break;
+            case SDL_SCANCODE_LEFT: input = RECOMP_RUNTIME_UI_INPUT_LEFT; break;
+            case SDL_SCANCODE_RIGHT: input = RECOMP_RUNTIME_UI_INPUT_RIGHT; break;
+            case SDL_SCANCODE_RETURN:
+            case SDL_SCANCODE_SPACE: input = RECOMP_RUNTIME_UI_INPUT_ACCEPT; break;
+            default: mapped = false; break;
+        }
+    } else {
+        switch (ev.cbutton.button) {
+            case SDL_CONTROLLER_BUTTON_GUIDE:
+                if (pressed) {
+                    if (recomp_runtime_ui_is_open(s_runtime_ui)) recomp_runtime_ui_close(s_runtime_ui);
+                    else recomp_runtime_ui_open(s_runtime_ui);
+                }
+                return true;
+            case SDL_CONTROLLER_BUTTON_DPAD_UP: input = RECOMP_RUNTIME_UI_INPUT_UP; break;
+            case SDL_CONTROLLER_BUTTON_DPAD_DOWN: input = RECOMP_RUNTIME_UI_INPUT_DOWN; break;
+            case SDL_CONTROLLER_BUTTON_DPAD_LEFT: input = RECOMP_RUNTIME_UI_INPUT_LEFT; break;
+            case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: input = RECOMP_RUNTIME_UI_INPUT_RIGHT; break;
+            case SDL_CONTROLLER_BUTTON_A: input = RECOMP_RUNTIME_UI_INPUT_ACCEPT; break;
+            case SDL_CONTROLLER_BUTTON_B: input = RECOMP_RUNTIME_UI_INPUT_BACK; break;
+            default: mapped = false; break;
+        }
+    }
+    if (mapped && recomp_runtime_ui_is_open(s_runtime_ui))
+        recomp_runtime_ui_handle_input(s_runtime_ui, input, pressed, repeat);
+    return recomp_runtime_ui_is_open(s_runtime_ui) || mapped;
+}
+#endif
 
 static uint16_t pad_from_keyboard(void) {
     /* vb-runtime's pad word is ACTIVE-HIGH (a set bit = pressed).
@@ -202,6 +315,14 @@ static uint16_t pad_from_gamecontroller(bool* out_connected) {
 static void vb_sdl_audio_cb(void* /*ud*/, Uint8* stream, int len) {
     const size_t n_frames = (size_t)len / (2 * sizeof(int16_t));
     vb_vsu_pull_samples((int16_t*)stream, n_frames);
+#if defined(RECOMP_LAUNCHER)
+    if (s_runtime_audio_volume < 100) {
+        int16_t* samples = reinterpret_cast<int16_t*>(stream);
+        const size_t count = (size_t)len / sizeof(int16_t);
+        for (size_t i = 0; i < count; ++i)
+            samples[i] = (int16_t)((int)samples[i] * s_runtime_audio_volume / 100);
+    }
+#endif
 }
 #endif
 
@@ -333,6 +454,9 @@ int main(int argc, char** argv) {
     const int         tex_w = VB_RT_EYE_W;
     const int         tex_h = stereo ? VB_RT_EYE_H * 2 : VB_RT_EYE_H;
     uint32_t          tex_pixels[VB_RT_EYE_W * VB_RT_EYE_H * 2];
+#if defined(RECOMP_LAUNCHER)
+    VbRuntimeUiContext runtime_ui_context = {};
+#endif
 
     if (!headless) {
         if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO
@@ -419,6 +543,32 @@ int main(int argc, char** argv) {
                         "buffer\n", have.freq, have.samples);
             std::fflush(stdout);
         }
+#if defined(RECOMP_LAUNCHER)
+        runtime_ui_context.window = win;
+        runtime_ui_context.texture = tex;
+        runtime_ui_context.audio = aud;
+        runtime_ui_context.window_scale = VB_RT_WIN_SCALE;
+        runtime_ui_context.audio_enabled = aud != 0;
+        runtime_ui_context.volume = 100;
+        RecompRuntimeUiStandardConfig runtime_ui_config = {};
+        runtime_ui_config.menu.title = "Virtual Boy Recompiled";
+        runtime_ui_config.menu.subtitle = "Runtime settings";
+        runtime_ui_config.menu.theme = "vb";
+        runtime_ui_config.menu.accept_label = "A / Enter";
+        runtime_ui_config.menu.back_label = "B / Esc";
+        runtime_ui_config.menu.callbacks = {
+            &runtime_ui_context, vb_runtime_ui_get, vb_runtime_ui_set,
+            vb_runtime_ui_action, nullptr, nullptr, nullptr
+        };
+        runtime_ui_config.features = RECOMP_RUNTIME_UI_STANDARD_FULLSCREEN |
+            RECOMP_RUNTIME_UI_STANDARD_WINDOW_SCALE |
+            RECOMP_RUNTIME_UI_STANDARD_LINEAR_FILTER |
+            RECOMP_RUNTIME_UI_STANDARD_AUDIO |
+            RECOMP_RUNTIME_UI_STANDARD_VOLUME |
+            RECOMP_RUNTIME_UI_STANDARD_RESUME;
+        runtime_ui_config.window_scale_max = 6;
+        s_runtime_ui = recomp_runtime_ui_create_standard(&runtime_ui_config);
+#endif
     }
 #endif  /* VB_RUNTIME_HAVE_SDL */
 
@@ -480,6 +630,9 @@ int main(int argc, char** argv) {
             SDL_Event ev;
             while (SDL_PollEvent(&ev)) {
                 if (ev.type == SDL_QUIT) { sdl_quit = true; break; }
+#if defined(RECOMP_LAUNCHER)
+                if (vb_runtime_ui_event(ev)) continue;
+#endif
                 if (ev.type == SDL_CONTROLLERDEVICEADDED ||
                     ev.type == SDL_CONTROLLERDEVICEREMOVED) {
                     gamepad_handle_device_event(ev);
@@ -513,7 +666,12 @@ int main(int argc, char** argv) {
 #if VB_RUNTIME_HAVE_SDL
         if (!headless) {
             uint16_t controller_pad = pad_from_gamecontroller(nullptr);
-            vb_input_set_pad((uint16_t)(pad_from_keyboard() | controller_pad));
+#if defined(RECOMP_LAUNCHER)
+            if (s_runtime_ui && recomp_runtime_ui_is_open(s_runtime_ui))
+                vb_input_set_pad(0);
+            else
+#endif
+                vb_input_set_pad((uint16_t)(pad_from_keyboard() | controller_pad));
         }
 #endif
 
@@ -675,6 +833,12 @@ int main(int argc, char** argv) {
                 }
             }
 
+#if defined(RECOMP_LAUNCHER)
+            recomp_runtime_ui_render_argb8888(s_runtime_ui, tex_pixels,
+                                               tex_w, tex_h,
+                                               tex_w * (int)sizeof(uint32_t));
+#endif
+
             SDL_UpdateTexture(tex, nullptr, tex_pixels,
                               tex_w * (int)sizeof(uint32_t));
 
@@ -728,6 +892,10 @@ int main(int argc, char** argv) {
     }
 
     vb_watchdog_stop();
+#if defined(RECOMP_LAUNCHER) && VB_RUNTIME_HAVE_SDL
+    recomp_runtime_ui_destroy(s_runtime_ui);
+    s_runtime_ui = nullptr;
+#endif
 
 #if VB_RUNTIME_HAVE_SDL
     if (s_pad) { SDL_GameControllerClose(s_pad); s_pad = nullptr; }

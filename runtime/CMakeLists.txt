@@ -35,6 +35,10 @@ endif()
 # on Unix). We accept either the conventional libmednafen_vb.a name or
 # the libretro static-mode output verbatim — both are real static
 # archives, the suffix is cosmetic.
+if(COMMAND recomp_target_launcher_ui)
+    recomp_target_launcher_ui(vb-runtime)
+endif()
+
 set(_beetle_candidates
     "${CMAKE_SOURCE_DIR}/beetle-vb/libmednafen_vb.a"
     "${CMAKE_SOURCE_DIR}/beetle-vb/mednafen_vb_libretro.dll"
