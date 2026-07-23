@@ -189,9 +189,16 @@ function(vb_add_runtime_target TARGET)
     endif()
     find_package(SDL2 QUIET)
     if(SDL2_FOUND)
+        set(_vb_sdl2_libraries ${SDL2_LIBRARIES})
+        if(WIN32)
+            # vb-runtime provides a normal main() and the shared launcher sets
+            # SDL_MAIN_HANDLED. MinGW's SDL2 package also advertises SDL2main;
+            # linking that shim would require a nonexistent SDL_main symbol.
+            list(FILTER _vb_sdl2_libraries EXCLUDE REGEX "SDL2main")
+        endif()
         target_compile_definitions(${TARGET} PRIVATE VB_RUNTIME_HAVE_SDL=1)
         target_include_directories(${TARGET} PRIVATE ${SDL2_INCLUDE_DIRS})
-        target_link_libraries(${TARGET} PRIVATE ${SDL2_LIBRARIES})
+        target_link_libraries(${TARGET} PRIVATE ${_vb_sdl2_libraries})
         message(STATUS "${TARGET}: SDL2 ${SDL2_VERSION_STRING} — live window enabled")
     else()
         message(STATUS "${TARGET}: SDL2 not found — TCP-only build")
