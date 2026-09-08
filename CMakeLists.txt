@@ -20,3 +20,18 @@ option(VBRECOMP_CPUHOOK "Record per-instruction CPU state for oracle comparisons
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 add_subdirectory(runtime)
+
+include(CTest)
+if(BUILD_TESTING)
+    find_package(Python3 COMPONENTS Interpreter REQUIRED)
+    add_executable(vb-mod-runtime-test runtime/tests/mod_runtime_test.cpp
+        runtime/src/mod_runtime.cpp runtime/src/vb_sha256.c runtime/src/vb_crc32.c)
+    target_include_directories(vb-mod-runtime-test PRIVATE runtime/include)
+    if(EXISTS "${RECOMP_UI_ROOT}/src/recomp_launcher.h")
+        target_compile_definitions(vb-mod-runtime-test PRIVATE RECOMP_LAUNCHER=1)
+        target_include_directories(vb-mod-runtime-test PRIVATE "${RECOMP_UI_ROOT}/src")
+    endif()
+    add_test(NAME vb-mod-runtime COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/runtime/tests/run_mod_test.py"
+        "$<TARGET_FILE:vb-mod-runtime-test>" "${CMAKE_CURRENT_BINARY_DIR}")
+endif()

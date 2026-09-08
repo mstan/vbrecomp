@@ -29,6 +29,7 @@
 #include "vip_capture.h"
 #include "asset_pack.h"
 #include "recolor.h"
+#include "renderer.h"
 #include "watchdog.h"
 #include "wtrace.h"
 #include "fntrace.h"
@@ -66,6 +67,19 @@ static sock_t s_listener = VB_BAD_SOCKET;
 static sock_t s_client   = VB_BAD_SOCKET;
 static CPUState* s_cpu   = NULL;
 static int s_paused      = 0;
+static uint32_t s_step_target = 0;
+
+void vb_debug_server_set_paused(int paused) {
+    s_paused = paused != 0;
+    s_step_target = 0;
+}
+int vb_debug_server_is_paused(void) {
+    if (s_step_target && s_cpu && s_cpu->frame >= s_step_target) {
+        s_paused = 1;
+        s_step_target = 0;
+    }
+    return s_paused;
+}
 static int s_quit        = 0;
 static int s_winsock_inited = 0;
 
@@ -319,6 +333,12 @@ static void handle_timer_state(long long id) {
     send_response(buf);
 }
 
+static VbDebugHostCapture s_host_capture;
+static void* s_host_capture_context;
+void vb_debug_server_set_host_capture(VbDebugHostCapture capture, void* context) {
+    s_host_capture = capture; s_host_capture_context = context;
+}
+
 static void handle_screenshot(long long id, const char* line) {
     char path[256] = {0};
     long long eye = 0;
@@ -327,6 +347,14 @@ static void handle_screenshot(long long id, const char* line) {
     if (!path[0]) {
         snprintf(path, sizeof(path),
                  (eye ? "vb-runtime-eye1.png" : "vb-runtime-eye0.png"));
+    }
+    long long host = 0;
+    extract_int(line, "\"host\"", &host);
+    if (host) {
+        const int ok = s_host_capture && s_host_capture(path, s_host_capture_context) == 0;
+        send_response(ok ? "{\"ok\":true,\"host\":true}" :
+            "{\"ok\":false,\"error\":\"host capture unavailable or failed\"}");
+        return;
     }
     uint32_t* buf = (uint32_t*)malloc(384u * 224u * 4u);
     if (!buf) {
@@ -337,7 +365,11 @@ static void handle_screenshot(long long id, const char* line) {
      * raw render so the oracle compare path stays byte-identical. */
     long long recolor = 0;
     extract_int(line, "\"recolor\"", &recolor);
-    if (recolor && vb_recolor_active())
+    long long presented = 0;
+    extract_int(line, "\"presented\"", &presented);
+    if (presented && vb_renderer_active())
+        vb_renderer_present((int)eye, buf);
+    else if (recolor && vb_recolor_active())
         vb_vip_render_framebuffer_recolored((int)eye, buf);
     else
         vb_vip_render_framebuffer((int)eye, buf);
@@ -1005,7 +1037,7 @@ static void handle_read_ram(long long id, const char* line) {
 }
 
 static void handle_pause(long long id, int state) {
-    s_paused = state;
+    vb_debug_server_set_paused(state);
     char buf[128];
     snprintf(buf, sizeof(buf),
              "{\"ok\":true,\"cmd\":\"%s\",\"id\":%lld,\"paused\":%s}",
@@ -1285,6 +1317,20 @@ static void dispatch_line(char* line) {
     else if (strcmp(cmd, "fntrace_stats") == 0) handle_fntrace_stats(id);
     else if (strcmp(cmd, "fntrace_dump") == 0)  handle_fntrace_dump(id, line);
     else if (strcmp(cmd, "fntrace_reset") == 0) handle_fntrace_reset(id);
+    else if (strcmp(cmd, "run_frames") == 0) {
+        long long frames = 0;
+        extract_int(line, "\"frames\"", &frames);
+        if (!s_cpu || frames < 1 || frames > 10000 ||
+            (uint64_t)s_cpu->frame + (uint64_t)frames > UINT32_MAX) {
+            send_response("{\"ok\":false,\"error\":\"frames must be 1..10000\"}");
+        } else {
+            s_step_target = s_cpu->frame + (uint32_t)frames;
+            s_paused = 0;
+            char result[128];
+            snprintf(result, sizeof(result), "{\"ok\":true,\"target\":%u}", s_step_target);
+            send_response(result);
+        }
+    }
     else if (strcmp(cmd, "pause") == 0)        handle_pause(id, 1);
     else if (strcmp(cmd, "continue") == 0)     handle_pause(id, 0);
     else if (strcmp(cmd, "quit") == 0)         handle_quit(id);

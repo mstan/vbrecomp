@@ -38,6 +38,8 @@
 #include "wram_hash.h"
 #include "asset_pack.h"
 #include "recolor.h"
+#include "renderer.h"
+#include "mod_runtime.h"
 
 #define VIP_WINDOW_SIZE 0x80000u
 #define VIP_REGISTER_BASE 0x5F800u
@@ -344,7 +346,7 @@ void vb_vip_init(void) {
     vb_capture_init();      /* allocates rings only if VBRECOMP_CAPTURE is set */
     vb_overrides_init();    /* loads pack only if VBRECOMP_OVERRIDES is set */
     vb_recolor_init();      /* loads recolor pack only if present */
-    s_attr_on = vb_recolor_active() || vb_capture_active();
+    s_attr_on = vb_recolor_active() || vb_capture_active() || vb_renderer_tracks_worlds() || vb_renderer_active();
     memset(s_obj_suppress, 0, sizeof(s_obj_suppress));
     vip_check_irq();
 }
@@ -405,6 +407,8 @@ static void vip_advance_column(void) {
             s_game_frame_counter++;
             if (s_game_frame_counter > (int32_t)s_frmcyc) {
                 s_intpnd |= VB_VIP_INT_GAME_START;
+                vb_mod_runtime_frame_tick_c();
+                s_attr_on = vb_recolor_active() || vb_capture_active() || vb_renderer_tracks_worlds() || vb_renderer_active();
                 vip_check_irq();
                 vb_vip_phase_record(VB_VIP_INT_GAME_START,
                                     vb_vip_dpstts(), vb_vip_xpstts());
@@ -1516,6 +1520,14 @@ uint64_t vb_vip_cycles(void)            { return s_vip_cycles; }
  * is populated only when capture or recolor is active. */
 const uint16_t* vb_vip_attr_buffer(int eye) {
     return s_attr_fb[s_display_fb & 1][eye ? 1 : 0];
+}
+void vb_vip_copy_levels(int eye, uint8_t* levels) {
+    if (!levels) return;
+    const unsigned base = (eye ? 0x10000u : 0u) + (s_display_fb ? 0x8000u : 0u);
+    const uint8_t* fb = &s_vip_mem[base];
+    for (int y = 0; y < 224; ++y)
+        for (int x = 0; x < 384; ++x)
+            levels[y * 384 + x] = (uint8_t)((fb[x * 64 + y / 4] >> ((y & 3) * 2)) & 3);
 }
 uint32_t vb_vip_char_hash(uint32_t char_no) {
     return vb_capture_hash(&chr_u16()[(char_no & 0x7FFu) * 8u]);

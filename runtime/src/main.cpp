@@ -7,14 +7,20 @@
  * input feeding vb_input_set_pad.
  */
 #include <chrono>
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "asset_pack.h"
 #include "recolor.h"
+#include "renderer.h"
+#include "mod_runtime.h"
+#include "host.h"
+#include "png_write.h"
 #include "cpu_state.h"
 #include "debug_server.h"
 #include "input.h"
@@ -51,11 +57,18 @@ static void print_help(const char* argv0) {
         "\n"
         "Options:\n"
         "  --rom PATH       Load a Virtual Boy ROM into the simulated cart slot.\n"
-        "                   Without it, the runtime starts the TCP server and idles.\n"
+        "                   Game builds can select or reuse a ROM in the launcher.\n"
         "  --port N         TCP debug port (default: %d).\n"
         "  --headless       Do not open an SDL window. TCP-only.\n"
         "  --stereo         Show both eyes stacked vertically (L top / R bottom)\n"
         "                   instead of the single-eye default.\n"
+        "  --paused         Start paused (requires debug tools).\n"
+        "  --launcher       Always open the game launcher.\n"
+        "  --no-launcher    Use saved settings and start directly.\n"
+        "  --config PATH    Settings file (default: beside executable).\n"
+        "  --mods-dir PATH  Package catalog and selections directory.\n"
+        "  --install-mod P  Install a .vbmod archive.\n"
+        "  --enable-mod P:F / --disable-mod P:F  Select package feature.\n"
         "  --help, -h       Show this help and exit.\n"
         "\n"
         "Keyboard map (when the SDL window has focus):\n"
@@ -66,10 +79,10 @@ static void print_help(const char* argv0) {
         "  Enter / RShift .. Start / Select\n"
         "  TAB ............. Turbo (skip 50.27 Hz pacing)\n"
         "  F11 / Alt+Enter . Toggle fullscreen\n"
-        "  Esc ............. Quit\n"
+        "  Esc ............. Settings menu (UI builds); quit otherwise\n"
         "\n"
         "Gamepad (SDL game controller, player 1):\n"
-        "  D-pad / L-stick . Left D-pad      R-stick ......... Right D-pad\n"
+        "  D-pad ........... Left D-pad      R-stick ......... Right D-pad\n"
         "  A / B button .... A / B           LB / RB ......... L / R triggers\n"
         "  Start / Back .... Start / Select\n"
         "\n"
@@ -86,6 +99,13 @@ static constexpr int VB_RT_EYE_H = 224;
 static constexpr double VB_RT_FRAME_HZ = 50.27;
 static constexpr int VB_RT_WIN_SCALE = 2;   /* legibility default */
 
+static std::atomic<int> s_runtime_audio_volume{100};
+struct VbHostCapture { const uint32_t* pixels; int width, height; };
+static int vb_capture_host(const char* path, void* context) {
+    const auto* frame = static_cast<VbHostCapture*>(context);
+    return vb_write_png_32bpp(path, frame->width, frame->height, frame->pixels);
+}
+
 #if defined(RECOMP_LAUNCHER)
 struct VbRuntimeUiContext {
     SDL_Window* window;
@@ -97,10 +117,30 @@ struct VbRuntimeUiContext {
     int volume;
 };
 static RecompRuntimeUi* s_runtime_ui = nullptr;
-static int s_runtime_audio_volume = 100;
+static bool vb_ui_mod_identity(const RecompRuntimeUiItem* item, std::string& package, std::string& feature) {
+    const std::string key = item->key;
+    if (key.rfind("mod:", 0) != 0) return false;
+    const auto split = key.find(':', 4);
+    if (split == std::string::npos) return false;
+    package = key.substr(4, split - 4); feature = key.substr(split + 1);
+    return true;
+}
+static int vb_ui_mod_get(const std::string& package, const std::string& feature, int* out) {
+    const auto* provider = vb_mod_runtime_launcher_provider_c();
+    if (!provider) return 0;
+    for (int i = 0; i < provider->feature_count(provider->ctx); ++i) {
+        RecompLauncherCModFeature f = {};
+        if (provider->feature_get(provider->ctx, i, &f) && package == f.package_id && feature == f.id) {
+            *out = f.enabled; return 1;
+        }
+    }
+    return 0;
+}
 static int vb_runtime_ui_get(void* opaque, const RecompRuntimeUiItem* item, int* out) {
     auto* c = static_cast<VbRuntimeUiContext*>(opaque);
     if (!c || !item || !out) return 0;
+    std::string package, feature;
+    if (vb_ui_mod_identity(item, package, feature)) return vb_ui_mod_get(package, feature, out);
     if (std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_FULLSCREEN) == 0) {
         const Uint32 flags = SDL_GetWindowFlags(c->window);
         *out = (flags & SDL_WINDOW_FULLSCREEN_DESKTOP) == SDL_WINDOW_FULLSCREEN_DESKTOP ? 1
@@ -116,6 +156,15 @@ static int vb_runtime_ui_get(void* opaque, const RecompRuntimeUiItem* item, int*
 static int vb_runtime_ui_set(void* opaque, const RecompRuntimeUiItem* item, int value) {
     auto* c = static_cast<VbRuntimeUiContext*>(opaque);
     if (!c || !item) return 0;
+    std::string package, feature;
+    if (vb_ui_mod_identity(item, package, feature)) {
+        int before = 0;
+        if (!vb_ui_mod_get(package, feature, &before)) return 0;
+        if (!vb_mod_enable(package.c_str(), feature.c_str(), value)) return 0;
+        if (vb_host_commit_mods()) return 1;
+        vb_mod_enable(package.c_str(), feature.c_str(), before);
+        return 0;
+    }
     if (std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_FULLSCREEN) == 0) {
         Uint32 flag = value == 2 ? SDL_WINDOW_FULLSCREEN
                     : value == 1 ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0;
@@ -137,6 +186,12 @@ static int vb_runtime_ui_set(void* opaque, const RecompRuntimeUiItem* item, int 
         c->volume = value < 0 ? 0 : value > 100 ? 100 : value;
         s_runtime_audio_volume = c->volume;
     } else return 0;
+    vb_host_config.scale = c->window_scale;
+    vb_host_config.filter = c->linear_filter;
+    vb_host_config.audio = c->audio_enabled;
+    vb_host_config.volume = c->volume;
+    const Uint32 flags = SDL_GetWindowFlags(c->window);
+    vb_host_config.fullscreen = (flags & SDL_WINDOW_FULLSCREEN_DESKTOP) == SDL_WINDOW_FULLSCREEN_DESKTOP ? 1 : (flags & SDL_WINDOW_FULLSCREEN) ? 2 : 0;
     return 1;
 }
 
@@ -196,6 +251,11 @@ static bool vb_runtime_ui_event(const SDL_Event& ev) {
 }
 #endif
 
+static const uint16_t s_pad_bits[14] = {
+    VB_PAD_LUP, VB_PAD_LDOWN, VB_PAD_LLEFT, VB_PAD_LRIGHT,
+    VB_PAD_RUP, VB_PAD_RDOWN, VB_PAD_RLEFT, VB_PAD_RRIGHT,
+    VB_PAD_A, VB_PAD_B, VB_PAD_LT, VB_PAD_RT, VB_PAD_START, VB_PAD_SELECT
+};
 static uint16_t pad_from_keyboard(void) {
     /* vb-runtime's pad word is ACTIVE-HIGH (a set bit = pressed).
      * This is opposite to vb-beetle's active-low convention; the
@@ -204,20 +264,11 @@ static uint16_t pad_from_keyboard(void) {
     const Uint8* keys = SDL_GetKeyboardState(nullptr);
     uint16_t pad = 0;
     if (!keys) return pad;
-    if (keys[SDL_SCANCODE_UP])     pad |= VB_PAD_LUP;
-    if (keys[SDL_SCANCODE_DOWN])   pad |= VB_PAD_LDOWN;
-    if (keys[SDL_SCANCODE_LEFT])   pad |= VB_PAD_LLEFT;
-    if (keys[SDL_SCANCODE_RIGHT])  pad |= VB_PAD_LRIGHT;
-    if (keys[SDL_SCANCODE_W])      pad |= VB_PAD_RUP;
-    if (keys[SDL_SCANCODE_S])      pad |= VB_PAD_RDOWN;
-    if (keys[SDL_SCANCODE_A])      pad |= VB_PAD_RLEFT;
-    if (keys[SDL_SCANCODE_D])      pad |= VB_PAD_RRIGHT;
-    if (keys[SDL_SCANCODE_X])      pad |= VB_PAD_A;
-    if (keys[SDL_SCANCODE_Z])      pad |= VB_PAD_B;
-    if (keys[SDL_SCANCODE_Q])      pad |= VB_PAD_LT;
-    if (keys[SDL_SCANCODE_E])      pad |= VB_PAD_RT;
-    if (keys[SDL_SCANCODE_RETURN]) pad |= VB_PAD_START;
-    if (keys[SDL_SCANCODE_RSHIFT]) pad |= VB_PAD_SELECT;
+    if (vb_host_config.player_source != 1) return 0;
+    for (int i = 0; i < 14; ++i) {
+        const int key = vb_host_config.keys[i];
+        if (key > 0 && key < SDL_NUM_SCANCODES && keys[key]) pad |= s_pad_bits[i];
+    }
     return pad;
 }
 #endif  /* VB_RUNTIME_HAVE_SDL */
@@ -234,6 +285,9 @@ static void gamepad_open_first(void) {
     if (s_pad) return;
     for (int i = 0; i < SDL_NumJoysticks(); ++i) {
         if (SDL_IsGameController(i)) {
+            char guid[40] = {};
+            SDL_JoystickGetGUIDString(SDL_JoystickGetDeviceGUID(i), guid, sizeof(guid));
+            if (!vb_host_config.gamepad_guid.empty() && vb_host_config.gamepad_guid != guid) continue;
             s_pad = SDL_GameControllerOpen(i);
             if (s_pad) return;
         }
@@ -243,7 +297,7 @@ static void gamepad_open_first(void) {
 /* React to SDL_CONTROLLERDEVICEADDED / REMOVED so hotplug works. */
 static void gamepad_handle_device_event(const SDL_Event& ev) {
     if (ev.type == SDL_CONTROLLERDEVICEADDED) {
-        if (!s_pad) s_pad = SDL_GameControllerOpen(ev.cdevice.which);
+        gamepad_open_first();
     } else if (ev.type == SDL_CONTROLLERDEVICEREMOVED) {
         if (s_pad && ev.cdevice.which ==
                 SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(s_pad))) {
@@ -271,33 +325,25 @@ static uint16_t pad_from_gamecontroller(bool* out_connected) {
     SDL_GameController* c = s_pad;
     uint16_t pad = 0;
 
-    if (SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_DPAD_UP))    pad |= VB_PAD_LUP;
-    if (SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_DPAD_DOWN))  pad |= VB_PAD_LDOWN;
-    if (SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_DPAD_LEFT))  pad |= VB_PAD_LLEFT;
-    if (SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_DPAD_RIGHT)) pad |= VB_PAD_LRIGHT;
-
-    /* Sticks. SDL axes are -32768..32767 with +Y pointing DOWN. */
-    constexpr Sint16 DZ = 12000;
-    const Sint16 lx = SDL_GameControllerGetAxis(c, SDL_CONTROLLER_AXIS_LEFTX);
-    const Sint16 ly = SDL_GameControllerGetAxis(c, SDL_CONTROLLER_AXIS_LEFTY);
-    if (ly < -DZ) pad |= VB_PAD_LUP;
-    if (ly >  DZ) pad |= VB_PAD_LDOWN;
-    if (lx < -DZ) pad |= VB_PAD_LLEFT;
-    if (lx >  DZ) pad |= VB_PAD_LRIGHT;
-
-    const Sint16 rx = SDL_GameControllerGetAxis(c, SDL_CONTROLLER_AXIS_RIGHTX);
-    const Sint16 ry = SDL_GameControllerGetAxis(c, SDL_CONTROLLER_AXIS_RIGHTY);
-    if (ry < -DZ) pad |= VB_PAD_RUP;
-    if (ry >  DZ) pad |= VB_PAD_RDOWN;
-    if (rx < -DZ) pad |= VB_PAD_RLEFT;
-    if (rx >  DZ) pad |= VB_PAD_RRIGHT;
-
-    if (SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_A))             pad |= VB_PAD_A;
-    if (SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_B))             pad |= VB_PAD_B;
-    if (SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_LEFTSHOULDER))  pad |= VB_PAD_LT;
-    if (SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_RIGHTSHOULDER)) pad |= VB_PAD_RT;
-    if (SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_START))         pad |= VB_PAD_START;
-    if (SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_BACK))          pad |= VB_PAD_SELECT;
+    if (vb_host_config.player_source != 2) return 0;
+    for (int i = 0; i < 14; ++i) {
+        const int binding = vb_host_config.pads[i];
+        bool pressed = false;
+        if (binding > 0 && binding < 100 && binding - 1 < SDL_CONTROLLER_BUTTON_MAX)
+            pressed = SDL_GameControllerGetButton(c, (SDL_GameControllerButton)(binding - 1)) != 0;
+        else if (binding >= 100 && binding < 112) {
+            const int axis = (binding - 100) / 2;
+            const int value = SDL_GameControllerGetAxis(c, (SDL_GameControllerAxis)axis);
+            const int threshold = vb_host_config.deadzone * 32767 / 100;
+            pressed = ((binding - 100) & 1) ? value > threshold : value < -threshold;
+        } else if (binding >= 1000) {
+            const unsigned mask = (unsigned)(binding - 1000);
+            pressed = mask != 0;
+            for (int button = 0; button < SDL_CONTROLLER_BUTTON_MAX && button < 16; ++button)
+                if ((mask & (1u << button)) && !SDL_GameControllerGetButton(c, (SDL_GameControllerButton)button)) pressed = false;
+        }
+        if (pressed) pad |= s_pad_bits[i];
+    }
     return pad;
 }
 #endif  /* VB_RUNTIME_HAVE_SDL */
@@ -315,14 +361,13 @@ static uint16_t pad_from_gamecontroller(bool* out_connected) {
 static void vb_sdl_audio_cb(void* /*ud*/, Uint8* stream, int len) {
     const size_t n_frames = (size_t)len / (2 * sizeof(int16_t));
     vb_vsu_pull_samples((int16_t*)stream, n_frames);
-#if defined(RECOMP_LAUNCHER)
-    if (s_runtime_audio_volume < 100) {
+    const int volume = s_runtime_audio_volume.load(std::memory_order_relaxed);
+    if (volume < 100) {
         int16_t* samples = reinterpret_cast<int16_t*>(stream);
         const size_t count = (size_t)len / sizeof(int16_t);
         for (size_t i = 0; i < count; ++i)
-            samples[i] = (int16_t)((int)samples[i] * s_runtime_audio_volume / 100);
+            samples[i] = (int16_t)((int)samples[i] * volume / 100);
     }
-#endif
 }
 #endif
 
@@ -331,8 +376,12 @@ int main(int argc, char** argv) {
     const char* rom_path = nullptr;
     bool headless = false;
     bool stereo = false;
+    bool start_paused = false;
 
     for (int i = 1; i < argc; ++i) {
+        const int host_arg = vb_host_argument(i, argc, argv);
+        if (host_arg < 0) { std::puts(vb_host_error().c_str()); return 2; }
+        if (host_arg > 0) continue;
         std::string a = argv[i];
         if ((a == "--help" || a == "-h")) {
             print_help(argv[0]);
@@ -341,6 +390,8 @@ int main(int argc, char** argv) {
             port = std::atoi(argv[++i]);
         } else if (a == "--rom" && i + 1 < argc) {
             rom_path = argv[++i];
+        } else if (a == "--paused") {
+            start_paused = true;
         } else if (a == "--headless") {
             headless = true;
         } else if (a == "--stereo" || a == "--dual-eye") {
@@ -357,6 +408,12 @@ int main(int argc, char** argv) {
     headless = true;
 #endif
 
+#if !defined(VBRECOMP_DEBUG_TOOLS)
+    if (start_paused) { std::fputs("--paused requires a debug-tools build.\n", stderr); return 2; }
+#endif
+    const int host_result = vb_host_prepare(argv[0], rom_path, headless);
+    if (host_result < 0) { std::puts(vb_host_error().c_str()); return 2; }
+    if (host_result == 0) return 0;
     CPUState cpu;
     std::memset(&cpu, 0, sizeof(cpu));
 
@@ -441,6 +498,7 @@ int main(int argc, char** argv) {
     std::printf("vb-runtime: listening on 127.0.0.1:%d\n", port);
     std::fflush(stdout);
 
+    vb_debug_server_set_paused(start_paused);
     using namespace std::chrono_literals;
 
 #if VB_RUNTIME_HAVE_SDL
@@ -454,8 +512,13 @@ int main(int argc, char** argv) {
     const int         tex_w = VB_RT_EYE_W;
     const int         tex_h = stereo ? VB_RT_EYE_H * 2 : VB_RT_EYE_H;
     uint32_t          tex_pixels[VB_RT_EYE_W * VB_RT_EYE_H * 2];
+    VbHostCapture host_capture{tex_pixels, tex_w, tex_h};
+    if (!headless) vb_debug_server_set_host_capture(vb_capture_host, &host_capture);
 #if defined(RECOMP_LAUNCHER)
     VbRuntimeUiContext runtime_ui_context = {};
+    std::vector<RecompLauncherCModFeature> ui_features;
+    std::vector<std::string> ui_feature_keys;
+    std::vector<RecompRuntimeUiItem> ui_mod_items;
 #endif
 
     if (!headless) {
@@ -473,7 +536,7 @@ int main(int argc, char** argv) {
         win = SDL_CreateWindow(
             VB_DEFAULT_WINDOW_TITLE,
             SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-            tex_w * VB_RT_WIN_SCALE, tex_h * VB_RT_WIN_SCALE,
+            tex_w * vb_host_config.scale, tex_h * vb_host_config.scale,
             SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
         if (!win) {
             std::fprintf(stderr, "vb-runtime: SDL_CreateWindow failed: %s\n",
@@ -481,6 +544,8 @@ int main(int argc, char** argv) {
             headless = true;
         }
     }
+    if (!headless && vb_host_config.fullscreen)
+        SDL_SetWindowFullscreen(win, vb_host_config.fullscreen == 2 ? SDL_WINDOW_FULLSCREEN : SDL_WINDOW_FULLSCREEN_DESKTOP);
     if (!headless) {
 #ifdef _WIN32
         /* Preserved from the Windows build; on macOS/Linux let SDL pick its
@@ -515,7 +580,7 @@ int main(int argc, char** argv) {
         const double frame_ms = 1000.0 / VB_RT_FRAME_HZ;
         sdl_period = (Uint64)((double)sdl_freq * (frame_ms / 1000.0));
         std::printf("vb-runtime: SDL window %dx%d at %.2f Hz (%s)\n",
-                    tex_w * VB_RT_WIN_SCALE, tex_h * VB_RT_WIN_SCALE,
+                    tex_w * vb_host_config.scale, tex_h * vb_host_config.scale,
                     VB_RT_FRAME_HZ,
                     stereo ? "L eye top / R eye bottom"
                            : "single eye (--stereo for both)");
@@ -524,6 +589,10 @@ int main(int argc, char** argv) {
         /* Audio device. Failure is non-fatal — the window keeps
          * running with the cart's writes accumulating into the VSU
          * ring but no sound out. */
+        s_runtime_audio_volume = vb_host_config.volume;
+#if SDL_VERSION_ATLEAST(2, 0, 12)
+        SDL_SetTextureScaleMode(tex, vb_host_config.filter ? SDL_ScaleModeLinear : SDL_ScaleModeNearest);
+#endif
         SDL_AudioSpec want;
         std::memset(&want, 0, sizeof(want));
         want.freq     = VSU_OUTPUT_HZ;
@@ -538,7 +607,7 @@ int main(int argc, char** argv) {
                 "vb-runtime: SDL_OpenAudioDevice failed: %s "
                 "(continuing without audio)\n", SDL_GetError());
         } else {
-            SDL_PauseAudioDevice(aud, 0);
+            SDL_PauseAudioDevice(aud, vb_host_config.audio ? 0 : 1);
             std::printf("vb-runtime: SDL audio at %d Hz, %d-frame "
                         "buffer\n", have.freq, have.samples);
             std::fflush(stdout);
@@ -547,9 +616,11 @@ int main(int argc, char** argv) {
         runtime_ui_context.window = win;
         runtime_ui_context.texture = tex;
         runtime_ui_context.audio = aud;
-        runtime_ui_context.window_scale = VB_RT_WIN_SCALE;
-        runtime_ui_context.audio_enabled = aud != 0;
-        runtime_ui_context.volume = 100;
+        runtime_ui_context.window_scale = vb_host_config.scale;
+        runtime_ui_context.linear_filter = vb_host_config.filter;
+        runtime_ui_context.audio_enabled = aud != 0 && vb_host_config.audio;
+        runtime_ui_context.volume = vb_host_config.volume;
+        s_runtime_audio_volume = vb_host_config.volume;
         RecompRuntimeUiStandardConfig runtime_ui_config = {};
         runtime_ui_config.menu.title = "Virtual Boy Recompiled";
         runtime_ui_config.menu.subtitle = "Runtime settings";
@@ -558,7 +629,7 @@ int main(int argc, char** argv) {
         runtime_ui_config.menu.back_label = "B / Esc";
         runtime_ui_config.menu.callbacks = {
             &runtime_ui_context, vb_runtime_ui_get, vb_runtime_ui_set,
-            vb_runtime_ui_action, nullptr, nullptr, nullptr
+            vb_runtime_ui_action, nullptr, vb_host_save, nullptr
         };
         runtime_ui_config.features = RECOMP_RUNTIME_UI_STANDARD_FULLSCREEN |
             RECOMP_RUNTIME_UI_STANDARD_WINDOW_SCALE |
@@ -567,6 +638,21 @@ int main(int argc, char** argv) {
             RECOMP_RUNTIME_UI_STANDARD_VOLUME |
             RECOMP_RUNTIME_UI_STANDARD_RESUME;
         runtime_ui_config.window_scale_max = 6;
+        if (const auto* provider = vb_mod_runtime_launcher_provider_c()) {
+            const int count = provider->feature_count(provider->ctx);
+            ui_features.resize(count);
+            ui_feature_keys.resize(count);
+            ui_mod_items.resize(count);
+            for (int i = 0; i < count; ++i) {
+                provider->feature_get(provider->ctx, i, &ui_features[i]);
+                const auto& f = ui_features[i];
+                ui_feature_keys[i] = std::string("mod:") + f.package_id + ":" + f.id;
+                ui_mod_items[i] = {ui_feature_keys[i].c_str(), "Mods", f.name, f.description,
+                    RECOMP_RUNTIME_UI_BOOL, 0, 1, 1, nullptr, 0, nullptr};
+            }
+            runtime_ui_config.extra_items = ui_mod_items.data();
+            runtime_ui_config.extra_item_count = ui_mod_items.size();
+        }
         s_runtime_ui = recomp_runtime_ui_create_standard(&runtime_ui_config);
 #endif
     }
@@ -651,8 +737,11 @@ int main(int argc, char** argv) {
                         (ev.key.keysym.sym == SDLK_f && (mod & (KMOD_GUI | KMOD_CTRL)))) {
                         Uint32 is_fs = SDL_GetWindowFlags(win) &
                                        SDL_WINDOW_FULLSCREEN_DESKTOP;
-                        SDL_SetWindowFullscreen(win,
-                            is_fs ? 0 : SDL_WINDOW_FULLSCREEN_DESKTOP);
+                        if (SDL_SetWindowFullscreen(win,
+                            is_fs ? 0 : SDL_WINDOW_FULLSCREEN_DESKTOP) == 0) {
+                            vb_host_config.fullscreen = is_fs ? 0 : 1;
+                            vb_host_save();
+                        }
                     }
                 }
             }
@@ -680,6 +769,11 @@ int main(int argc, char** argv) {
             continue;
         }
 
+        bool simulation_paused = vb_debug_server_is_paused() != 0;
+#if defined(RECOMP_LAUNCHER) && VB_RUNTIME_HAVE_SDL
+        simulation_paused = simulation_paused || (s_runtime_ui && recomp_runtime_ui_is_open(s_runtime_ui));
+#endif
+        if (!simulation_paused) {
         // Deliver any pending IRQ before re-entering dispatch.
         // vb_irq_check_and_deliver retargets cpu.pc to the vector
         // when accepted and clears cpu.halted; the next dispatch
@@ -797,15 +891,21 @@ int main(int argc, char** argv) {
             dispatch_pc = cpu.pc;
         }
 
+        } else {
+            std::this_thread::sleep_for(2ms);
+        }
 #if VB_RUNTIME_HAVE_SDL
-        if (!headless && (cpu.cycles - last_present_cycles) >= VB_CYCLES_PER_FRAME) {
+        if (!headless && (simulation_paused || (cpu.cycles - last_present_cycles) >= VB_CYCLES_PER_FRAME)) {
             last_present_cycles = cpu.cycles;
             vb_watchdog_beat(VB_WD_PRESENT, dispatch_pc, cpu.cycles, ++present_count);
 
             /* Opt-in full-screen recolor uses the recolored present path;
              * otherwise the faithful render. */
             const bool recolor = vb_recolor_active();
-            if (recolor) {
+            if (vb_renderer_active()) {
+                vb_renderer_present(0, tex_pixels);
+                if (stereo) vb_renderer_present(1, tex_pixels + VB_RT_EYE_W * VB_RT_EYE_H);
+            } else if (recolor) {
                 vb_vip_render_framebuffer_recolored(0, &tex_pixels[0]);
                 if (stereo) {
                     vb_vip_render_framebuffer_recolored(1,
@@ -885,7 +985,9 @@ int main(int argc, char** argv) {
                 while (SDL_GetPerformanceCounter() < sdl_deadline) { /* spin remainder */ }
                 sdl_deadline += sdl_period;
             } else {
-                sdl_deadline += sdl_period;
+                // Turbo must not accumulate future deadlines: releasing Tab
+                // would otherwise sleep away every frame advanced at turbo speed.
+                sdl_deadline = SDL_GetPerformanceCounter() + sdl_period;
             }
         }
 #endif
@@ -906,6 +1008,7 @@ int main(int argc, char** argv) {
     if (!headless) SDL_Quit();
 #endif
 
+    vb_mod_runtime_deactivate();
     vb_debug_server_stop();
     vb_memory_shutdown();
     vb_ring_frame_shutdown();

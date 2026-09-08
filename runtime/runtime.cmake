@@ -28,6 +28,11 @@ function(vb_add_runtime_target TARGET)
 
     set(_runtime_sources
         ${VB_RUNTIME_DIR}/src/main.cpp
+        ${VB_RUNTIME_DIR}/src/host.cpp
+        ${VB_RUNTIME_DIR}/src/mod_runtime.cpp
+        ${VB_RUNTIME_DIR}/src/renderer.c
+        ${VB_RUNTIME_DIR}/src/vb_sha256.c
+        ${VB_RUNTIME_DIR}/src/vb_crc32.c
         ${VB_RUNTIME_DIR}/src/memory.c
         ${VB_RUNTIME_DIR}/src/vip.c
         # VIP draw-timing phase event ring (Axis-5a phase gate; always-on,
@@ -184,7 +189,7 @@ function(vb_add_runtime_target TARGET)
     # find_package finds the toolchain's SDL2 directly. On macOS/Linux use
     # the system/Homebrew SDL2 only — the vendored pack is Windows-shaped
     # (no .dylib/.a) and would shadow the real one.
-    if(WIN32)
+    if(MSVC AND EXISTS "${VB_RUNTIME_DIR}/external/SDL2/lib/x64/SDL2.lib")
         list(APPEND CMAKE_PREFIX_PATH "${VB_RUNTIME_DIR}/external/SDL2/cmake")
     endif()
     find_package(SDL2 QUIET)
@@ -196,7 +201,7 @@ function(vb_add_runtime_target TARGET)
             # linking that shim would require a nonexistent SDL_main symbol.
             list(FILTER _vb_sdl2_libraries EXCLUDE REGEX "SDL2main")
         endif()
-        target_compile_definitions(${TARGET} PRIVATE VB_RUNTIME_HAVE_SDL=1)
+        target_compile_definitions(${TARGET} PRIVATE VB_RUNTIME_HAVE_SDL=1 SDL_MAIN_HANDLED=1)
         target_include_directories(${TARGET} PRIVATE ${SDL2_INCLUDE_DIRS})
         target_link_libraries(${TARGET} PRIVATE ${_vb_sdl2_libraries})
         message(STATUS "${TARGET}: SDL2 ${SDL2_VERSION_STRING} — live window enabled")

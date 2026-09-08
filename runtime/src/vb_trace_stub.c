@@ -19,6 +19,9 @@
 #include "cpu_state.h"
 #include <stddef.h>
 #include <stdint.h>
+void vb_debug_server_set_host_capture(VbDebugHostCapture capture, void* context) {
+    (void)capture; (void)context;
+}
 
 /* ---- write-trace ring (wtrace.h) ---- */
 void   vb_wtrace_init(void) {}
@@ -48,3 +51,5 @@ size_t vb_fntrace_query(const VBFnTraceFilter* f, VBFnTraceEntry* out, size_t ma
 int  vb_debug_server_start(int port, CPUState* cpu) { (void)port; (void)cpu; return 0; }
 void vb_debug_server_stop(void) {}
 int  vb_debug_server_poll(void) { return 0; }  /* 0 = keep running, never quits via TCP */
+int vb_debug_server_is_paused(void) { return 0; }
+void vb_debug_server_set_paused(int paused) { (void)paused; }

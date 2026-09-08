@@ -24,7 +24,10 @@ import sys
 from pathlib import Path
 from typing import List
 
-import tomli
+try:
+    import tomllib as tomli
+except ModuleNotFoundError:  # Python 3.10
+    import tomli
 
 from ..rom.header import parse_header
 from ..v810.analysis import RomImage

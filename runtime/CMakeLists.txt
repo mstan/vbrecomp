@@ -36,7 +36,7 @@ endif()
 # the libretro static-mode output verbatim — both are real static
 # archives, the suffix is cosmetic.
 if(COMMAND recomp_target_launcher_ui)
-    recomp_target_launcher_ui(vb-runtime)
+    recomp_target_launcher_ui(vb-runtime CONSOLE vb)
 endif()
 
 set(_beetle_candidates

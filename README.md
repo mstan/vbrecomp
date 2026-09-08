@@ -13,6 +13,10 @@ runtime skeleton, the TCP debug server, the always-on ring buffers
 simulation, and the Beetle VB libretro-driven oracle binary. It does
 NOT contain any game ROM or game-specific generated C.
 
+Game hosts can integrate recomp-ui and install ROM-preserving `.vbmod` packages.
+The renderer and trusted-plugin APIs keep game-specific enhancements outside
+VIP emulation. See [mod packages and custom renderers](docs/MODS.md).
+
 To build a runnable cart, this framework is consumed by a per-game
 "recomp" repo — e.g. [`MarioTennisVirtualBoyRecomp`](https://github.com/mstan/MarioTennisVirtualBoyRecomp).
 The per-game repo lays this repo down as a `vbrecomp/` subdirectory,

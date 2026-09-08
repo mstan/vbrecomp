@@ -122,9 +122,10 @@ int      vb_vip_drawing_fb(void);
 uint64_t vb_vip_cycles(void);
 
 /* Recolor-identification introspection (experiment): the displayed eye's
- * attribution buffer (384*224 of char_no|palette<<11; 0 = none) and the content
- * hash of a CHR slot. Populated only when capture/recolor attribution is on. */
+ * attribution buffer (384*224 world+1 values; 0 = none) and the content
+ * hash of a CHR slot. Populated when capture/recolor or a game renderer requests it. */
 const uint16_t* vb_vip_attr_buffer(int eye);
+void vb_vip_copy_levels(int eye, uint8_t* levels);
 uint32_t        vb_vip_char_hash(uint32_t char_no);
 
 /* Always-on observation rings (experiment / collaborative capture). Sized to
