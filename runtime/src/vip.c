@@ -297,6 +297,13 @@ static void vip_resolve_overrides(void);
 static int      s_attr_on;
 static uint16_t s_attr_fb[2][2][384 * 224];  /* [fb_slot][eye][y*384 + x]; world+1 */
 static uint16_t s_attr_val;                   /* world+1 of the world being drawn */
+static uint16_t s_attr_row[2][8 * 512];
+static VbSourceTexel s_source_row[2][8 * 512];
+static VbSourceTexel s_source_fb[2][2][384 * 224];
+static uint32_t s_source_hash[2048];
+static uint8_t s_source_hashed[2048];
+static uint8_t s_source_map, s_source_kind;
+
 
 /* Per-OAM suppression for matched OBJ tiles: 0 = draw faithfully; otherwise
  * (char_no + 1) of the matched tile, re-checked in draw_obj so a mid-frame
@@ -307,6 +314,7 @@ static uint16_t s_obj_suppress[1024];
 
 void vb_vip_init(void) {
     memset(s_vip_mem, 0, sizeof(s_vip_mem));
+    memset(s_source_fb, 0, sizeof(s_source_fb));
     vb_vip_phase_reset();
     vb_wram_hash_reset();
     /* Beetle VIP_Power (vip.c:399). */
@@ -789,6 +797,20 @@ static inline const uint16_t* chr_u16(void) {
     return (const uint16_t*)&s_vip_mem[VIP_CHR_CANONICAL_BASE];
 }
 
+static void source_texel(uint16_t* attribution, int eye, unsigned tile,
+                         unsigned u, unsigned v, unsigned x, unsigned y, unsigned raw) {
+    if (!attribution || !vb_renderer_tracks_texels()) return;
+    tile &= 2047;
+    if (!s_source_hashed[tile]) {
+        s_source_hash[tile] = vb_capture_hash(&chr_u16()[tile * 8]);
+        s_source_hashed[tile] = 1;
+    }
+    VbSourceTexel* out = &s_source_row[eye][attribution - s_attr_row[eye]];
+    *out = (VbSourceTexel){s_source_hash[tile], (uint16_t)x, (uint16_t)y,
+        (uint16_t)tile, (uint8_t)u, (uint8_t)v, s_source_map, s_source_kind,
+        (uint8_t)raw, (uint8_t)s_attr_val};
+}
+
 static inline int16_t sign_10(uint32_t v) {
     return (int16_t)(((v & 0x3FFu) ^ 0x200u) - 0x200u);
 }
@@ -864,13 +886,15 @@ static void draw_bg(uint8_t* target, uint16_t* attr_target, uint16_t real_y, int
                 for (int sub = 0; sub < 8; ++sub) {
                     uint32_t v = (pixels >> (14 - sub * 2)) & 3u;
                     if (v) { target[x + sub] = s_gplt_cache[palette_sel][v];
-                             if (attr_target) attr_target[x + sub] = attr_id; }
+                             if (attr_target) { attr_target[x + sub] = attr_id;
+                                 source_texel(attr_target+x+sub, lr, char_no, hflip_xor ^ sub, char_sub_y, source_x_u+sub, (uint32_t)source_y, v); } }
                 }
             } else {
                 for (int sub = 0; sub < 8; ++sub) {
                     uint32_t v = (pixels >> (sub * 2)) & 3u;
                     if (v) { target[x + sub] = s_gplt_cache[palette_sel][v];
-                             if (attr_target) attr_target[x + sub] = attr_id; }
+                             if (attr_target) { attr_target[x + sub] = attr_id;
+                                 source_texel(attr_target+x+sub, lr, char_no, hflip_xor ^ sub, char_sub_y, source_x_u+sub, (uint32_t)source_y, v); } }
                 }
             }
             x += 7;
@@ -879,7 +903,8 @@ static void draw_bg(uint8_t* target, uint16_t* attr_target, uint16_t real_y, int
             uint32_t char_sub_x = hflip_xor ^ (source_x_u & 0x7u);
             uint8_t pixel = (uint8_t)((chr[char_no * 8u + char_sub_y] >> (char_sub_x * 2u)) & 0x3u);
             if (pixel) { target[x] = s_gplt_cache[palette_sel][pixel];
-                         if (attr_target) attr_target[x] = attr_id; }
+                         if (attr_target) { attr_target[x] = attr_id;
+                             source_texel(attr_target+x, lr, char_no, char_sub_x, char_sub_y, source_x_u, (uint32_t)source_y, pixel); } }
             source_x++;
         }
     }
@@ -959,7 +984,8 @@ static void draw_affine(uint8_t* target, uint16_t* attr_target, uint16_t real_y,
             uint32_t char_sub_x = hflip_xor ^ ((source_x >> 8) & 0xEu);
             uint32_t pixel = (chr[((bgsc & 0x7FFu) * 8u) | char_sub_y] >> char_sub_x) & 0x3u;
             if (pixel) { target[x] = s_gplt_cache[bgsc >> 14][pixel];
-                         if (attr_target) attr_target[x] = s_attr_val; }
+                         if (attr_target) { attr_target[x] = s_attr_val;
+                             source_texel(attr_target+x, lr, bgsc & 2047u, char_sub_x / 2, char_sub_y, source_x >> 9, source_y >> 9, pixel); } }
             source_x = (uint32_t)((int32_t)source_x + dx);
         }
     } else {
@@ -982,7 +1008,8 @@ static void draw_affine(uint8_t* target, uint16_t* attr_target, uint16_t real_y,
             uint32_t char_sub_x = hflip_xor ^ ((source_x >> 9) & 0x7u);
             uint8_t pixel = (uint8_t)((chr[char_no * 8u + char_sub_y] >> (char_sub_x * 2u)) & 0x3u);
             if (pixel) { target[x] = s_gplt_cache[palette][pixel];
-                         if (attr_target) attr_target[x] = s_attr_val; }
+                         if (attr_target) { attr_target[x] = s_attr_val;
+                             source_texel(attr_target+x, lr, char_no, char_sub_x, char_sub_y, source_x >> 9, source_y >> 9, pixel); } }
             source_x = (uint32_t)((int32_t)source_x + dx);
             source_y = (uint32_t)((int32_t)source_y + dy);
         }
@@ -1037,14 +1064,16 @@ static void draw_obj(uint8_t* fb_lr[2], uint16_t* attr_lr[2], uint16_t y, int lr
                     tgt += 7; if (atgt) atgt += 7;
                     for (int m = 8; m; m--) {
                         if (pixels & 3u) { *tgt = s_jplt_cache[palette_sel][pixels & 3u];
-                                           if (atgt) *atgt = id; }
+                                           if (atgt) { *atgt = id;
+                                               source_texel(atgt, lr, char_no, 8-m, char_sub_y, 8-m, char_sub_y, pixels & 3u); } }
                         tgt--; if (atgt) atgt--;
                         pixels >>= 2;
                     }
                 } else {
                     for (int m = 8; m; m--) {
                         if (pixels & 3u) { *tgt = s_jplt_cache[palette_sel][pixels & 3u];
-                                           if (atgt) *atgt = id; }
+                                           if (atgt) { *atgt = id;
+                                               source_texel(atgt, lr, char_no, 8-m, char_sub_y, 8-m, char_sub_y, pixels & 3u); } }
                         tgt++; if (atgt) atgt++;
                         pixels >>= 2;
                     }
@@ -1063,7 +1092,8 @@ static void vip_draw_block_into(uint8_t block_no,
     const int ROW_STRIDE = 512;
     const int PAD_LEFT   = 8;
     static uint8_t  s_row_buf[2][8 * 512];
-    static uint16_t s_attr_row[2][8 * 512];   /* parallel recolor attribution */
+    memset(s_source_hashed, 0, sizeof(s_source_hashed));
+    if (vb_renderer_tracks_texels()) memset(s_source_row, 0, sizeof(s_source_row));
     const uint16_t* bgm = dram_u16();
 
     uint8_t bkcol = (uint8_t)(s_bkcol & 0x3u);
@@ -1102,6 +1132,8 @@ static void vip_draw_block_into(uint8_t block_no,
 
         if (end) break;
 
+        s_source_map = bgm_mode == BGM_OBJ ? 255 : (uint8_t)bgmap_base;
+        s_source_kind = (uint8_t)bgm_mode;
         s_attr_val = (uint16_t)(world + 1);  /* recolor attribution for this world */
 
         for (int y = 0; y < 8; y++) {
@@ -1186,7 +1218,12 @@ static void vip_draw_block_into(uint8_t block_no,
             for (int row = 0; row < 8; row++) {
                 int yy = block_no * 8 + row;
                 for (int x = 0; x < 384; x++)
+                {
                     adst[yy * 384 + x] = asrc[PAD_LEFT + x + 512 * row];
+                    if (vb_renderer_tracks_texels())
+                        s_source_fb[s_drawing_fb & 1][lr][yy * 384 + x] =
+                            s_source_row[lr][PAD_LEFT + x + 512 * row];
+                }
             }
         }
     }
@@ -1574,4 +1611,8 @@ int vb_vip_aring_get(int i, uint32_t off, int len, uint32_t* seq, uint32_t* mask
     if (mask) *mask = f->mask;
     for (int k = 0; k < len; ++k) out[k] = f->buf[off + k];
     return len;
+}
+
+const VbSourceTexel* vb_vip_source_buffer(int eye) {
+    return s_source_fb[s_display_fb & 1][eye != 0];
 }

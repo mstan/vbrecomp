@@ -334,6 +334,36 @@ static void handle_timer_state(long long id) {
 }
 
 static VbDebugHostCapture s_host_capture;
+static void source_put16(uint8_t* p, uint16_t v) { p[0]=(uint8_t)v; p[1]=(uint8_t)(v>>8); }
+static void source_put32(uint8_t* p, uint32_t v) { source_put16(p,(uint16_t)v); source_put16(p+2,(uint16_t)(v>>16)); }
+static void handle_source_dump(const char* line) {
+    char path[1024] = {0}; long long eye = 0;
+    extract_str(line, "\"path\"", path, sizeof(path));
+    extract_int(line, "\"eye\"", &eye);
+    if (!path[0] || !vb_renderer_tracks_texels()) {
+        send_response("{\"ok\":false,\"error\":\"source tracking and path required\"}"); return;
+    }
+    FILE* file = fopen(path, "wb");
+    if (!file) { send_response("{\"ok\":false,\"error\":\"cannot open source dump\"}"); return; }
+    uint8_t header[24];memcpy(header,"VBSRC001",8);
+    source_put32(header+8,384);source_put32(header+12,224);
+    source_put32(header+16,eye != 0);source_put32(header+20,vb_vip_frame_seq());
+    int ok = fwrite(header,1,sizeof(header),file)==sizeof(header);
+    const VbSourceTexel* sources=vb_vip_source_buffer(eye != 0);
+    /* Fixed little-endian wire format, independent of host struct padding. */
+    for(int y=0;y<224 && ok;++y) {
+        uint8_t row[384*16];
+        for(int x=0;x<384;++x) {
+            const VbSourceTexel* s=&sources[y*384+x];uint8_t* p=&row[x*16];
+            source_put32(p,s->tile_hash);source_put16(p+4,s->x);
+            source_put16(p+6,s->y);source_put16(p+8,s->tile);
+            p[10]=s->u;p[11]=s->v;p[12]=s->map;p[13]=s->kind;p[14]=s->raw;p[15]=s->world;
+        }
+        ok=fwrite(row,1,sizeof(row),file)==sizeof(row);
+    }
+    if (fclose(file)) ok = 0;
+    send_response(ok ? "{\"ok\":true,\"format\":\"VBSRC001\"}" : "{\"ok\":false,\"error\":\"source dump failed\"}");
+}
 static void* s_host_capture_context;
 void vb_debug_server_set_host_capture(VbDebugHostCapture capture, void* context) {
     s_host_capture = capture; s_host_capture_context = context;
@@ -1298,6 +1328,7 @@ static void dispatch_line(char* line) {
     else if (strcmp(cmd, "screenshot") == 0)   handle_screenshot(id, line);
     else if (strcmp(cmd, "watchdog") == 0)     handle_watchdog(id);
     else if (strcmp(cmd, "capture_dump") == 0) handle_capture_dump(id, line);
+    else if (strcmp(cmd, "source_dump") == 0) handle_source_dump(line);
     else if (strcmp(cmd, "overrides_state") == 0) handle_overrides_state(id);
     else if (strcmp(cmd, "recolor_state") == 0) handle_recolor_state(id);
     else if (strcmp(cmd, "recolor_reload") == 0) handle_recolor_reload(id);

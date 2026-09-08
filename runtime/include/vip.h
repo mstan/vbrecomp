@@ -16,6 +16,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include "renderer.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -125,6 +126,7 @@ uint64_t vb_vip_cycles(void);
  * attribution buffer (384*224 world+1 values; 0 = none) and the content
  * hash of a CHR slot. Populated when capture/recolor or a game renderer requests it. */
 const uint16_t* vb_vip_attr_buffer(int eye);
+const VbSourceTexel* vb_vip_source_buffer(int eye);
 void vb_vip_copy_levels(int eye, uint8_t* levels);
 uint32_t        vb_vip_char_hash(uint32_t char_no);
 

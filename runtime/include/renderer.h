@@ -9,6 +9,15 @@ extern "C" {
 #define VB_RENDER_HEIGHT 224
 #define VB_RENDER_PIXELS (VB_RENDER_WIDTH * VB_RENDER_HEIGHT)
 
+/* Source artwork sampled by the native rasterizer. Recorded at draw time,
+ * not reconstructed from VRAM after display. x/y are background-map texels;
+ * u/v are unflipped CHR texels. kind 3 denotes OBJ, with map=255. */
+typedef struct VbSourceTexel {
+    uint32_t tile_hash;
+    uint16_t x, y, tile;
+    uint8_t u, v, map, kind, raw, world;
+} VbSourceTexel;
+
 /* Borrowed, read-only inputs valid for one callback. World attribution uses
  * 0 for backdrop, 1..32 for VIP world 0..31. Levels are unpacked native 2bpp.
  * A custom renderer changes presentation only: no guest timing or ROM writes.
@@ -20,6 +29,7 @@ typedef struct VbRenderFrame {
     const uint32_t* stock_argb;
     const uint8_t* levels;
     const uint16_t* worlds;
+    const VbSourceTexel* sources;
 } VbRenderFrame;
 typedef void (*VbRenderCallback)(const VbRenderFrame*, uint32_t* argb, void* context);
 
@@ -31,6 +41,8 @@ int vb_renderer_register(const char* id, VbRenderCallback render, void* context)
  * attribution for the already displayed frame, even if mods started disabled. */
 void vb_renderer_track_worlds(void);
 int vb_renderer_tracks_worlds(void);
+void vb_renderer_track_texels(void);
+int vb_renderer_tracks_texels(void);
 void vb_renderer_reset(void);
 int vb_renderer_active(void);
 const char* vb_renderer_id(void);

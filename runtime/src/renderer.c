@@ -6,6 +6,9 @@ static VbRenderCallback s_render;
 static void* s_context;
 static char s_id[96];
 static int s_track_worlds;
+static int s_track_texels;
+void vb_renderer_track_texels(void) { s_track_texels = s_track_worlds = 1; }
+int vb_renderer_tracks_texels(void) { return s_track_texels; }
 void vb_renderer_track_worlds(void) { s_track_worlds = 1; }
 int vb_renderer_tracks_worlds(void) { return s_track_worlds; }
 
@@ -29,7 +32,8 @@ void vb_renderer_present(int eye, uint32_t* argb) {
     memcpy(stock, argb, sizeof(stock));
     vb_vip_copy_levels(eye, levels);
     const VbRenderFrame frame = {
-        vb_vip_frame_seq(), eye != 0, stock, levels, vb_vip_attr_buffer(eye)
+        vb_vip_frame_seq(), eye != 0, stock, levels, vb_vip_attr_buffer(eye),
+        vb_renderer_tracks_texels() ? vb_vip_source_buffer(eye) : 0
     };
     s_render(&frame, argb, s_context);
 }

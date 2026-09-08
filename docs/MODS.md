@@ -122,6 +122,17 @@ levels, and a per-pixel world index. World attribution is 0 for backdrop and
 The host owns the output buffer. Callbacks are synchronous on the runtime thread
 and must not retain borrowed pointers. Only one renderer can be active.
 
+Artwork-aware renderers can call `vb_renderer_track_texels()` at startup (this
+also enables world tracking). `frame->sources` then provides a `VbSourceTexel`
+for each displayed pixel: original CHR content hash, unflipped tile `u/v`, raw
+2bpp value, BG-map `x/y`, world index, map base, and draw mode. Modes are normal
+BG (0), horizontal bias (1), affine (2), and OBJ (3, map 255). `world == 0`
+means no native drawing source. The rasterizer records this alongside its actual
+sampling and occlusion, in the same double-buffer slot as the native pixels.
+Changing CHR RAM for the next animation does not change the displayed metadata.
+This avoids guessing character identity from world numbers or reading mutable
+VRAM at presentation time. Only the game module interprets artwork or materials.
+
 The framework resets the renderer before activating the next committed plan.
 Use the game's own module to interpret world identities and game state; generic
 VIP rasterization must remain game-independent. The raw VIP renderer remains
@@ -141,9 +152,30 @@ buffer including the menu. Compare the same deterministic input route with
 mods enabled/disabled, including WRAM and both raw eye images; inspect the
 presented images separately. `world_map` reports the displayed attribution.
 
+The existing development TCP server listens on loopback, default port 4390;
+`--port` selects an isolated test instance. Pause before taking several related
+captures. For example, send one newline-terminated JSON request per connection:
+
+```json
+{"cmd":"pause"}
+{"cmd":"screenshot","path":"F:/captures/color.png","presented":1,"eye":0}
+{"cmd":"source_dump","path":"F:/captures/color.src","eye":0}
+{"cmd":"continue"}
+```
+
+`source_dump` requires startup texel tracking. Its portable little-endian file
+contains magic `VBSRC001`, four `uint32` values (width, height, eye, current VIP
+frame sequence), followed by width*height 16-byte records in screen row order.
+Python record format is `<IHHHBBBBBB`: hash, x, y, tile, u, v, map, kind, raw,
+world. This snapshot and `screenshot` execute synchronously without advancing
+the guest. Production builds with `VBRECOMP_DEBUG_TOOLS=OFF` open no TCP port.
+
 Build and run the ROM-free package integration test with CTest (`vb-mod-runtime`).
 It covers package extraction, identity, feature conflicts, options, persistence,
 activation/deactivation, and original ROM preservation.
+`vb-vip-source` additionally checks synthetic CHR through all four native drawing
+modes, both eyes, flips, transparent occlusion, unchanged native output, and
+displayed metadata remaining stable after CHR RAM and the drawing buffer change.
 
 Legacy `VBRECOMP_OVERRIDES` and related capture/recolor experiments still exist
 for prior workflows. Clear them when testing package renderers; they can otherwise
