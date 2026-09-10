@@ -302,22 +302,22 @@ def _emit_format_ii(ins: DecodedInstruction) -> str:
                       "cpu->psw_ov=0;")
         return "{ " + body + " }"
     if op == 0x16:  # CLI — clear interrupt disable
-        return "cpu->psw_id = 0;"
+        return "cpu->psw_id = 0; cpu->cycle_deadline = cpu->cycles;"
     if op == 0x18:  # TRAP — software exception, vector imm5
         # vb_trap sets cpu->pc to the TRAP handler vector. Return
         # immediately so the dispatch loop reroutes to the new PC.
-        return f"vb_trap(cpu, {imm5_u}u); return;"
+        return f"cpu->pc += 2; vb_trap(cpu, {imm5_u}u); return;"
     if op == 0x19:  # RETI
         # vb_reti restores cpu->pc + cpu->psw_* from EI*/FE*. Return
         # so the dispatch loop reroutes; pairs with TRAP/IRQ entry.
         return "vb_reti(cpu); return;"
     if op == 0x1A:  # HALT
         return ("/* HALT — recompiled cart is waiting for an interrupt. */ "
-                "cpu->halted = 1; return;")
+                "cpu->pc += 2; cpu->halted = 1; return;")
     if op == 0x1C:  # LDSR reg2, sysreg(imm5) — sysreg[imm5] ← reg2
         # Beetle V810::SetSREG semantics (v810_cpu.cpp:407-453).
         if imm5_u == 5:  # PSW — must keep exploded psw_* in sync
-            return f"vb_psw_unpack(cpu, cpu->gpr[{r2}]);"
+            return f"vb_psw_unpack(cpu, cpu->gpr[{r2}]); cpu->cycle_deadline = cpu->cycles;"
         if imm5_u in (0, 2, 25):  # EIPC / FEPC / ADTRE — even-aligned
             return (f"cpu->sysreg[{imm5_u}] = cpu->gpr[{r2}] "
                     f"& 0xFFFFFFFEu;")
@@ -351,7 +351,7 @@ def _emit_format_v(ins: DecodedInstruction) -> str:
     imm_s = ins.imm16_s
     op = ins.opcode6
     write_dest = (r2 != 0)
-    if not write_dest:
+    if not write_dest and op in (0x28, 0x2F):
         return ""
     if op == 0x28:  # MOVEA — reg2 ← reg1 + sext(imm16); no PSW
         return (f"cpu->gpr[{r2}] = cpu->gpr[{r1}] + (uint32_t)({imm_s});")
@@ -396,12 +396,12 @@ def _emit_format_vi(ins: DecodedInstruction) -> str:
     addr_expr = f"(cpu->gpr[{r1}] + (uint32_t)({disp}))"
 
     # Loads — IN.* is treated identically to LD.* per Sacred Tech Scroll.
-    if op in (0x30, 0x38):  # LD.B / IN.B — sign-extend the byte
+    if op == 0x30:  # LD.B / IN.B — sign-extend the byte
         if not write_dest:
             return f"(void)cpu->read8({addr_expr});"
         return (f"cpu->gpr[{r2}] = (uint32_t)(int32_t)(int8_t)"
                 f"cpu->read8({addr_expr});")
-    if op in (0x31, 0x39):  # LD.H / IN.H — sign-extend the halfword
+    if op == 0x31:  # LD.H / IN.H — sign-extend the halfword
         if not write_dest:
             return f"(void)cpu->read16({addr_expr});"
         return (f"cpu->gpr[{r2}] = (uint32_t)(int32_t)(int16_t)"
@@ -410,6 +410,10 @@ def _emit_format_vi(ins: DecodedInstruction) -> str:
         if not write_dest:
             return f"(void)cpu->read32({addr_expr});"
         return f"cpu->gpr[{r2}] = cpu->read32({addr_expr});"
+
+    if op in (0x38, 0x39):
+        width = 8 if op == 0x38 else 16
+        return f"cpu->gpr[{r2}] = cpu->read{width}({addr_expr});" if write_dest else f"(void)cpu->read{width}({addr_expr});"
 
     # Stores
     if op in (0x34, 0x3C):  # ST.B / OUT.B
@@ -420,8 +424,11 @@ def _emit_format_vi(ins: DecodedInstruction) -> str:
         return f"cpu->write32({addr_expr}, cpu->gpr[{r2}]);"
 
     if op == 0x3A:  # CAXI — compare-and-exchange (P4+, mutex code)
-        return (f"vb_stub_abort_simple(\"CAXI (P4+: atomic compare-and-"
-                f"exchange not yet implemented)\", 0x{ins.pc:08X}u);")
+        return (f"{{ uint32_t _addr={addr_expr}&~3u, _old=cpu->read32(_addr), _a=cpu->gpr[{r2}], _r=_a-_old; "
+                "cpu->psw_z=(_r==0); cpu->psw_s=_r>>31; cpu->psw_cy=_a<_old; "
+                "cpu->psw_ov=((_a^_old)&(_a^_r))>>31; "
+                "cpu->write32(_addr,_r==0 ? cpu->gpr[30]:_old); "
+                + (f"cpu->gpr[{r2}]=_old; " if write_dest else "") + "}")
 
     return (f"vb_stub_abort_simple(\"Format VI opcode 0x{op:02X} not lifted\", "
             f"0x{ins.pc:08X}u);")
@@ -449,125 +456,9 @@ def _emit_format_vii(ins: DecodedInstruction) -> str:
     normal (non-subnormal, non-NaN, non-Inf) inputs. If a future cart
     needs the exception path, plumb it through here.
     """
-    op = ins.opcode6
-    sub = ins.subop
-    r1, r2 = ins.reg1, ins.reg2
-    pc = ins.pc
-
-    if op == 0x1F:
-        # BSU — not used by Mario's Tennis. Keep stubbed so any cart
-        # that wants it surfaces a clear error rather than silently
-        # corrupting memory.
-        return (f"vb_stub_abort_simple(\"Format VII BSU ({ins.mnemonic}) "
-                f"— not yet lifted\", 0x{pc:08X}u);")
-
-    if op != 0x3E:
-        return (f"vb_stub_abort_simple(\"Format VII unexpected primary "
-                f"0x{op:02X}\", 0x{pc:08X}u);")
-
-    # ---- 0x3E primary: FPP / extended ----
-    # Reinterpret-cast between uint32_t and float via union (the
-    # canonical strict-aliasing-safe idiom in C).
-    UNION_DECL = "union { uint32_t u; float f; }"
-
-    if sub == 0x00:  # CMPF.S — compare reg2 vs reg1; no result write
-        body = (
-            f"{UNION_DECL} _a, _b; "
-            f"_a.u = cpu->gpr[{r2}]; _b.u = cpu->gpr[{r1}]; "
-            "cpu->psw_ov = 0; "
-            "if (_a.f == _b.f) { cpu->psw_z = 1; cpu->psw_s = 0; cpu->psw_cy = 0; } "
-            "else if (_a.f <  _b.f) { cpu->psw_z = 0; cpu->psw_s = 1; cpu->psw_cy = 1; } "
-            "else                   { cpu->psw_z = 0; cpu->psw_s = 0; cpu->psw_cy = 0; } "
-        )
-        return "{ " + body + " }"
-
-    if sub == 0x02:  # CVT.WS — int32 → float; reg2 = (float)(int32)reg1
-        write_dest = (r2 != 0)
-        body = (
-            f"{UNION_DECL} _r; "
-            f"int32_t _i = (int32_t)cpu->gpr[{r1}]; "
-            "_r.f = (float)_i; "
-            + (f"cpu->gpr[{r2}] = _r.u; " if write_dest else "")
-            + "cpu->psw_ov = 0; "
-            "if ((_r.u & 0x7FFFFFFFu) == 0) { cpu->psw_z = 1; cpu->psw_s = 0; cpu->psw_cy = 0; } "
-            "else { cpu->psw_z = 0; cpu->psw_s = (_r.u >> 31) & 1; cpu->psw_cy = (_r.u >> 31) & 1; } "
-        )
-        return "{ " + body + " }"
-
-    if sub == 0x03:  # CVT.SW — float → int32 (round to nearest); reg2 = (int32)floatbits(reg1)
-        write_dest = (r2 != 0)
-        body = (
-            f"{UNION_DECL} _a; "
-            f"_a.u = cpu->gpr[{r1}]; "
-            # Round-to-nearest-even via lrintf to match V810 default rounding.
-            "int32_t _r = (int32_t)lrintf(_a.f); "
-            + (f"cpu->gpr[{r2}] = (uint32_t)_r; " if write_dest else "")
-            + "cpu->psw_ov = 0; "
-            "cpu->psw_z = (_r == 0); cpu->psw_s = (((uint32_t)_r) >> 31) & 1; "
-        )
-        return "{ " + body + " }"
-
-    if sub in (0x04, 0x05, 0x06, 0x07):
-        # ADDF/SUBF/MULF/DIVF — reg2 = reg2 OP reg1
-        cop = {0x04: "+", 0x05: "-", 0x06: "*", 0x07: "/"}[sub]
-        write_dest = (r2 != 0)
-        body = (
-            f"{UNION_DECL} _a, _b, _r; "
-            f"_a.u = cpu->gpr[{r2}]; _b.u = cpu->gpr[{r1}]; "
-            f"_r.f = _a.f {cop} _b.f; "
-            + (f"cpu->gpr[{r2}] = _r.u; " if write_dest else "")
-            + "cpu->psw_ov = 0; "
-            "if ((_r.u & 0x7FFFFFFFu) == 0) { cpu->psw_z = 1; cpu->psw_s = 0; cpu->psw_cy = 0; } "
-            "else { cpu->psw_z = 0; cpu->psw_s = (_r.u >> 31) & 1; cpu->psw_cy = (_r.u >> 31) & 1; } "
-        )
-        return "{ " + body + " }"
-
-    if sub == 0x08:  # XB — swap low/high bytes of low halfword of reg2; high halfword preserved
-        if r2 == 0:
-            return ""
-        return ("{ uint32_t _v = cpu->gpr[" + str(r2) + "]; "
-                f"cpu->gpr[{r2}] = (_v & 0xFFFF0000u) | "
-                "((_v & 0x000000FFu) << 8) | ((_v & 0x0000FF00u) >> 8); }")
-
-    if sub == 0x09:  # XH — swap halfwords of reg2
-        if r2 == 0:
-            return ""
-        return ("{ uint32_t _v = cpu->gpr[" + str(r2) + "]; "
-                f"cpu->gpr[{r2}] = (_v << 16) | (_v >> 16); }}")
-
-    if sub == 0x0A:  # REV — reverse bits of reg1, write to reg2
-        if r2 == 0:
-            return ""
-        return ("{ uint32_t _v = cpu->gpr[" + str(r1) + "]; "
-                "_v = ((_v >> 1) & 0x55555555u) | ((_v & 0x55555555u) << 1); "
-                "_v = ((_v >> 2) & 0x33333333u) | ((_v & 0x33333333u) << 2); "
-                "_v = ((_v >> 4) & 0x0F0F0F0Fu) | ((_v & 0x0F0F0F0Fu) << 4); "
-                "_v = ((_v >> 8) & 0x00FF00FFu) | ((_v & 0x00FF00FFu) << 8); "
-                "_v = (_v >> 16) | (_v << 16); "
-                f"cpu->gpr[{r2}] = _v; }}")
-
-    if sub == 0x0B:  # TRNC.SW — float → int32 (truncate); reg2 = (int32)floatbits(reg1)
-        write_dest = (r2 != 0)
-        body = (
-            f"{UNION_DECL} _a; "
-            f"_a.u = cpu->gpr[{r1}]; "
-            "int32_t _r = (int32_t)_a.f; "
-            + (f"cpu->gpr[{r2}] = (uint32_t)_r; " if write_dest else "")
-            + "cpu->psw_ov = 0; "
-            "cpu->psw_z = (_r == 0); cpu->psw_s = (((uint32_t)_r) >> 31) & 1; "
-        )
-        return "{ " + body + " }"
-
-    if sub == 0x0C:  # MPYHW — reg2 = (int16)(reg2 & 0xFFFF) * (int16)(reg1 & 0xFFFF)
-        if r2 == 0:
-            return ""
-        return ("{ int32_t _r = (int32_t)(int16_t)(cpu->gpr[" + str(r2)
-                + "] & 0xFFFFu) * (int32_t)(int16_t)(cpu->gpr["
-                + str(r1) + "] & 0xFFFFu); "
-                f"cpu->gpr[{r2}] = (uint32_t)_r; }}")
-
-    return (f"vb_stub_abort_simple(\"Format VII FPP subop "
-            f"0x{sub:02X} ({ins.mnemonic}) not lifted\", 0x{pc:08X}u);")
+    first = int.from_bytes(ins.raw[:2], "little")
+    second = int.from_bytes(ins.raw[2:4], "little") if len(ins.raw) >= 4 else 0
+    return f"vb_interpreter_extended(cpu, 0x{first:04X}u, 0x{second:04X}u); cpu->gpr[0]=0; return;"
 
 
 def _emit_straight_line(ins: DecodedInstruction) -> str:
@@ -581,7 +472,7 @@ def _emit_straight_line(ins: DecodedInstruction) -> str:
     if ins.fmt is Format.II:
         return _emit_format_ii(ins)
     if ins.fmt is Format.V:
-        return _emit_format_v(ins)
+        return _emit_format_v(ins).replace("cpu->gpr[0]=_r; ", "")
     if ins.fmt is Format.VI:
         return _emit_format_vi(ins)
     if ins.fmt is Format.VII:
@@ -669,7 +560,7 @@ def _emit_terminator(ins: DecodedInstruction,
         # the outer vb_dispatch_call's `cpu->pc == saved_lp` check
         # can detect a clean return. JMP rX (X != 31) sets cpu->pc to
         # the new target and lets the outer loop dispatch.
-        out.append(f"cpu->pc = cpu->gpr[{ins.reg1}];")
+        out.append(f"cpu->pc = cpu->gpr[{ins.reg1}] & 0xFFFFFFFEu;")
         out.append(f"return;")
         return out
 
@@ -757,7 +648,9 @@ def _collect_leaders(rom: RomImage, fn: FunctionRange) -> Set[int]:
         if ins is None:
             break
         lp += max(ins.size, 2)
-    return {pc for pc in leaders if pc in linear_pcs}
+    # Every instruction is a legal resume point after a device deadline,
+    # debugger step, exception return, or interpreter/native handoff.
+    return linear_pcs
 
 
 def emit_function(rom: RomImage, fn: FunctionRange,
@@ -784,14 +677,15 @@ def emit_function(rom: RomImage, fn: FunctionRange,
     lines.append(f"void {_fn_symbol(fn.start_pc)}(CPUState* cpu) {{")
     # Routing switch — only emit if there's more than one leader.
     # (For single-leader functions the entry is unambiguous.)
-    if len(sorted_leaders) > 1:
+    if sorted_leaders:
         lines.append(f"    switch (cpu->pc) {{")
         for leader in sorted_leaders:
             if leader == fn.start_pc:
                 continue   # fall through to bb_<start_pc> by default
             lines.append(f"    case 0x{leader & 0xFFFFFFFF:08X}u: "
                          f"goto {_bb_label(leader)};")
-        lines.append(f"    default: break;")
+        lines.append(f"    case 0x{fn.start_pc:08X}u: break;")
+        lines.append("    default: vb_interpreter_fallback(cpu); return;")
         lines.append(f"    }}")
     # Always-on fntrace: record fresh-call entry. Multi-leader fns reach
     # this line only when the leader-routing switch took the `default`
@@ -806,22 +700,8 @@ def emit_function(rom: RomImage, fn: FunctionRange,
     while pc < fn.end_pc:
         if pc in leaders:
             lines.append(f"{_bb_label(pc)}:;")
-            # P3 yield point. Intra-function loops (e.g., VIP-frame
-            # poll loops) never call vb_dispatch_call, so the inter-
-            # function budget check alone can't catch them. Decrement
-            # at every basic-block leader so a tight goto-bb_X loop
-            # eventually yields to the main TCP loop.
-            #
-            # The cycle_deadline arm (Axis-3 mid-block IRQ take) yields the
-            # moment cpu->cycles reaches the next device-event cycle the main
-            # loop set, so a pending IRQ is delivered within one basic block
-            # of the true event instead of up to a whole 250000-block pass
-            # later — cutting the interrupt-latency the music engine's timer
-            # re-arm would otherwise accumulate into tempo drift.
-            #
-            # Cost: one mem-load + compare + decrement per BB. The
-            # compiler can typically keep step_budget in a register
-            # across straight-line code, so the overhead is small.
+            # Every instruction PC is a leader so deadlines, debugger stops,
+            # and fallback handoffs resume without repeating guest effects.
             lines.append(f"    if (cpu->step_budget == 0 "
                          f"|| cpu->cycles >= cpu->cycle_deadline) "
                          f"{{ cpu->yielded = 1; "
@@ -835,6 +715,8 @@ def emit_function(rom: RomImage, fn: FunctionRange,
             break
 
         lines.append(f"    cpu->pc = 0x{ins.pc:08X}u;")
+        lines.append("    if (vb_execution_before(cpu)) return;")
+        lines.append("    ++vb_execution.native_instructions;")
 
         # Per-instruction CPU-hook (Axis 1/2/3/6 divergence harness). No-op
         # unless built -DVB_CPUHOOK_ENABLE. Emitted BEFORE the cycle charge
@@ -849,7 +731,7 @@ def emit_function(rom: RomImage, fn: FunctionRange,
         # this is the not-taken base (1); the taken extra is added inside
         # the taken path by _emit_terminator. Replaces main.cpp's old
         # bbs_run*3 estimate, which is now derived as the cpu->cycles delta.
-        lines.append(f"    cpu->cycles += {instr_base_cycles(ins)};")
+        lines.append(f"    vb_execution_charge(cpu, 0x{ins.opcode6:02X}, {instr_base_cycles(ins)});")
 
         # Straight-line body (if any).
         body = _emit_straight_line(ins) if (
@@ -913,6 +795,7 @@ def emit_full_c(rom: RomImage, fns: List[FunctionRange],
     parts.append(f"#include \"stub_abort.h\"")
     parts.append(f"#include \"fntrace.h\"")
     parts.append(f"#include \"{module_name}.h\"")
+    parts.append('#include "v810_interpreter.h"')
     parts.append("")
     fn_entries = {fn.start_pc for fn in fns}
     for fn in fns:
@@ -922,7 +805,7 @@ def emit_full_c(rom: RomImage, fns: List[FunctionRange],
 
 
 def emit_dispatch_c(fns: List[FunctionRange], module_name: str,
-                    rom_crc32: int = 0) -> str:
+                    rom_crc32: int = 0, rom: Optional[RomImage] = None) -> str:
     """Render `generated/<module>_dispatch.c` — vb_dispatch + vb_dispatch_call
     plus vb_game_expected_crc32() which main.cpp uses to refuse a ROM
     that doesn't match what the recompiler was generated against."""
@@ -930,6 +813,7 @@ def emit_dispatch_c(fns: List[FunctionRange], module_name: str,
     parts.append(f"/* AUTOGENERATED by recompiler/v810/emitter.py. "
                  f"DO NOT EDIT — Rule 4. */")
     parts.append(f"/* module: {module_name}    entries: {len(fns)} */")
+    parts.append('#include "v810_interpreter.h"')
     parts.append(f"#include <stdint.h>")
     parts.append(f"#include \"cpu_state.h\"")
     parts.append(f"#include \"interrupts.h\"")
@@ -949,29 +833,26 @@ def emit_dispatch_c(fns: List[FunctionRange], module_name: str,
     parts.append(" * via the recompiled body's vb_dispatch_call invocation);")
     parts.append(" * the native C call depth mirrors hardware call depth.")
     parts.append(" *")
-    parts.append(" * vb_dispatch is a top-level entry point that uses a")
-    parts.append(" * sentinel lp; recompiled JMP r31 at the top-level returns")
-    parts.append(" * to it via the same sentinel check. */")
-    parts.append("")
-    parts.append("/* Sentinel lp used by vb_dispatch's top-level wrapper. The")
-    parts.append(" * value is intentionally unmappable so the dispatch can")
-    parts.append(" * recognise \"top-level return\" without ambiguity.")
-    parts.append(" *")
-    parts.append(" * Even-aligned: bit 0 must be 0 so that an IRQ accepted")
-    parts.append(" * while halted-at-sentinel saves EIPC = sentinel and the")
-    parts.append(" * subsequent RETI (which does PC = EIPC & ~1) restores the")
-    parts.append(" * exact sentinel value. With an odd sentinel, RETI clears")
-    parts.append(" * bit 0 and the outer dispatch loop's pc==saved_lp check")
-    parts.append(" * fails, causing a spurious unknown-target abort. */")
-    parts.append("#define VB_TOP_LEVEL_LP 0xDEAD0000u")
-    parts.append("")
-    parts.append("/* Internal dispatch loop. The cart's r31 (link register) is")
-    parts.append(" * NEVER touched here — that responsibility belongs to the")
-    parts.append(" * caller (vb_dispatch_call sets r31 for JAL semantics; the")
-    parts.append(" * top-level vb_dispatch leaves r31 as-is so that yielded")
-    parts.append(" * resumes don't clobber the cart's live return register).")
-    parts.append(" */")
-    parts.append("static void vb_dispatch_loop(CPUState* cpu, uint32_t saved_lp) {")
+    parts.append(" * Top-level dispatch has no guest return address. The uint64_t")
+    parts.append(" * stop value lies outside the V810 address space and is never")
+    parts.append(" * written into guest registers. */")
+    parts.append("#define VB_TOP_LEVEL_LP UINT64_MAX")
+    routes = {}
+    for fn in sorted(fns, key=lambda f: f.start_pc):
+        pcs = _collect_leaders(rom, fn) if rom is not None else {fn.start_pc}
+        for pc in pcs:
+            routes[pc] = fn.start_pc
+    parts.append("typedef void (*VbNativeFn)(CPUState*);")
+    parts.append("static const struct { uint32_t pc; VbNativeFn fn; } vb_routes[] = {")
+    for pc, entry in sorted(routes.items()):
+        parts.append(f"    {{0x{pc:08X}u, {_fn_symbol(entry)}}},")
+    parts.append("};")
+    parts.append("static VbNativeFn vb_native_lookup(uint32_t pc) {")
+    parts.append("    unsigned lo=0, hi=sizeof(vb_routes)/sizeof(vb_routes[0]);")
+    parts.append("    while (lo < hi) { unsigned mid=lo+(hi-lo)/2; if(vb_routes[mid].pc < pc) lo=mid+1; else hi=mid; }")
+    parts.append("    return lo < sizeof(vb_routes)/sizeof(vb_routes[0]) && vb_routes[lo].pc == pc ? vb_routes[lo].fn : 0;")
+    parts.append("}")
+    parts.append("static void vb_dispatch_loop(CPUState* cpu, uint64_t saved_lp) {")
     parts.append("    /* NOTE: do NOT clear cpu->yielded here — the main")
     parts.append("     * loop clears it before the top-level vb_dispatch. A")
     parts.append("     * recursive vb_dispatch_call from inside a yielded")
@@ -980,24 +861,13 @@ def emit_dispatch_c(fns: List[FunctionRange], module_name: str,
     parts.append("    while (cpu->pc != saved_lp && !cpu->halted "
                  "&& !cpu->yielded) {")
     parts.append("        uint32_t pc = cpu->pc;")
-    parts.append("        /* Range-match by function. Each function holds a")
-    parts.append("         * routing switch over its basic-block leaders so")
-    parts.append("         * a yielded/resumed dispatch lands on the right")
-    parts.append("         * leader rather than only at the function head. */")
-    sorted_fns = sorted(fns, key=lambda f: f.start_pc)
-    for i, fn in enumerate(sorted_fns):
-        # We use individual `if` blocks rather than one big chain so the
-        # compiler can produce a binary search via jump tables when it
-        # spots an opportunity.
-        cond = f"pc >= 0x{fn.start_pc:08X}u && pc < 0x{fn.end_pc:08X}u"
-        prefix = "if" if i == 0 else "else if"
-        parts.append(f"        {prefix} ({cond}) {{ "
-                     f"{_fn_symbol(fn.start_pc)}(cpu); }}")
-    parts.append("        else {")
-    parts.append("            vb_stub_abort(\"vb_dispatch: unknown target PC "
-                 "(unresolved indirect or function outside bootstrap subset)\", "
-                 "cpu->pc, pc);")
+    parts.append("        if (vb_execution.mode == VB_EXEC_INTERPRETER) {")
+    parts.append("            if (!cpu->step_budget || cpu->cycles >= cpu->cycle_deadline) { cpu->yielded = 1; return; }")
+    parts.append("            --cpu->step_budget; vb_interpreter_step(cpu); continue;")
     parts.append("        }")
+    parts.append("        VbNativeFn native = vb_native_lookup(pc);")
+    parts.append("        if (native) { ++vb_execution.native_entries; native(cpu); }")
+    parts.append("        else { vb_interpreter_fallback(cpu); }")
     parts.append("    }")
     parts.append("}")
     parts.append("")
@@ -1013,21 +883,7 @@ def emit_dispatch_c(fns: List[FunctionRange], module_name: str,
     parts.append("}")
     parts.append("")
     parts.append("void vb_dispatch(CPUState* cpu, uint32_t target_pc) {")
-    parts.append("    /* Top-level entry from main.cpp.")
-    parts.append("     *")
-    parts.append("     * Critical: this MUST NOT touch cpu->gpr[31]. Yielded")
-    parts.append("     * resumes (step-budget exhaustion mid-cart) re-enter")
-    parts.append("     * through here on every main-loop pass, and the cart's")
-    parts.append("     * live r31 — set by past JALs and saved/restored across")
-    parts.append("     * cart-side function prologues — must survive across")
-    parts.append("     * yields. Clobbering r31 here breaks every JMP r31 the")
-    parts.append("     * cart issues after the first yield, unwinding control")
-    parts.append("     * to the sentinel and halting the cart prematurely.")
-    parts.append("     *")
-    parts.append("     * The sentinel-equal-r31 invariant for top-level return")
-    parts.append("     * detection is established by main.cpp once after")
-    parts.append("     * vb_cpu_reset (cpu.gpr[31] = VB_TOP_LEVEL_LP) and")
-    parts.append("     * preserved by cart-side stack push/pop discipline. */")
+    parts.append("    /* Preserve the live link register on initial entry and resume. */")
     parts.append("    cpu->pc = target_pc;")
     parts.append("    vb_dispatch_loop(cpu, VB_TOP_LEVEL_LP);")
     parts.append("}")
@@ -1102,7 +958,7 @@ def recompile_rom(rom: RomImage, *, module_name: str = "cart",
     files = {
         f"generated/{module_name}_full.c": emit_full_c(rom, fns, module_name),
         f"generated/{module_name}_dispatch.c":
-            emit_dispatch_c(fns, module_name, rom_crc32=rom_crc32),
+            emit_dispatch_c(fns, module_name, rom_crc32=rom_crc32, rom=rom),
         f"generated/{module_name}.h": emit_header(fns, module_name),
     }
     return CodegenResult(files=files, function_count=len(fns),

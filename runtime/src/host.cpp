@@ -1,6 +1,7 @@
 #include "host.h"
 #include "mod_runtime.h"
 #include "renderer.h"
+#include "memory.h"
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
@@ -29,6 +30,8 @@ VbHostConfig vb_host_config;
 namespace {
 namespace fs = std::filesystem;
 fs::path config_path, mods_path;
+fs::path sram_path;
+bool sram_disabled=false;
 std::string last_rom, error;
 bool no_launcher = false, force_launcher = false;
 struct Action { std::string kind, value; };
@@ -62,12 +65,14 @@ int vb_host_argument(int& i, int argc, char** argv) {
     const std::string arg = argv[i];
     if (arg == "--no-launcher") { no_launcher = true; return 1; }
     if (arg == "--launcher") { no_launcher = false; force_launcher = true; return 1; }
+    if (arg == "--no-save") { sram_disabled = true; return 1; }
     if (arg != "--mods-dir" && arg != "--config" && arg != "--install-mod" &&
-        arg != "--enable-mod" && arg != "--disable-mod") return 0;
+        arg != "--enable-mod" && arg != "--disable-mod" && arg != "--save") return 0;
     if (i + 1 == argc) { error = "Missing value for " + arg; return -1; }
     const std::string value = argv[++i];
     if (arg == "--mods-dir") mods_path = value;
     else if (arg == "--config") config_path = value;
+    else if (arg == "--save") sram_path = value;
     else actions.push_back({arg, value});
     return 1;
 }
@@ -114,6 +119,11 @@ int vb_host_prepare(const char* executable, const char*& rom, bool headless) {
 #endif
     if (config_path.empty()) config_path = base / "vbrecomp.cfg";
     config_path = fs::absolute(config_path);
+    if (sram_path.empty()) {
+        if (headless) sram_disabled=true;
+        sram_path=config_path.parent_path()/"saves"/(std::string(VB_GAME_ID)+".sav");
+    }
+    sram_path=fs::absolute(sram_path);
     if (mods_path.empty()) mods_path = base / "mods";
     load_config();
     if (rom) last_rom = rom;
@@ -205,5 +215,34 @@ int vb_host_prepare(const char* executable, const char*& rom, bool headless) {
 bool vb_host_commit_mods() {
     if (!vb_mod_runtime_commit_c(last_rom.c_str())) { error = vb_mod_runtime_last_error_c(); return false; }
     vb_mod_runtime_activate_plugins_c();
+    return true;
+}
+
+bool vb_host_load_sram() {
+    if(sram_disabled) return true;
+    std::error_code ec;
+    if(!fs::exists(sram_path,ec)) { if(ec) { error=ec.message();return false; } return true; }
+    if(fs::file_size(sram_path,ec)!=65536 || ec) { error="Cartridge save must be exactly 65536 bytes: "+sram_path.string();return false; }
+    std::ifstream file(sram_path,std::ios::binary);
+    file.read((char*)vb_cart_ram_data(),65536);
+    if(!file) { error="Cannot read cartridge save: "+sram_path.string();return false; }
+    return true;
+}
+bool vb_host_save_sram() {
+    if(sram_disabled) return true;
+    std::error_code ec;fs::create_directories(sram_path.parent_path(),ec);
+    if(ec) { error=ec.message();return false; }
+    auto temporary=fs::path(sram_path.string()+".tmp");
+    std::ofstream file(temporary,std::ios::binary|std::ios::trunc);
+    file.write((const char*)vb_cart_ram_data(),65536);file.close();
+    if(!file) { error="Cannot write cartridge save: "+temporary.string();return false; }
+#ifdef _WIN32
+    if(!MoveFileExW(temporary.c_str(),sram_path.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)) {
+        error="Cannot publish cartridge save: "+sram_path.string();return false;
+    }
+#else
+    fs::rename(temporary,sram_path,ec);
+    if(ec) { error=ec.message();return false; }
+#endif
     return true;
 }

@@ -174,3 +174,21 @@ uint16_t vb_timer_counter(void) { return s_counter; }
 uint16_t vb_timer_reload(void)  { return s_reload; }
 uint8_t  vb_timer_control(void) { return s_tcr; }
 int32_t  vb_timer_divider(void) { return s_divider; }
+
+/* Canonical, read-only device state. Ordered schema: tools/device_schema.json. */
+#ifdef VBRECOMP_DEBUG_TOOLS
+unsigned vb_timer_snapshot(uint32_t* out) {
+    const uint32_t words[] = {
+        (uint32_t)(s_tcr), /* control */
+        (uint32_t)(s_reload), /* reload */
+        (uint32_t)(s_counter), /* counter */
+        (uint32_t)(s_divider), /* divider */
+        (uint32_t)(s_zstat), /* status */
+        (uint32_t)(s_zstat_shadow), /* status_shadow */
+        (uint32_t)(s_reload_pending), /* reload_pending */
+    };
+    unsigned n=sizeof(words)/sizeof(words[0]);
+    for(unsigned i=0;i<n;++i) out[i]=words[i];
+    return n;
+}
+#endif

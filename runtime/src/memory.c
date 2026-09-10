@@ -21,9 +21,63 @@
 #include "vip.h"
 #include "vsu.h"
 #include "wtrace.h"
+#include "cpu_state.h"
+
+static CPUState* s_bus_cpu;
+static uint64_t s_timer_cycle,s_vip_cycle,s_vsu_cycle,s_input_cycle;
+void vb_memory_set_cpu(CPUState* cpu) { s_bus_cpu=cpu; }
+uint64_t vb_memory_access_cycle(void) {
+    return s_bus_cpu ? s_bus_cpu->cycles-s_bus_cpu->bus_tail_cycles:s_vip_cycle;
+}
+int32_t vb_devices_cycles_to_next_event(uint64_t cycle) {
+    uint64_t next=s_vip_cycle+(uint64_t)vb_vip_cycles_to_next_event();
+    uint64_t timer=s_timer_cycle+(uint64_t)vb_timer_cycles_to_next_event();
+    if(timer<next) next=timer;
+    uint64_t input=s_input_cycle+(uint64_t)vb_input_cycles_to_next_event();
+    if(input<next) next=input;
+    return next>cycle ? (int32_t)(next-cycle):1;
+}
+void vb_devices_sync(uint64_t cycle) {
+    if(cycle>s_timer_cycle) { vb_timer_tick((uint32_t)(cycle-s_timer_cycle));s_timer_cycle=cycle; }
+    if(cycle>s_input_cycle) { vb_input_tick((uint32_t)(cycle-s_input_cycle));s_input_cycle=cycle; }
+    if(cycle>=s_vip_cycle+(uint64_t)vb_vip_cycles_to_next_event()) {
+        vb_vip_tick(cycle-s_vip_cycle);s_vip_cycle=cycle;
+    }
+}
+void vb_devices_end_frame(uint64_t cycle) {
+    vb_vsu_tick(cycle-s_vsu_cycle);s_vsu_cycle=cycle;
+    vb_vsu_end_frame();
+}
+static void bus_begin(uint32_t addr, int writing) {
+    if(!s_bus_cpu) return;
+    uint64_t cycle=s_bus_cpu->cycles-s_bus_cpu->bus_tail_cycles;
+    unsigned region=(addr>>24)&7;
+    /* These devices update synchronously on register access. VIP events
+     * remain instruction-boundary events, like the independent oracle. */
+    if(region==2 && cycle>s_timer_cycle) { vb_timer_tick((uint32_t)(cycle-s_timer_cycle));s_timer_cycle=cycle; }
+    if(region==2 && cycle>s_input_cycle) { vb_input_tick((uint32_t)(cycle-s_input_cycle));s_input_cycle=cycle; }
+    if(region==1 && writing && !(addr&3) && cycle>=s_vsu_cycle) {
+        vb_vsu_tick(cycle-s_vsu_cycle);s_vsu_cycle=cycle;
+    }
+}
+static void bus_end(uint32_t addr) {
+    if(!s_bus_cpu || ((addr>>24)&7)>=3) return;
+    int32_t next=vb_vip_cycles_to_next_event(),timer=vb_timer_cycles_to_next_event();
+    uint64_t deadline=s_vip_cycle+(uint64_t)(next>0 ? next:1);
+    uint64_t timer_deadline=s_timer_cycle+(uint64_t)(timer>0 ? timer:1);
+    if(timer_deadline<deadline) deadline=timer_deadline;
+    uint64_t input_deadline=s_input_cycle+(uint64_t)vb_input_cycles_to_next_event();
+    if(input_deadline<deadline) deadline=input_deadline;
+    int level=vb_irq_highest_pending_level();
+    if(level>=0 && !s_bus_cpu->psw_id && !s_bus_cpu->psw_ep && !s_bus_cpu->psw_np && level>=s_bus_cpu->psw_int_level)
+        deadline=s_bus_cpu->cycles;
+    if(deadline<s_bus_cpu->cycle_deadline) s_bus_cpu->cycle_deadline=deadline;
+}
 
 static uint8_t* s_rom = NULL;
 static uint32_t s_rom_size = 0;
+static uint8_t s_cart_ram[65536];
+uint8_t* vb_cart_ram_data(void) { return s_cart_ram; }
 static uint8_t  s_wram[VB_WRAM_SIZE];
 
 uint32_t vb_rom_size(void) { return s_rom_size; }
@@ -49,6 +103,7 @@ void vb_wram_region_fnv(uint32_t out[VB_WRAM_FNV_REGIONS]) {
 }
 
 int vb_memory_init(const char* rom_path) {
+    s_bus_cpu=NULL;s_timer_cycle=s_vip_cycle=s_vsu_cycle=s_input_cycle=0;
     if (!rom_path || !*rom_path) {
         return -1;
     }
@@ -71,6 +126,7 @@ int vb_memory_init(const char* rom_path) {
     fclose(f);
     s_rom_size = (uint32_t)sz;
     memset(s_wram, 0, sizeof(s_wram));
+    memset(s_cart_ram, 0, sizeof(s_cart_ram));
 
     vb_vip_init();
     vb_vsu_init();
@@ -81,6 +137,7 @@ int vb_memory_init(const char* rom_path) {
 }
 
 void vb_memory_shutdown(void) {
+    s_bus_cpu=NULL;
     free(s_rom);
     s_rom = NULL;
     s_rom_size = 0;
@@ -133,7 +190,7 @@ static int misc_is_timer(uint32_t lo) {
     return (lo == 0x18) || (lo == 0x1C) || (lo == 0x20);
 }
 
-uint8_t vb_read8(uint32_t addr) {
+uint8_t raw_read8(uint32_t addr) {
     uint32_t p = fold(addr);
     switch (region_of(p)) {
         case 0: return vb_vip_read8(p);
@@ -149,13 +206,14 @@ uint8_t vb_read8(uint32_t addr) {
         case 3: vb_stub_abort("read from reserved region 0x03000000", 0, addr);
         case 4: vb_stub_abort("cart-expansion read8 not modelled", 0, addr);
         case 5: return s_wram[wram_off(p)];
-        case 6: vb_stub_abort("cart-RAM read8 not modelled (no save ROM)", 0, addr);
+        case 6: return ((uint8_t)s_cart_ram[(p + 0) & 65535] << 0);
         case 7: return s_rom[rom_off(p)];
     }
     vb_stub_abort("vb_read8 fall-through", 0, addr);
 }
 
-uint16_t vb_read16(uint32_t addr) {
+uint16_t raw_read16(uint32_t addr) {
+    addr &= ~1u;
     uint32_t p = fold(addr);
     switch (region_of(p)) {
         case 0: return vb_vip_read16(p);
@@ -174,7 +232,7 @@ uint16_t vb_read16(uint32_t addr) {
             uint32_t o = wram_off(p);
             return (uint16_t)s_wram[o] | ((uint16_t)s_wram[o + 1] << 8);
         }
-        case 6: vb_stub_abort("cart-RAM read16 not modelled (no save ROM)", 0, addr);
+        case 6: return ((uint16_t)s_cart_ram[(p + 0) & 65535] << 0) | ((uint16_t)s_cart_ram[(p + 1) & 65535] << 8);
         case 7: {
             uint32_t o = rom_off(p);
             return (uint16_t)s_rom[o] | ((uint16_t)s_rom[o + 1] << 8);
@@ -183,7 +241,8 @@ uint16_t vb_read16(uint32_t addr) {
     vb_stub_abort("vb_read16 fall-through", 0, addr);
 }
 
-uint32_t vb_read32(uint32_t addr) {
+uint32_t raw_read32(uint32_t addr) {
+    addr &= ~3u;
     uint32_t p = fold(addr);
     switch (region_of(p)) {
         case 0: return vb_vip_read32(p);
@@ -205,7 +264,7 @@ uint32_t vb_read32(uint32_t addr) {
                   | ((uint32_t)s_wram[o + 2] << 16)
                   | ((uint32_t)s_wram[o + 3] << 24);
         }
-        case 6: vb_stub_abort("cart-RAM read32 not modelled", 0, addr);
+        case 6: return ((uint32_t)s_cart_ram[(p + 0) & 65535] << 0) | ((uint32_t)s_cart_ram[(p + 1) & 65535] << 8) | ((uint32_t)s_cart_ram[(p + 2) & 65535] << 16) | ((uint32_t)s_cart_ram[(p + 3) & 65535] << 24);
         case 7: {
             uint32_t o = rom_off(p);
             return  (uint32_t)s_rom[o]
@@ -225,7 +284,7 @@ uint32_t vb_read32(uint32_t addr) {
  * doomed writes (e.g. into cart-ROM region 7) that abort. Source PC
  * is sampled by wtrace from the active CPU pointer.
  */
-void vb_write8(uint32_t addr, uint8_t v) {
+void raw_write8(uint32_t addr, uint8_t v) {
     vb_wtrace_record(addr, (uint32_t)v, 1u);
     uint32_t p = fold(addr);
     switch (region_of(p)) {
@@ -242,13 +301,14 @@ void vb_write8(uint32_t addr, uint8_t v) {
         case 3: vb_stub_abort("write to reserved region 0x03000000", 0, addr);
         case 4: vb_stub_abort("cart-expansion write8 not modelled", 0, addr);
         case 5: s_wram[wram_off(p)] = v; return;
-        case 6: vb_stub_abort("cart-RAM write8 not modelled (no save ROM)", 0, addr);
+        case 6: s_cart_ram[(p + 0) & 65535] = (uint8_t)(v >> 0); return;
         case 7: vb_stub_abort("write to cart ROM (read-only)", 0, addr);
     }
     vb_stub_abort("vb_write8 fall-through", 0, addr);
 }
 
-void vb_write16(uint32_t addr, uint16_t v) {
+void raw_write16(uint32_t addr, uint16_t v) {
+    addr &= ~1u;
     vb_wtrace_record(addr, (uint32_t)v, 2u);
     uint32_t p = fold(addr);
     switch (region_of(p)) {
@@ -270,13 +330,14 @@ void vb_write16(uint32_t addr, uint16_t v) {
             s_wram[o + 1] = (uint8_t)((v >> 8) & 0xFF);
             return;
         }
-        case 6: vb_stub_abort("cart-RAM write16 not modelled", 0, addr);
+        case 6: s_cart_ram[(p + 0) & 65535] = (uint8_t)(v >> 0); s_cart_ram[(p + 1) & 65535] = (uint8_t)(v >> 8); return;
         case 7: vb_stub_abort("write to cart ROM (read-only)", 0, addr);
     }
     vb_stub_abort("vb_write16 fall-through", 0, addr);
 }
 
-void vb_write32(uint32_t addr, uint32_t v) {
+void raw_write32(uint32_t addr, uint32_t v) {
+    addr &= ~3u;
     vb_wtrace_record(addr, v, 4u);
     uint32_t p = fold(addr);
     switch (region_of(p)) {
@@ -300,7 +361,7 @@ void vb_write32(uint32_t addr, uint32_t v) {
             s_wram[o + 3] = (uint8_t)((v >> 24) & 0xFF);
             return;
         }
-        case 6: vb_stub_abort("cart-RAM write32 not modelled", 0, addr);
+        case 6: s_cart_ram[(p + 0) & 65535] = (uint8_t)(v >> 0); s_cart_ram[(p + 1) & 65535] = (uint8_t)(v >> 8); s_cart_ram[(p + 2) & 65535] = (uint8_t)(v >> 16); s_cart_ram[(p + 3) & 65535] = (uint8_t)(v >> 24); return;
         case 7: vb_stub_abort("write to cart ROM (read-only)", 0, addr);
     }
     vb_stub_abort("vb_write32 fall-through", 0, addr);
@@ -314,3 +375,12 @@ size_t vb_memory_dump(uint32_t addr, uint8_t* out, size_t len) {
     }
     return len;
 }
+
+uint8_t vb_read8(uint32_t addr) { bus_begin(addr,0);uint8_t result=raw_read8(addr);bus_end(addr);return result; }
+void vb_write8(uint32_t addr,uint8_t value) { bus_begin(addr,1);raw_write8(addr,value);bus_end(addr); }
+
+uint16_t vb_read16(uint32_t addr) { bus_begin(addr,0);uint16_t result=raw_read16(addr);bus_end(addr);return result; }
+void vb_write16(uint32_t addr,uint16_t value) { bus_begin(addr,1);raw_write16(addr,value);bus_end(addr); }
+
+uint32_t vb_read32(uint32_t addr) { bus_begin(addr,0);uint32_t result=raw_read32(addr);bus_end(addr);return result; }
+void vb_write32(uint32_t addr,uint32_t value) { bus_begin(addr,1);raw_write32(addr,value);bus_end(addr); }

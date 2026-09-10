@@ -1,8 +1,7 @@
 /* input.h — Virtual Boy pad register surface.
  *
  * 16-bit pad register at 0x02000028. Bit layout per docs/HARDWARE_NOTES.md.
- * The Phase 1 skeleton always returns "no buttons pressed"; Phase 4
- * wires SDL keyboard events through `vb_input_set_pad()`.
+ * Keyboard, controller and TCP input feed `vb_input_set_pad()`.
  */
 #ifndef VB_INPUT_H
 #define VB_INPUT_H
@@ -43,6 +42,8 @@ extern "C" {
 #define VB_PAD_RDOWN   (1u << 15)
 
 void vb_input_init(void);
+void vb_input_tick(uint32_t cycles);
+int32_t vb_input_cycles_to_next_event(void);
 void vb_input_set_pad(uint16_t pressed);
 uint16_t vb_input_get_pad(void);
 

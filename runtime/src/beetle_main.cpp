@@ -24,6 +24,10 @@ extern "C" {
     int  vb_beetle_debug_server_start(int port);
     void vb_beetle_debug_server_stop(void);
     void vb_beetle_debug_server_poll(void);
+    void vb_beetle_debug_set_paused(int paused);
+    int vb_beetle_debug_is_paused(void);
+    int vb_beetle_debug_should_quit(void);
+    int vb_beetle_debug_input_override(void);
 }
 
 
@@ -100,12 +104,15 @@ int main(int argc, char** argv) {
     const char* rom_path = nullptr;
     int debug_port = 4391;
     bool headless = false;
+    bool start_paused = false;
 
     for (int i = 1; i < argc; ++i) {
         if (!std::strcmp(argv[i], "--rom") && i + 1 < argc) {
             rom_path = argv[++i];
         } else if (!std::strcmp(argv[i], "--port") && i + 1 < argc) {
             debug_port = std::atoi(argv[++i]);
+        } else if (!std::strcmp(argv[i], "--paused")) {
+            start_paused = true;
         } else if (!std::strcmp(argv[i], "--headless")) {
             /* No SDL window, just emulate + serve TCP. Useful for
              * CI where no display is available. */
@@ -116,7 +123,8 @@ int main(int argc, char** argv) {
                 "\n"
                 "  --rom PATH     Virtual Boy cart to load\n"
                 "  --port N       TCP debug port (default 4391)\n"
-                "  --headless     no SDL window; emulate + TCP only\n",
+                "  --headless     no SDL window; emulate + TCP only\n"
+                "  --paused       stop at reset until TCP continue/run_frames\n",
                 argv[0]);
             return 0;
         } else if (argv[i][0] != '-') {
@@ -192,6 +200,7 @@ int main(int argc, char** argv) {
         /* Non-fatal — keep going so the window still renders. */
     }
 
+    vb_beetle_debug_set_paused(start_paused);
     /* Wall-clock pacing to VB native 50.27 Hz. TAB → unlocked turbo. */
     const double frame_ms = 1000.0 / VB_FRAME_HZ;
     Uint64 freq = SDL_GetPerformanceFrequency();
@@ -209,8 +218,10 @@ int main(int argc, char** argv) {
         }
 
         vb_beetle_debug_server_poll();
+        if (vb_beetle_debug_should_quit()) goto shutdown;
+        if (vb_beetle_debug_is_paused()) { SDL_Delay(1); continue; }
 
-        uint16_t pad = headless ? vb_beetle_get_pad() : pad_from_keyboard();
+        uint16_t pad = (headless || vb_beetle_debug_input_override()) ? vb_beetle_get_pad() : pad_from_keyboard();
         vb_beetle_run_frame(pad);
 
         if (!headless) {

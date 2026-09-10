@@ -41,6 +41,7 @@ void     vb_vsu_write32(uint32_t addr, uint32_t v);
  * S16 frames into the internal ring; SDL pulls them with
  * `vb_vsu_pull_samples`. */
 void vb_vsu_tick(uint64_t cpu_cycles);
+void vb_vsu_end_frame(void);
 
 /* Drain up to `n_frames` stereo S16 frames into `dst` (interleaved
  * L, R, L, R, ...). Returns the number of frames actually produced;

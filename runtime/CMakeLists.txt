@@ -4,10 +4,10 @@ project(vb_runtime C CXX)
 include("${CMAKE_CURRENT_SOURCE_DIR}/runtime.cmake")
 
 # vb-runtime target. By default builds with the `no_game_linked.c`
-# stub so the binary links without any P3 codegen present. Pass
+# interpreter host so the binary works without generated code. Pass
 # -DVBRECOMP_GAME=marios_tennis at configure-time to link the
 # generated dispatch from generated/ instead.
-set(VBRECOMP_GAME "" CACHE STRING "Module name (e.g. marios_tennis) of a P3 codegen output to link into vb-runtime. Empty = use no_game_linked.c stub.")
+set(VBRECOMP_GAME "" CACHE STRING "Generated module name; empty selects the generic interpreter host.")
 
 if(VBRECOMP_GAME STREQUAL "")
     vb_add_runtime_target(vb-runtime
@@ -39,10 +39,11 @@ if(COMMAND recomp_target_launcher_ui)
     recomp_target_launcher_ui(vb-runtime CONSOLE vb)
 endif()
 
+set(BEETLE_VB_ROOT "${CMAKE_SOURCE_DIR}/beetle-vb" CACHE PATH "Instrumented Beetle VB oracle checkout")
 set(_beetle_candidates
-    "${CMAKE_SOURCE_DIR}/beetle-vb/libmednafen_vb.a"
-    "${CMAKE_SOURCE_DIR}/beetle-vb/mednafen_vb_libretro.dll"
-    "${CMAKE_SOURCE_DIR}/beetle-vb/mednafen_vb_libretro.so"
+    "${BEETLE_VB_ROOT}/libmednafen_vb.a"
+    "${BEETLE_VB_ROOT}/mednafen_vb_libretro.dll"
+    "${BEETLE_VB_ROOT}/mednafen_vb_libretro.so"
 )
 set(BEETLE_VB_LIB "")
 foreach(_cand IN LISTS _beetle_candidates)
@@ -55,8 +56,8 @@ endforeach()
 if(BEETLE_VB_LIB)
     message(STATUS "vb-beetle: found ${BEETLE_VB_LIB}")
 
-    # SDL2 is required only for vb-beetle (the runtime currently runs
-    # headless). Skip the target gracefully if SDL2 isn't installed.
+    # Both windowed frontends use SDL2. Skip the oracle target gracefully
+    # if SDL2 isn't installed; the generic runtime can still run headless.
     find_package(SDL2 QUIET)
     if(NOT SDL2_FOUND)
         message(STATUS "vb-beetle: SDL2 not found; skipping target "
@@ -69,13 +70,15 @@ if(BEETLE_VB_LIB)
         add_executable(vb-beetle
             ${CMAKE_CURRENT_SOURCE_DIR}/src/beetle_main.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/src/beetle_libretro.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/beetle_inspect.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/src/beetle_debug_server.c
             ${CMAKE_CURRENT_SOURCE_DIR}/src/png_write.c
-            ${CMAKE_SOURCE_DIR}/beetle-vb/libretro-common/compat/compat_strl.c
+            ${BEETLE_VB_ROOT}/libretro-common/compat/compat_strl.c
         )
         target_include_directories(vb-beetle PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/include
-            ${CMAKE_SOURCE_DIR}/beetle-vb/libretro-common/include
+            ${BEETLE_VB_ROOT}
+            ${BEETLE_VB_ROOT}/libretro-common/include
             ${SDL2_INCLUDE_DIRS}
         )
         # Beetle's static archive is just a bag of objects; link it

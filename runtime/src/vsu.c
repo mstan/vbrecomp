@@ -115,12 +115,13 @@ static bool        s_blip_inited;
  * Blip buffer never overruns and the per-flush memmove stays small. */
 static int32_t  s_vsu_frame_ts;
 
-/* Flush cadence in 5 MHz VSU cycles. ~3.3 ms / ~145 output samples per
- * flush — far under the 50 ms (~2205 sample) buffer the oracle sizes, so
- * Blip_Synth_offset never writes past the buffer, while keeping the
- * read_samples memmove cheap. Output rate is locked to 44.1 kHz by Blip's
- * clock-rate factor regardless of this value (it is NOT a sample cadence). */
-#define VSU_FLUSH_CLOCKS  16384
+/* Normal updates happen at aligned VSU writes and display-frame boundaries,
+ * matching the reference's update granularity. A stopped channel's hidden
+ * dividers finish the current update before becoming idle, so changing the
+ * update cadence changes the phase on restart (Zero Racers noise channel).
+ * A 40 ms bound is only a safety cap within the 50 ms Blip buffer; the host
+ * normally flushes explicitly every 19.8912 ms display frame. */
+#define VSU_FLUSH_CLOCKS  200000
 
 /* The VB VSU is clocked at CPU/4 (5 MHz), NOT the full 20 MHz CPU clock.
  * Mednafen feeds its VSU `(v810_timestamp + CycleFix) >> 2` and runs the
@@ -565,6 +566,9 @@ void vb_vsu_tick(uint64_t cpu_cycles) {
     s_vsu_clock_residue += (int32_t)cpu_cycles;
     int32_t vsu_cycles = s_vsu_clock_residue >> 2;
     s_vsu_clock_residue &= 3;
+    if (!vsu_cycles) {
+        for (int ch=0;ch<6;++ch) vsu_update_channel(ch,s_vsu_frame_ts,0);
+    }
 
     while (vsu_cycles > 0) {
         /* Bound the relative frame timestamp so Blip_Synth_offset never
@@ -581,6 +585,8 @@ void vb_vsu_tick(uint64_t cpu_cycles) {
         if (s_vsu_frame_ts >= VSU_FLUSH_CLOCKS) vsu_flush_frame();
     }
 }
+
+void vb_vsu_end_frame(void) { vsu_flush_frame(); }
 
 size_t vb_vsu_pull_samples(int16_t* dst, size_t n_frames) {
     if (!dst || !n_frames) return 0;
@@ -633,3 +639,321 @@ size_t vb_vsu_read_abs(uint64_t start_abs, int16_t* dst, size_t max_frames,
     }
     return produced;
 }
+
+/* Canonical, read-only device state. Ordered schema: tools/device_schema.json. */
+#ifdef VBRECOMP_DEBUG_TOOLS
+unsigned vb_vsu_snapshot(uint32_t* out) {
+    const uint32_t words[] = {
+        (uint32_t)(s_intl_control[0]), /* intl_control[0] */
+        (uint32_t)(s_intl_control[1]), /* intl_control[1] */
+        (uint32_t)(s_intl_control[2]), /* intl_control[2] */
+        (uint32_t)(s_intl_control[3]), /* intl_control[3] */
+        (uint32_t)(s_intl_control[4]), /* intl_control[4] */
+        (uint32_t)(s_intl_control[5]), /* intl_control[5] */
+        (uint32_t)(s_left_level[0]), /* left_level[0] */
+        (uint32_t)(s_left_level[1]), /* left_level[1] */
+        (uint32_t)(s_left_level[2]), /* left_level[2] */
+        (uint32_t)(s_left_level[3]), /* left_level[3] */
+        (uint32_t)(s_left_level[4]), /* left_level[4] */
+        (uint32_t)(s_left_level[5]), /* left_level[5] */
+        (uint32_t)(s_right_level[0]), /* right_level[0] */
+        (uint32_t)(s_right_level[1]), /* right_level[1] */
+        (uint32_t)(s_right_level[2]), /* right_level[2] */
+        (uint32_t)(s_right_level[3]), /* right_level[3] */
+        (uint32_t)(s_right_level[4]), /* right_level[4] */
+        (uint32_t)(s_right_level[5]), /* right_level[5] */
+        (uint32_t)(s_frequency[0]), /* frequency[0] */
+        (uint32_t)(s_frequency[1]), /* frequency[1] */
+        (uint32_t)(s_frequency[2]), /* frequency[2] */
+        (uint32_t)(s_frequency[3]), /* frequency[3] */
+        (uint32_t)(s_frequency[4]), /* frequency[4] */
+        (uint32_t)(s_frequency[5]), /* frequency[5] */
+        (uint32_t)(s_env_control[0]), /* env_control[0] */
+        (uint32_t)(s_env_control[1]), /* env_control[1] */
+        (uint32_t)(s_env_control[2]), /* env_control[2] */
+        (uint32_t)(s_env_control[3]), /* env_control[3] */
+        (uint32_t)(s_env_control[4]), /* env_control[4] */
+        (uint32_t)(s_env_control[5]), /* env_control[5] */
+        (uint32_t)(s_ram_address[0]), /* ram_address[0] */
+        (uint32_t)(s_ram_address[1]), /* ram_address[1] */
+        (uint32_t)(s_ram_address[2]), /* ram_address[2] */
+        (uint32_t)(s_ram_address[3]), /* ram_address[3] */
+        (uint32_t)(s_ram_address[4]), /* ram_address[4] */
+        (uint32_t)(s_ram_address[5]), /* ram_address[5] */
+        (uint32_t)(s_eff_freq[0]), /* eff_freq[0] */
+        (uint32_t)(s_eff_freq[1]), /* eff_freq[1] */
+        (uint32_t)(s_eff_freq[2]), /* eff_freq[2] */
+        (uint32_t)(s_eff_freq[3]), /* eff_freq[3] */
+        (uint32_t)(s_eff_freq[4]), /* eff_freq[4] */
+        (uint32_t)(s_eff_freq[5]), /* eff_freq[5] */
+        (uint32_t)(s_envelope[0]), /* envelope[0] */
+        (uint32_t)(s_envelope[1]), /* envelope[1] */
+        (uint32_t)(s_envelope[2]), /* envelope[2] */
+        (uint32_t)(s_envelope[3]), /* envelope[3] */
+        (uint32_t)(s_envelope[4]), /* envelope[4] */
+        (uint32_t)(s_envelope[5]), /* envelope[5] */
+        (uint32_t)(s_wave_pos[0]), /* wave_pos[0] */
+        (uint32_t)(s_wave_pos[1]), /* wave_pos[1] */
+        (uint32_t)(s_wave_pos[2]), /* wave_pos[2] */
+        (uint32_t)(s_wave_pos[3]), /* wave_pos[3] */
+        (uint32_t)(s_wave_pos[4]), /* wave_pos[4] */
+        (uint32_t)(s_wave_pos[5]), /* wave_pos[5] */
+        (uint32_t)(s_latcher_clock_divider[0]), /* latcher_clock_divider[0] */
+        (uint32_t)(s_latcher_clock_divider[1]), /* latcher_clock_divider[1] */
+        (uint32_t)(s_latcher_clock_divider[2]), /* latcher_clock_divider[2] */
+        (uint32_t)(s_latcher_clock_divider[3]), /* latcher_clock_divider[3] */
+        (uint32_t)(s_latcher_clock_divider[4]), /* latcher_clock_divider[4] */
+        (uint32_t)(s_latcher_clock_divider[5]), /* latcher_clock_divider[5] */
+        (uint32_t)(s_freq_counter[0]), /* freq_counter[0] */
+        (uint32_t)(s_freq_counter[1]), /* freq_counter[1] */
+        (uint32_t)(s_freq_counter[2]), /* freq_counter[2] */
+        (uint32_t)(s_freq_counter[3]), /* freq_counter[3] */
+        (uint32_t)(s_freq_counter[4]), /* freq_counter[4] */
+        (uint32_t)(s_freq_counter[5]), /* freq_counter[5] */
+        (uint32_t)(s_interval_counter[0]), /* interval_counter[0] */
+        (uint32_t)(s_interval_counter[1]), /* interval_counter[1] */
+        (uint32_t)(s_interval_counter[2]), /* interval_counter[2] */
+        (uint32_t)(s_interval_counter[3]), /* interval_counter[3] */
+        (uint32_t)(s_interval_counter[4]), /* interval_counter[4] */
+        (uint32_t)(s_interval_counter[5]), /* interval_counter[5] */
+        (uint32_t)(s_envelope_counter[0]), /* envelope_counter[0] */
+        (uint32_t)(s_envelope_counter[1]), /* envelope_counter[1] */
+        (uint32_t)(s_envelope_counter[2]), /* envelope_counter[2] */
+        (uint32_t)(s_envelope_counter[3]), /* envelope_counter[3] */
+        (uint32_t)(s_envelope_counter[4]), /* envelope_counter[4] */
+        (uint32_t)(s_envelope_counter[5]), /* envelope_counter[5] */
+        (uint32_t)(s_effects_clock_divider[0]), /* effects_clock_divider[0] */
+        (uint32_t)(s_effects_clock_divider[1]), /* effects_clock_divider[1] */
+        (uint32_t)(s_effects_clock_divider[2]), /* effects_clock_divider[2] */
+        (uint32_t)(s_effects_clock_divider[3]), /* effects_clock_divider[3] */
+        (uint32_t)(s_effects_clock_divider[4]), /* effects_clock_divider[4] */
+        (uint32_t)(s_effects_clock_divider[5]), /* effects_clock_divider[5] */
+        (uint32_t)(s_interval_clock_divider[0]), /* interval_clock_divider[0] */
+        (uint32_t)(s_interval_clock_divider[1]), /* interval_clock_divider[1] */
+        (uint32_t)(s_interval_clock_divider[2]), /* interval_clock_divider[2] */
+        (uint32_t)(s_interval_clock_divider[3]), /* interval_clock_divider[3] */
+        (uint32_t)(s_interval_clock_divider[4]), /* interval_clock_divider[4] */
+        (uint32_t)(s_interval_clock_divider[5]), /* interval_clock_divider[5] */
+        (uint32_t)(s_envelope_clock_divider[0]), /* envelope_clock_divider[0] */
+        (uint32_t)(s_envelope_clock_divider[1]), /* envelope_clock_divider[1] */
+        (uint32_t)(s_envelope_clock_divider[2]), /* envelope_clock_divider[2] */
+        (uint32_t)(s_envelope_clock_divider[3]), /* envelope_clock_divider[3] */
+        (uint32_t)(s_envelope_clock_divider[4]), /* envelope_clock_divider[4] */
+        (uint32_t)(s_envelope_clock_divider[5]), /* envelope_clock_divider[5] */
+        (uint32_t)(s_sweep_control), /* sweep_control */
+        (uint32_t)(s_mod_wave_pos), /* mod_wave_pos */
+        (uint32_t)(s_sweep_mod_counter), /* sweep_mod_counter */
+        (uint32_t)(s_sweep_mod_clock_divider), /* sweep_mod_clock_divider */
+        (uint32_t)(s_noise_latcher_clock_divider), /* noise_latcher_clock_divider */
+        (uint32_t)(s_noise_latcher), /* noise_latcher */
+        (uint32_t)(s_lfsr), /* lfsr */
+        (uint32_t)(s_wave_data[0][0]), /* wave[0][0] */
+        (uint32_t)(s_wave_data[0][1]), /* wave[0][1] */
+        (uint32_t)(s_wave_data[0][2]), /* wave[0][2] */
+        (uint32_t)(s_wave_data[0][3]), /* wave[0][3] */
+        (uint32_t)(s_wave_data[0][4]), /* wave[0][4] */
+        (uint32_t)(s_wave_data[0][5]), /* wave[0][5] */
+        (uint32_t)(s_wave_data[0][6]), /* wave[0][6] */
+        (uint32_t)(s_wave_data[0][7]), /* wave[0][7] */
+        (uint32_t)(s_wave_data[0][8]), /* wave[0][8] */
+        (uint32_t)(s_wave_data[0][9]), /* wave[0][9] */
+        (uint32_t)(s_wave_data[0][10]), /* wave[0][10] */
+        (uint32_t)(s_wave_data[0][11]), /* wave[0][11] */
+        (uint32_t)(s_wave_data[0][12]), /* wave[0][12] */
+        (uint32_t)(s_wave_data[0][13]), /* wave[0][13] */
+        (uint32_t)(s_wave_data[0][14]), /* wave[0][14] */
+        (uint32_t)(s_wave_data[0][15]), /* wave[0][15] */
+        (uint32_t)(s_wave_data[0][16]), /* wave[0][16] */
+        (uint32_t)(s_wave_data[0][17]), /* wave[0][17] */
+        (uint32_t)(s_wave_data[0][18]), /* wave[0][18] */
+        (uint32_t)(s_wave_data[0][19]), /* wave[0][19] */
+        (uint32_t)(s_wave_data[0][20]), /* wave[0][20] */
+        (uint32_t)(s_wave_data[0][21]), /* wave[0][21] */
+        (uint32_t)(s_wave_data[0][22]), /* wave[0][22] */
+        (uint32_t)(s_wave_data[0][23]), /* wave[0][23] */
+        (uint32_t)(s_wave_data[0][24]), /* wave[0][24] */
+        (uint32_t)(s_wave_data[0][25]), /* wave[0][25] */
+        (uint32_t)(s_wave_data[0][26]), /* wave[0][26] */
+        (uint32_t)(s_wave_data[0][27]), /* wave[0][27] */
+        (uint32_t)(s_wave_data[0][28]), /* wave[0][28] */
+        (uint32_t)(s_wave_data[0][29]), /* wave[0][29] */
+        (uint32_t)(s_wave_data[0][30]), /* wave[0][30] */
+        (uint32_t)(s_wave_data[0][31]), /* wave[0][31] */
+        (uint32_t)(s_wave_data[1][0]), /* wave[1][0] */
+        (uint32_t)(s_wave_data[1][1]), /* wave[1][1] */
+        (uint32_t)(s_wave_data[1][2]), /* wave[1][2] */
+        (uint32_t)(s_wave_data[1][3]), /* wave[1][3] */
+        (uint32_t)(s_wave_data[1][4]), /* wave[1][4] */
+        (uint32_t)(s_wave_data[1][5]), /* wave[1][5] */
+        (uint32_t)(s_wave_data[1][6]), /* wave[1][6] */
+        (uint32_t)(s_wave_data[1][7]), /* wave[1][7] */
+        (uint32_t)(s_wave_data[1][8]), /* wave[1][8] */
+        (uint32_t)(s_wave_data[1][9]), /* wave[1][9] */
+        (uint32_t)(s_wave_data[1][10]), /* wave[1][10] */
+        (uint32_t)(s_wave_data[1][11]), /* wave[1][11] */
+        (uint32_t)(s_wave_data[1][12]), /* wave[1][12] */
+        (uint32_t)(s_wave_data[1][13]), /* wave[1][13] */
+        (uint32_t)(s_wave_data[1][14]), /* wave[1][14] */
+        (uint32_t)(s_wave_data[1][15]), /* wave[1][15] */
+        (uint32_t)(s_wave_data[1][16]), /* wave[1][16] */
+        (uint32_t)(s_wave_data[1][17]), /* wave[1][17] */
+        (uint32_t)(s_wave_data[1][18]), /* wave[1][18] */
+        (uint32_t)(s_wave_data[1][19]), /* wave[1][19] */
+        (uint32_t)(s_wave_data[1][20]), /* wave[1][20] */
+        (uint32_t)(s_wave_data[1][21]), /* wave[1][21] */
+        (uint32_t)(s_wave_data[1][22]), /* wave[1][22] */
+        (uint32_t)(s_wave_data[1][23]), /* wave[1][23] */
+        (uint32_t)(s_wave_data[1][24]), /* wave[1][24] */
+        (uint32_t)(s_wave_data[1][25]), /* wave[1][25] */
+        (uint32_t)(s_wave_data[1][26]), /* wave[1][26] */
+        (uint32_t)(s_wave_data[1][27]), /* wave[1][27] */
+        (uint32_t)(s_wave_data[1][28]), /* wave[1][28] */
+        (uint32_t)(s_wave_data[1][29]), /* wave[1][29] */
+        (uint32_t)(s_wave_data[1][30]), /* wave[1][30] */
+        (uint32_t)(s_wave_data[1][31]), /* wave[1][31] */
+        (uint32_t)(s_wave_data[2][0]), /* wave[2][0] */
+        (uint32_t)(s_wave_data[2][1]), /* wave[2][1] */
+        (uint32_t)(s_wave_data[2][2]), /* wave[2][2] */
+        (uint32_t)(s_wave_data[2][3]), /* wave[2][3] */
+        (uint32_t)(s_wave_data[2][4]), /* wave[2][4] */
+        (uint32_t)(s_wave_data[2][5]), /* wave[2][5] */
+        (uint32_t)(s_wave_data[2][6]), /* wave[2][6] */
+        (uint32_t)(s_wave_data[2][7]), /* wave[2][7] */
+        (uint32_t)(s_wave_data[2][8]), /* wave[2][8] */
+        (uint32_t)(s_wave_data[2][9]), /* wave[2][9] */
+        (uint32_t)(s_wave_data[2][10]), /* wave[2][10] */
+        (uint32_t)(s_wave_data[2][11]), /* wave[2][11] */
+        (uint32_t)(s_wave_data[2][12]), /* wave[2][12] */
+        (uint32_t)(s_wave_data[2][13]), /* wave[2][13] */
+        (uint32_t)(s_wave_data[2][14]), /* wave[2][14] */
+        (uint32_t)(s_wave_data[2][15]), /* wave[2][15] */
+        (uint32_t)(s_wave_data[2][16]), /* wave[2][16] */
+        (uint32_t)(s_wave_data[2][17]), /* wave[2][17] */
+        (uint32_t)(s_wave_data[2][18]), /* wave[2][18] */
+        (uint32_t)(s_wave_data[2][19]), /* wave[2][19] */
+        (uint32_t)(s_wave_data[2][20]), /* wave[2][20] */
+        (uint32_t)(s_wave_data[2][21]), /* wave[2][21] */
+        (uint32_t)(s_wave_data[2][22]), /* wave[2][22] */
+        (uint32_t)(s_wave_data[2][23]), /* wave[2][23] */
+        (uint32_t)(s_wave_data[2][24]), /* wave[2][24] */
+        (uint32_t)(s_wave_data[2][25]), /* wave[2][25] */
+        (uint32_t)(s_wave_data[2][26]), /* wave[2][26] */
+        (uint32_t)(s_wave_data[2][27]), /* wave[2][27] */
+        (uint32_t)(s_wave_data[2][28]), /* wave[2][28] */
+        (uint32_t)(s_wave_data[2][29]), /* wave[2][29] */
+        (uint32_t)(s_wave_data[2][30]), /* wave[2][30] */
+        (uint32_t)(s_wave_data[2][31]), /* wave[2][31] */
+        (uint32_t)(s_wave_data[3][0]), /* wave[3][0] */
+        (uint32_t)(s_wave_data[3][1]), /* wave[3][1] */
+        (uint32_t)(s_wave_data[3][2]), /* wave[3][2] */
+        (uint32_t)(s_wave_data[3][3]), /* wave[3][3] */
+        (uint32_t)(s_wave_data[3][4]), /* wave[3][4] */
+        (uint32_t)(s_wave_data[3][5]), /* wave[3][5] */
+        (uint32_t)(s_wave_data[3][6]), /* wave[3][6] */
+        (uint32_t)(s_wave_data[3][7]), /* wave[3][7] */
+        (uint32_t)(s_wave_data[3][8]), /* wave[3][8] */
+        (uint32_t)(s_wave_data[3][9]), /* wave[3][9] */
+        (uint32_t)(s_wave_data[3][10]), /* wave[3][10] */
+        (uint32_t)(s_wave_data[3][11]), /* wave[3][11] */
+        (uint32_t)(s_wave_data[3][12]), /* wave[3][12] */
+        (uint32_t)(s_wave_data[3][13]), /* wave[3][13] */
+        (uint32_t)(s_wave_data[3][14]), /* wave[3][14] */
+        (uint32_t)(s_wave_data[3][15]), /* wave[3][15] */
+        (uint32_t)(s_wave_data[3][16]), /* wave[3][16] */
+        (uint32_t)(s_wave_data[3][17]), /* wave[3][17] */
+        (uint32_t)(s_wave_data[3][18]), /* wave[3][18] */
+        (uint32_t)(s_wave_data[3][19]), /* wave[3][19] */
+        (uint32_t)(s_wave_data[3][20]), /* wave[3][20] */
+        (uint32_t)(s_wave_data[3][21]), /* wave[3][21] */
+        (uint32_t)(s_wave_data[3][22]), /* wave[3][22] */
+        (uint32_t)(s_wave_data[3][23]), /* wave[3][23] */
+        (uint32_t)(s_wave_data[3][24]), /* wave[3][24] */
+        (uint32_t)(s_wave_data[3][25]), /* wave[3][25] */
+        (uint32_t)(s_wave_data[3][26]), /* wave[3][26] */
+        (uint32_t)(s_wave_data[3][27]), /* wave[3][27] */
+        (uint32_t)(s_wave_data[3][28]), /* wave[3][28] */
+        (uint32_t)(s_wave_data[3][29]), /* wave[3][29] */
+        (uint32_t)(s_wave_data[3][30]), /* wave[3][30] */
+        (uint32_t)(s_wave_data[3][31]), /* wave[3][31] */
+        (uint32_t)(s_wave_data[4][0]), /* wave[4][0] */
+        (uint32_t)(s_wave_data[4][1]), /* wave[4][1] */
+        (uint32_t)(s_wave_data[4][2]), /* wave[4][2] */
+        (uint32_t)(s_wave_data[4][3]), /* wave[4][3] */
+        (uint32_t)(s_wave_data[4][4]), /* wave[4][4] */
+        (uint32_t)(s_wave_data[4][5]), /* wave[4][5] */
+        (uint32_t)(s_wave_data[4][6]), /* wave[4][6] */
+        (uint32_t)(s_wave_data[4][7]), /* wave[4][7] */
+        (uint32_t)(s_wave_data[4][8]), /* wave[4][8] */
+        (uint32_t)(s_wave_data[4][9]), /* wave[4][9] */
+        (uint32_t)(s_wave_data[4][10]), /* wave[4][10] */
+        (uint32_t)(s_wave_data[4][11]), /* wave[4][11] */
+        (uint32_t)(s_wave_data[4][12]), /* wave[4][12] */
+        (uint32_t)(s_wave_data[4][13]), /* wave[4][13] */
+        (uint32_t)(s_wave_data[4][14]), /* wave[4][14] */
+        (uint32_t)(s_wave_data[4][15]), /* wave[4][15] */
+        (uint32_t)(s_wave_data[4][16]), /* wave[4][16] */
+        (uint32_t)(s_wave_data[4][17]), /* wave[4][17] */
+        (uint32_t)(s_wave_data[4][18]), /* wave[4][18] */
+        (uint32_t)(s_wave_data[4][19]), /* wave[4][19] */
+        (uint32_t)(s_wave_data[4][20]), /* wave[4][20] */
+        (uint32_t)(s_wave_data[4][21]), /* wave[4][21] */
+        (uint32_t)(s_wave_data[4][22]), /* wave[4][22] */
+        (uint32_t)(s_wave_data[4][23]), /* wave[4][23] */
+        (uint32_t)(s_wave_data[4][24]), /* wave[4][24] */
+        (uint32_t)(s_wave_data[4][25]), /* wave[4][25] */
+        (uint32_t)(s_wave_data[4][26]), /* wave[4][26] */
+        (uint32_t)(s_wave_data[4][27]), /* wave[4][27] */
+        (uint32_t)(s_wave_data[4][28]), /* wave[4][28] */
+        (uint32_t)(s_wave_data[4][29]), /* wave[4][29] */
+        (uint32_t)(s_wave_data[4][30]), /* wave[4][30] */
+        (uint32_t)(s_wave_data[4][31]), /* wave[4][31] */
+        (uint32_t)(s_mod_data[0]), /* mod[0] */
+        (uint32_t)(s_mod_data[1]), /* mod[1] */
+        (uint32_t)(s_mod_data[2]), /* mod[2] */
+        (uint32_t)(s_mod_data[3]), /* mod[3] */
+        (uint32_t)(s_mod_data[4]), /* mod[4] */
+        (uint32_t)(s_mod_data[5]), /* mod[5] */
+        (uint32_t)(s_mod_data[6]), /* mod[6] */
+        (uint32_t)(s_mod_data[7]), /* mod[7] */
+        (uint32_t)(s_mod_data[8]), /* mod[8] */
+        (uint32_t)(s_mod_data[9]), /* mod[9] */
+        (uint32_t)(s_mod_data[10]), /* mod[10] */
+        (uint32_t)(s_mod_data[11]), /* mod[11] */
+        (uint32_t)(s_mod_data[12]), /* mod[12] */
+        (uint32_t)(s_mod_data[13]), /* mod[13] */
+        (uint32_t)(s_mod_data[14]), /* mod[14] */
+        (uint32_t)(s_mod_data[15]), /* mod[15] */
+        (uint32_t)(s_mod_data[16]), /* mod[16] */
+        (uint32_t)(s_mod_data[17]), /* mod[17] */
+        (uint32_t)(s_mod_data[18]), /* mod[18] */
+        (uint32_t)(s_mod_data[19]), /* mod[19] */
+        (uint32_t)(s_mod_data[20]), /* mod[20] */
+        (uint32_t)(s_mod_data[21]), /* mod[21] */
+        (uint32_t)(s_mod_data[22]), /* mod[22] */
+        (uint32_t)(s_mod_data[23]), /* mod[23] */
+        (uint32_t)(s_mod_data[24]), /* mod[24] */
+        (uint32_t)(s_mod_data[25]), /* mod[25] */
+        (uint32_t)(s_mod_data[26]), /* mod[26] */
+        (uint32_t)(s_mod_data[27]), /* mod[27] */
+        (uint32_t)(s_mod_data[28]), /* mod[28] */
+        (uint32_t)(s_mod_data[29]), /* mod[29] */
+        (uint32_t)(s_mod_data[30]), /* mod[30] */
+        (uint32_t)(s_mod_data[31]), /* mod[31] */
+        (uint32_t)(s_last_output[0][0]), /* last_output[0][0] */
+        (uint32_t)(s_last_output[0][1]), /* last_output[0][1] */
+        (uint32_t)(s_last_output[1][0]), /* last_output[1][0] */
+        (uint32_t)(s_last_output[1][1]), /* last_output[1][1] */
+        (uint32_t)(s_last_output[2][0]), /* last_output[2][0] */
+        (uint32_t)(s_last_output[2][1]), /* last_output[2][1] */
+        (uint32_t)(s_last_output[3][0]), /* last_output[3][0] */
+        (uint32_t)(s_last_output[3][1]), /* last_output[3][1] */
+        (uint32_t)(s_last_output[4][0]), /* last_output[4][0] */
+        (uint32_t)(s_last_output[4][1]), /* last_output[4][1] */
+        (uint32_t)(s_last_output[5][0]), /* last_output[5][0] */
+        (uint32_t)(s_last_output[5][1]), /* last_output[5][1] */
+    };
+    unsigned n=sizeof(words)/sizeof(words[0]);
+    for(unsigned i=0;i<n;++i) out[i]=words[i];
+    return n;
+}
+#endif

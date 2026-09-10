@@ -32,6 +32,12 @@ extern "C" {
 /* Returns 0 on success, non-zero on failure (file missing, too small, etc.). */
 int vb_memory_init(const char* rom_path);
 void vb_memory_shutdown(void);
+struct CPUState;
+void vb_memory_set_cpu(struct CPUState* cpu);
+void vb_devices_sync(uint64_t cycle);
+void vb_devices_end_frame(uint64_t cycle);
+uint64_t vb_memory_access_cycle(void);
+int32_t vb_devices_cycles_to_next_event(uint64_t cycle);
 
 uint8_t  vb_read8 (uint32_t addr);
 uint16_t vb_read16(uint32_t addr);
@@ -49,6 +55,7 @@ size_t   vb_memory_dump(uint32_t addr, uint8_t* out, size_t len);
 uint32_t vb_rom_size(void);
 const uint8_t* vb_rom_data(void);
 const uint8_t* vb_wram_data(void);
+uint8_t* vb_cart_ram_data(void);
 
 /* Axis-6 WRAM fidelity ring: 64 regions of 1 KiB over the 64 KiB WRAM. */
 #define VB_WRAM_FNV_REGIONS      64

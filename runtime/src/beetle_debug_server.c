@@ -1,3 +1,5 @@
+#define VB_ORACLE_DEVICES 1
+#include "device_debug.h"
 /* beetle_debug_server.c — TCP/JSON debug server for vb-beetle.exe.
  *
  * Mirrors the wire protocol of `runtime/src/debug_server.c` (the
@@ -60,11 +62,29 @@
 #endif
 
 
+#include "debug_stream.h"
+
 static sock_t s_listener = VBB_BAD_SOCKET;
 static sock_t s_client   = VBB_BAD_SOCKET;
 static int    s_paused      = 0;
 static int    s_quit        = 0;
 static int    s_winsock_inited = 0;
+static uint32_t s_step_target = 0;
+static int s_input_override;
+int vb_beetle_debug_input_override(void) { return s_input_override; }
+
+void vb_beetle_debug_set_paused(int paused) {
+    s_paused = paused != 0;
+    s_step_target = 0;
+}
+int vb_beetle_debug_is_paused(void) {
+    if (s_step_target && vb_beetle_frame_count() >= s_step_target) {
+        s_paused = 1;
+        s_step_target = 0;
+    }
+    return s_paused;
+}
+int vb_beetle_debug_should_quit(void) { return s_quit && !vb_stream.size; }
 
 
 static int set_nonblocking(sock_t s) {
@@ -175,24 +195,15 @@ static int extract_int(const char* line, const char* key, long long* out) {
     return 1;
 }
 
-static void send_all(const char* data, size_t n) {
-    size_t off = 0;
-    while (off < n) {
-        int sent = send(s_client, data + off, (int)(n - off), 0);
-        if (sent <= 0) return;   /* socket error/closed — drop the rest */
-        off += (size_t)sent;
-    }
-}
-
+static long long s_request_id;
 static void send_response(const char* body) {
-    if (s_client == VBB_BAD_SOCKET) return;
-    /* Loop until the whole body is flushed: a single send() can transmit
-     * fewer bytes than requested, which would silently truncate large
-     * dumps (e.g. the audio_pcm ring window). */
-    send_all(body, strlen(body));
-    send_all("\n", 1);
+    if(body[0]=='{' && !strstr(body,"\"id\":")) {
+        size_t size=strlen(body)+64;char* reply=(char*)malloc(size);
+        if(!reply) { vb_stream.failed=1;return; }
+        snprintf(reply,size,"{\"id\":%lld,%s",s_request_id,body+1);
+        vb_stream_queue(reply);free(reply);
+    } else vb_stream_queue(body);
 }
-
 
 /* ---- Handlers ---- */
 
@@ -217,7 +228,7 @@ static void handle_pad_state(long long id) {
     char buf[160];
     snprintf(buf, sizeof(buf),
         "{\"ok\":true,\"cmd\":\"pad_state\",\"id\":%lld,\"pad\":\"0x%04X\"}",
-        id, vb_beetle_get_pad());
+        id, (((unsigned)~vb_beetle_get_pad() << 2) & 0xfffc) | 2u);
     send_response(buf);
 }
 
@@ -246,15 +257,17 @@ static void handle_read_ram(long long id, const char* line) {
     long long addr = 0, len = 16;
     extract_int(line, "\"addr\"", &addr);
     extract_int(line, "\"len\"", &len);
-    if (len < 1) len = 1;
-    if (len > 4096) len = 4096;
+    if (addr<0 || addr>UINT32_MAX || len<1 || len>65536 ||
+        (uint64_t)addr+(uint64_t)len>0x100000000ull) {
+        send_response("{\"ok\":false,\"error\":\"invalid read range\"}");return;
+    }
     uint8_t* tmp = (uint8_t*)malloc((size_t)len);
     if (!tmp) {
         send_response("{\"ok\":false,\"error\":\"oom\"}");
         return;
     }
     size_t filled = vb_beetle_read_memory((uint32_t)addr, tmp, (size_t)len);
-    char* body = (char*)malloc(96 + (size_t)len * 2);
+    char* body = (char*)malloc(256 + (size_t)len * 2);
     if (!body) {
         free(tmp);
         send_response("{\"ok\":false,\"error\":\"oom\"}");
@@ -272,30 +285,27 @@ static void handle_read_ram(long long id, const char* line) {
     free(tmp);
 }
 
+extern int vb_beetle_cpu_state(uint32_t*, uint32_t*, uint32_t*);
 static void handle_get_registers(long long id) {
-    /* mednafen-vb keeps the V810 register file inside a static C++
-     * object — there is no extern accessor. Surface this as a
-     * structured error so the user/tool knows the gap is real, not a
-     * malformed response. A future upstream patch (tracked the
-     * recompiler-patches way: project-side .patch, applied at cmake
-     * configure time) can fill this in when a phase needs it. */
-    char buf[256];
-    snprintf(buf, sizeof(buf),
-        "{\"ok\":false,\"id\":%lld,\"cmd\":\"get_registers\","
-        "\"error\":\"V810 register file not exposed by mednafen-vb; "
-        "requires upstream patch\"}",
-        id);
-    send_response(buf);
+    uint32_t pc, gpr[32], sr[32];
+    if (!vb_beetle_cpu_state(&pc,gpr,sr)) { send_response("{\"ok\":false,\"error\":\"no CPU\"}"); return; }
+    char body[1400];
+    int used=snprintf(body,sizeof(body),"{\"ok\":true,\"id\":%lld,\"pc\":\"0x%08X\",\"psw\":\"0x%08X\",\"gpr\":[",id,pc,sr[5]);
+    for(int i=0;i<32;++i) used+=snprintf(body+used,sizeof(body)-used,"%s\"0x%08X\"",i?",":"",gpr[i]);
+    snprintf(body+used,sizeof(body)-used,"],\"eipc\":\"0x%08X\",\"eipsw\":\"0x%08X\",\"fepc\":\"0x%08X\",\"fepsw\":\"0x%08X\",\"ecr\":\"0x%08X\",\"frame\":%u}",sr[0],sr[1],sr[2],sr[3],sr[4],vb_beetle_frame_count());
+    send_response(body);
 }
 
 static void handle_screenshot(long long id, const char* line) {
     char path[256] = {0};
+    long long eye=0;
+    extract_int(line,"\"eye\"",&eye);
     extract_str(line, "\"path\"", path, sizeof(path));
     if (!path[0]) snprintf(path, sizeof(path), "vb-beetle-fb.png");
 
     const uint32_t* pixels = NULL;
     unsigned w = 0, h = 0;
-    int have = vb_beetle_get_framebuffer(&pixels, &w, &h);
+    int have = vb_beetle_get_eye((int)eye,&pixels, &w, &h);
     if (!have || !pixels || !w || !h) {
         char body[256];
         snprintf(body, sizeof(body),
@@ -536,7 +546,7 @@ static void handle_wram_hash(long long id, const char* line) {
 }
 
 static void handle_pause(long long id, int state) {
-    s_paused = state;
+    vb_beetle_debug_set_paused(state);
     char buf[128];
     snprintf(buf, sizeof(buf),
         "{\"ok\":true,\"cmd\":\"%s\",\"id\":%lld,\"paused\":%s}",
@@ -570,6 +580,7 @@ static void dispatch_line(char* line) {
     char cmd[64] = {0};
     long long id = 0;
     extract_int(line, "\"id\"", &id);
+    s_request_id=id;
 
     char* nl = strpbrk(line, "\r\n");
     if (nl) *nl = 0;
@@ -594,9 +605,21 @@ static void dispatch_line(char* line) {
         return;
     }
 
-    if      (strcmp(cmd, "ping") == 0)         handle_ping(id);
+    if (strcmp(cmd, "device_state") == 0) { char body[16384]; vb_device_response(body,sizeof(body)); send_response(body); }
+    else if (strcmp(cmd, "capabilities") == 0) { send_response("{\"ok\":true,\"protocol\":2,\"commands\":[\"device_state\",\"audio_pcm\",\"capabilities\",\"clear_input\",\"continue\",\"cpuhook\",\"frame\",\"get_registers\",\"memory_map\",\"pad_state\",\"pause\",\"ping\",\"quit\",\"read_ram\",\"run_frames\",\"screenshot\",\"set_input\",\"vip_phase\",\"vip_state\",\"wram_hash\",\"write_ram\"],\"max_read_bytes\":65536,\"instruction_control\":false,\"trace_version\":2}"); }
+    else if (strcmp(cmd, "ping") == 0)         handle_ping(id);
     else if (strcmp(cmd, "frame") == 0)        handle_frame(id);
     else if (strcmp(cmd, "pad_state") == 0)    handle_pad_state(id);
+    else if (strcmp(cmd, "write_ram") == 0) {
+        extern int vb_beetle_write_ram(uint32_t,uint8_t);
+        long long addr=-1,value=-1;
+        extract_int(line,"\"addr\"",&addr);extract_int(line,"\"val\"",&value);
+        if(!vb_beetle_debug_is_paused() || addr<0 || addr>UINT32_MAX || value<0 || value>255 || !vb_beetle_write_ram((uint32_t)addr,(uint8_t)value)) {
+            send_response("{\"ok\":false,\"error\":\"write_ram needs paused CPU, WRAM/SRAM address and byte val\"}");
+        } else {
+            char result[128];snprintf(result,sizeof(result),"{\"ok\":true,\"id\":%lld}",id);send_response(result);
+        }
+    }
     else if (strcmp(cmd, "read_ram") == 0)     handle_read_ram(id, line);
     else if (strcmp(cmd, "memory_map") == 0)   handle_memory_map(id);
     else if (strcmp(cmd, "get_registers") == 0)handle_get_registers(id);
@@ -606,6 +629,35 @@ static void dispatch_line(char* line) {
     else if (strcmp(cmd, "vip_phase") == 0)    handle_vip_phase(id, line);
     else if (strcmp(cmd, "wram_hash") == 0)    handle_wram_hash(id, line);
     else if (strcmp(cmd, "screenshot") == 0)   handle_screenshot(id, line);
+    else if (strcmp(cmd, "run_frames") == 0) {
+        long long frames = 1;
+        extract_int(line, "\"frames\"", &frames);
+        if (frames < 1 || frames > 10000 ||
+            (uint64_t)vb_beetle_frame_count() + frames > UINT32_MAX) {
+            send_response("{\"ok\":false,\"error\":\"invalid frame count\"}");
+        } else {
+            s_step_target = vb_beetle_frame_count() + (uint32_t)frames;
+            s_paused = 0;
+            char result[128];
+            snprintf(result, sizeof(result), "{\"ok\":true,\"id\":%lld,\"target\":%u}", id, s_step_target);
+            send_response(result);
+        }
+    }
+    else if (strcmp(cmd, "set_input") == 0 || strcmp(cmd, "clear_input") == 0) {
+        long long mask = 0;
+        if (!extract_int(line, "\"pad\"", &mask)) extract_int(line, "\"mask\"", &mask);
+        if (!strcmp(cmd, "clear_input")) mask = 0;
+        if (mask < 0 || mask > 65535) {
+            send_response("{\"ok\":false,\"error\":\"invalid input mask\"}");
+        } else {
+            /* Public protocol uses pressed bits; the libretro adapter is active-low. */
+            vb_beetle_set_pad((uint16_t)~((uint32_t)mask >> 2));
+            s_input_override=strcmp(cmd,"clear_input")!=0;
+            char result[128];
+            snprintf(result, sizeof(result), "{\"ok\":true,\"id\":%lld,\"mask\":%u}", id, (unsigned)mask);
+            send_response(result);
+        }
+    }
     else if (strcmp(cmd, "pause") == 0)        handle_pause(id, 1);
     else if (strcmp(cmd, "continue") == 0)     handle_pause(id, 0);
     else if (strcmp(cmd, "quit") == 0)         handle_quit(id);
@@ -621,33 +673,14 @@ void vb_beetle_debug_server_poll(void) {
         if (c != VBB_BAD_SOCKET) {
             set_nonblocking(c);
             s_client = c;
+            vb_stream_reset();
         }
     }
-    if (s_client != VBB_BAD_SOCKET) {
-        char line[8192];
-        int n = recv(s_client, line, (int)sizeof(line) - 1, 0);
-        if (n > 0) {
-            line[n] = 0;
-            char* p = line;
-            while (p && *p) {
-                char* nl = strpbrk(p, "\r\n");
-                if (nl) { *nl = 0; dispatch_line(p); p = nl + 1; }
-                else    { dispatch_line(p); break; }
-            }
-        } else if (n == 0) {
-            vbb_close_socket(s_client); s_client = VBB_BAD_SOCKET;
-        } else {
-            int e = vbb_socket_errno();
-            if (e != VBB_EWOULDBLOCK
-#if !defined(_WIN32)
-                && e != EAGAIN
-#endif
-            ) {
-                vbb_close_socket(s_client); s_client = VBB_BAD_SOCKET;
-            }
-        }
+    if (s_client != VBB_BAD_SOCKET && !vb_stream_poll(s_client, dispatch_line)) {
+        vbb_close_socket(s_client); s_client = VBB_BAD_SOCKET;
+        vb_stream_reset();
     }
-    if (s_quit) {
+    if (s_quit && vb_stream.size == 0) {
         /* clean shutdown driven from main loop */
         vb_beetle_debug_server_stop();
     }

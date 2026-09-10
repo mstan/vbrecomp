@@ -19,18 +19,10 @@ Architecture Manual numbers ARE documented in-tree
 ALU = 1, MUL = 13, DIV = 38, branch-taken = 3. The oracle additionally
 splits DIVU = 36 (manual gives a single "divide = 38").
 
-These are BASE costs. The oracle also models, and this first cut does
-NOT yet model (tracked refinement — measure the residual with
-`cyc_watch` before adding):
-  * load/store pipeline pairing — `lastop` +1 same-class / +2 otherwise
-    (v810_oploop.inc:565-692). Effective standalone load ~3, not 1.
-  * 16-bit-bus split penalties on LD.W/ST.W/IN.W (v810_oploop.inc:632-689).
-  * FP ops are charged a flat 1 by the oracle (`:892`) though real FP is
-    multi-cycle — the oracle does not model FP timing, so neither do we.
-The manual vs oracle load discrepancy (manual "load = 4 cache miss" vs
-oracle base 1 + pairing) is deliberately resolved toward the oracle here
-because the oracle is the runtime Delta reference; revisit if `cyc_watch`
-shows loads dominate the residual.
+These are BASE costs. runtime/include/v810_interpreter.h adds load/store
+pipeline pairing and 16-bit bus penalties, retaining pipeline state across
+native/interpreter boundaries. runtime/src/v810_extended.c adds FP and bitstring
+costs. Device time is synchronized at MMIO accesses and scheduler boundaries.
 
 Each V810 6-bit primary opcode maps to exactly one op (Format I 0x00-0x0F,
 II 0x10-0x1F, Bcond 0x20-0x27, IV/V 0x28-0x2F, VI 0x30-0x3F, plus BSU at
@@ -98,7 +90,7 @@ _BASE_CYCLES: dict[int, int] = {
     0x2E: 1,   # XORI  :547
     0x2F: 1,   # MOVHI :554
     # ---- Format VI (load/store/IN/OUT, 4 bytes) — :560-783,936 ----
-    0x30: 1,   # LD.B  :560  (base; pairing deferred)
+    0x30: 1,   # LD.B  :560  (base; runtime adds pairing)
     0x31: 1,   # LD.H  :583
     0x33: 1,   # LD.W  :604
     0x34: 1,   # ST.B  :645
@@ -110,7 +102,7 @@ _BASE_CYCLES: dict[int, int] = {
     0x3B: 3,   # IN.W  :719
     0x3C: 1,   # OUT.B :735
     0x3D: 1,   # OUT.H :748
-    0x3E: 1,   # FPP   :892  (oracle flat 1; FP timing not modeled)
+    0x3E: 1,   # FPP   :892  (base 1; extension helper adds subop cost)
     0x3F: 1,   # OUT.W :761
 }
 

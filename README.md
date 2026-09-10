@@ -7,6 +7,11 @@ oracle harness.
 
 V810 cartridge ROM → C → native executable.
 
+Generated code is the default execution path. A V810 interpreter handles
+uncompiled ROM entry points and RAM code, then resumes native dispatch.
+Independent cosimulation, deterministic TCP control, trace comparison and
+save persistence are described in [development parity](docs/PARITY.md).
+
 This repo holds the **framework**: the Python recompiler, the C/C++
 runtime skeleton, the TCP debug server, the always-on ring buffers
 (wtrace / fntrace / frame ring), the VIP / VSU / IRQ / timer hardware
@@ -72,9 +77,10 @@ cmake --build build --target vb-runtime
 python tools/_ping.py --port 4390
 ```
 
-This produces a `vb-runtime` linked against `no_game_linked.c` — the
-runtime starts, the TCP debug server responds, but no cart code is
-present. Use this to develop the runtime / recompiler in isolation.
+This produces a generic `vb-runtime` linked against `no_game_linked.c`.
+Pass `--rom <cartridge>` to execute entirely through the interpreter; the TCP
+server supports runtime development without generated game code. Game hosts
+link generated dispatch and use hybrid execution by default.
 
 ## Build with a game
 

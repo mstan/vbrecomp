@@ -30,7 +30,7 @@ void vb_ring_frame_record(const CPUState* cpu) {
     slot->frame_idx = cpu->frame;
     slot->pc = cpu->pc;
     memcpy(slot->gpr_snapshot, cpu->gpr, sizeof(slot->gpr_snapshot));
-    slot->sysreg_psw = cpu->sysreg[VB_SR_PSW];
+    slot->sysreg_psw = vb_psw_pack(cpu);
     s_seq++;
 }
 

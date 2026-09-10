@@ -16,6 +16,7 @@ from recompiler.v810.analysis import (
     build_cfg,
     cfg_walk_from_seeds,
     discover_functions,
+    scan_rom_for_function_pointers,
     trace_reset_trampoline,
 )
 
@@ -352,6 +353,34 @@ class TestBuildCFG(unittest.TestCase):
                            if b.start_pc == 0x07000020)
         succ_starts = {cfg.blocks[s].start_pc for s in entry_block.succ}
         self.assertEqual(succ_starts, {0x07000022, 0x07000024})
+
+
+class TestCartridgeCoverage(unittest.TestCase):
+    def test_one_megabyte_high_mirror_pointer_table(self):
+        data = bytearray(b'\xff' * 0x100000)
+        targets = [0xfff00100, 0xfff00200, 0xfff00300, 0xfff00400]
+        for index, target in enumerate(targets):
+            data[0x800 + index * 4:0x804 + index * 4] = target.to_bytes(4, 'little')
+            data[target & 0xfffff:(target & 0xfffff) + 2] = _halt()
+        found = scan_rom_for_function_pointers(RomImage(bytes(data), len(data)), set(), set(), table_min_run=4)
+        self.assertEqual(found, set(targets))
+
+    def test_alternate_stream_in_second_instruction_half_is_emitted(self):
+        data = bytearray(b'\xff' * TEST_ROM_SIZE)
+        data[0x20:0x24] = _movhi(1, 0, 0xb400)
+        data[0x24:0x26] = _mov_rr(0, 0)
+        data[0x26:0x28] = _br(-4)
+        image = RomImage(bytes(data), len(data))
+        seed = 0x07000020
+        visited = cfg_walk_from_seeds(image, [seed]).visited
+        self.assertIn(seed + 2, visited)
+        emitted = set()
+        for function in discover_functions(image, extra_seeds=[seed]):
+            pc = function.start_pc
+            while pc < function.end_pc:
+                emitted.add(pc)
+                pc += image.decode_at_va(pc).size
+        self.assertTrue(set(visited).issubset(emitted))
 
 
 if __name__ == "__main__":

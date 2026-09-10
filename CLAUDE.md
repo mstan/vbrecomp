@@ -15,11 +15,13 @@ vbrecomp implements **static V810-to-C recompilation** of the cartridge
 ROM, producing native C that links into the runtime as real compiled
 functions.
 
-There is **no V810 interpreter** in this project. Not as a fallback.
-Not as a "temporary" measure. Not for "code we couldn't recompile yet".
-If a function in the cartridge ROM cannot be recompiled, the recompiler
-is wrong and must be fixed. The interpreter does not exist. Do not
-write one.
+The default runtime combines generated native ROM code with a V810 interpreter
+fallback for uncompiled entry points and RAM code. This architecture was
+explicitly requested for the Zero Racers parity effort. Both paths share the
+live CPU and bus, preserve return addresses across yields, and expose execution
+counters. Native-only mode diagnoses coverage gaps; interpreter-only mode is a
+separate validation path. Fix discovery and emitter bugs when found; fallback
+must execute guest instructions, never synthesize a game's result.
 
 There is **no HLE layer**. No `bios.c` synthesising what a routine
 "would have produced". No C reimplementations of game functions. The
@@ -136,8 +138,9 @@ At the start of every session, before any code change:
    concrete milestone is.
 3. Verify `docs/HARDWARE_NOTES.md` and `docs/INSTRUCTION_STATUS.md`
    exist.
-4. State out loud: "Static recomp. No interpreter. No HLE. No stubs.
-   Homebrew first. Mario's Tennis only at Phase 5."
+4. Confirm the active architecture: generated native code with interpreter
+   fallback, no HLE, no fabricated guest behavior. Use the active integration
+   title and Mario's Tennis regression coverage.
 
 If any of these fail, do not proceed with the user's task — surface
 the failure first.
@@ -287,16 +290,12 @@ thousands of lines of HLE shims.
 
 ---
 
-## 16. Self-modifying / install-at-runtime code (monitor; reinstate if needed)
+## 16. Interpreter fallback and generated coverage
 
-V810 mainstream games are not known to install dispatch code at
-runtime the way the PSX BIOS does. If a game we target turns out to
-do this (e.g. a game with a software-loaded mini-VM, or a custom
-decompressor that JITs into WRAM), the response is to add a
-small interpreter that runs only against PCs in pages written-since-
-boot — mirroring `psxrecomp` Rule 18. The interpreter is NOT a
-fallback for static code we failed to translate.
-
-Until we have a concrete game that needs this, **do not pre-emptively
-build it.** Pre-built interpreters become safety blankets and erode
-the no-interpreter rule.
+Zero Racers established the user-requested hybrid execution architecture.
+The interpreter executes RAM code and ROM entry points absent from the exact
+generated dispatch table. Both paths share live CPU and device state and can
+return to one another. Keep fallback counters visible through TCP; use them
+to identify discovery gaps. Fallback does not excuse incorrect generated code.
+Validate against the independent Beetle core, including interpreter-only and
+native/interpreter transition tests. See `docs/PARITY.md`.

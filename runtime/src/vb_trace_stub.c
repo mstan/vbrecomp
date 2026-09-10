@@ -52,4 +52,5 @@ int  vb_debug_server_start(int port, CPUState* cpu) { (void)port; (void)cpu; ret
 void vb_debug_server_stop(void) {}
 int  vb_debug_server_poll(void) { return 0; }  /* 0 = keep running, never quits via TCP */
 int vb_debug_server_is_paused(void) { return 0; }
+int vb_debug_server_input_override(void) { return 0; }
 void vb_debug_server_set_paused(int paused) { (void)paused; }

@@ -1,192 +1,58 @@
-# TCP.md — Debug Server Protocol (vbrecomp)
+# Virtual Boy debugger protocol
 
-The TCP debug server is the ONLY sanctioned debugging interface for
-vbrecomp. If a piece of state isn't observable over TCP, extend
-`runtime/src/debug_server.c` — do not work around it with printf.
+Listeners bind to localhost, one client per process: runtime port 4390 and
+Beetle port 4391, overridden by `--port`. Start with `--paused` for deterministic
+control. Build with `VBRECOMP_DEBUG_TOOLS=ON`; per-instruction history also needs
+`VBRECOMP_CPUHOOK=ON`. Production builds can omit both.
 
-Adapted from `recomp-template/NES/TCP.md` with V810 / VB specifics.
+Send one JSON object per LF-terminated line (CRLF accepted). Fragmented and
+coalesced TCP packets are supported. Integer `id` values are echoed, including
+errors. Responses are single JSON lines with `ok`. Use forward slashes in paths.
+Requests are limited to 8191 bytes; pending replies are bounded to 64MiB and
+handle partial sends. Slow readers apply backpressure. An oversized request or
+exhausted output queue disconnects that client without stopping the game.
 
----
+`python tools/debug_client.py --port 4390 capabilities` reports the executable's
+implemented commands. The client maintains a connection and accepts any command:
 
-# RING BUFFER (CRITICAL)
-
-The always-on surface records a full state snapshot every frame into a
-**36,000-entry ring buffer** (~12 minutes at 50.27 Hz, the Virtual
-Boy's native frame rate).
-
-Each frame record contains:
-- CPU registers (32 GPRs, PC, PSW exploded flags, system registers)
-- VIP state (XPSTTS, DPSTTS, INTPND, INTENB, brightness, column tables)
-- VSU state (channel enables, waveform pointers, envelopes)
-- Pad state (16-bit register, last press/release events)
-- Interrupt controller state (pending mask, in-service mask)
-- Timer state (TLR, THR, TCR, TIH)
-- Last executed function name
-- Game-specific data (32 bytes, filled by game hook)
-
-All retroactive inspection commands read from this buffer. If you
-cannot answer a question from live state, query the history.
-
----
-
-# PORTS
-
-| Process              | Port  | Configurable via |
-|----------------------|-------|------------------|
-| `vb-runtime.exe`     | 4390  | `debug.ini` `runtime.debug_port` or `--port N` |
-| `vb-beetle.exe`      | 4391  | `debug.ini` `oracle.debug_port` or `--port N` |
-
-Default `127.0.0.1`. One client at a time.
-
----
-
-# TRANSPORT
-
-- TCP localhost
-- Line-based; one command per line terminated by `\n`
-- JSON request preferred: `{"cmd":"read_ram","addr":"0x05000000","len":32,"id":7}`
-- Bare request accepted for the simplest commands: `ping\n`
-- Single-line JSON response: `{"ok":true,...}` or `{"ok":false,"error":"..."}`
-- `id` echoed when supplied
-- Max command line: 8192 bytes
-
----
-
-# COMMAND SURFACE
-
-## Monitoring & Inspection
-
-```
-ping                    frame                 quit
-get_registers           read_ram              dump_ram             write_ram
-vip_state               vsu_state             irq_state            pad_state
-psw_state               timer_state           screenshot
-# vip_state: runtime returns full state (INT*/D*CTRL/D*STTS/X*/BRT*/
-#            FRMCYC/BKCOL/SPT/GPLT/JPLT + column/region/drawing/cycles).
-#            Oracle (vb-beetle) returns the writable-register subset
-#            exposed by mednafen's VIP_GetRegister; internal state-
-#            machine vars require a beetle-vb patch.
-opcode_coverage         function_listing      memory_map
+```text
+python tools/debug_client.py get_registers
+python tools/debug_client.py read_ram addr=0x05000000 len=65536
+python tools/debug_client.py step count=1
+python tools/debug_client.py breakpoint pc=0xFFFFFFF8
+python tools/debug_client.py breakpoint pc=-1
 ```
 
-## Cross-process tooling (Python)
+| Command | Arguments and behavior |
+|---|---|
+| `pause`, `continue`, `quit` | Acknowledged control; quit drains pending replies. |
+| `run_frames` | `frames=1..10000`; returns absolute `target`. Poll `frame` until target; then CPU stays paused. |
+| `get_registers` | PC, all GPRs, packed PSW, exception registers, frame. Runtime also reports cycles. |
+| `step` | Runtime only, paused non-halted CPU, `count=1..1000000`; stops after count or on HALT/breakpoint. Poll `execution_stats.stopped`. |
+| `breakpoint` | Runtime only, one even `pc`; `-1` clears. Resume skips a breakpoint at the current PC once. |
+| `execution_stats` | Runtime only: mode, native entries/instructions, interpreted/fallback counts, first/last fallback PC, stopped state. |
+| `set_input`, `clear_input` | `pad` or `mask` uses pressed hardware bits. A=4, Start=4096; a TCP override remains active in a window until `clear_input`; `pad_state` also includes connected bit 2. |
+| `read_ram` | `addr`, `len=1..65536`. Hex bytes. Runtime rejects unmapped ranges. Oracle exposes VIP RAM, WRAM, SRAM, ROM; inspect `filled` for unsupported regions. |
+| `write_ram` | Paused WRAM/SRAM byte write: `addr`, `val=0..255`. |
+| `screenshot` | `path`, `eye=0|1`, native framebuffer by default. Runtime supports presentation/UI capture through existing capture options. |
+| `device_state` | Canonical timer, controller, VIP and VSU counters/registers/tables; schema 1 in `tools/device_schema.json`. |
+| `cpuhook` | `start`, `max=1..65536`; absolute history window, explicit `head`, `resident_lo`, `begin`, `returned`. |
+| `history`, `get_frame` | Runtime: `start`, `count=1..256`; frame records containing PC, PSW and 32 GPRs. |
 
-```
-tools/_wtrace_summary.py     — paginated drain of wtrace + histograms by
-                               4 KB target page and source PC
-tools/_wram_diff.py          — byte-level WRAM diff between vb-runtime
-                               (4390) and vb-beetle (4391); paginated reads
-```
+CPU history retains the last 8,388,608 boundaries (192MiB), including IRQ entry
+checks. Each little-endian 24-byte record is `<IIIIQ`: PC, PSW, FNV-1a of r1..r31,
+version=2, cumulative cycle. Records precede instruction execution. History wraps;
+clients must check eviction instead of silently skipping missing records. Frame
+history holds 36,000 records. Separate write, function, VIP phase, audio and WRAM
+hash rings expose their own windows. A register hash is diagnostic evidence,
+not a byte-level proof of all architectural state.
 
-## State Manipulation (debug/test only)
+Shared commands: `audio_pcm`, `capabilities`, `clear_input`, `continue`, `cpuhook`, `device_state`, `frame`, `get_registers`, `memory_map`, `pad_state`, `pause`, `ping`, `quit`, `read_ram`, `run_frames`, `screenshot`, `set_input`, `vip_phase`, `vip_state`, `wram_hash`, `write_ram`.
 
-```
-psw_set       — overwrite PSW (unpacks into exploded fields)
-                {"cmd":"psw_set","value":"0x00000001"}
-irq_force     — assert or deassert an IRQ source line
-                {"cmd":"irq_force","source":1,"asserted":1}
-                Sources: 0=INPUT 1=TIMER 2=EXPANSION 3=COMM 4=VIP
-```
+Additional runtime commands: `audio_shadow_state`, `breakpoint`, `capture_dump`, `execution_stats`, `fntrace_dump`, `fntrace_reset`, `fntrace_stats`, `get_frame`, `history`, `irq_force`, `irq_state`, `overrides_state`, `press`, `psw_set`, `psw_state`, `recolor_reload`, `recolor_state`, `recolor_trace`, `source_dump`, `step`, `timer_state`, `watchdog`, `world_map`, `world_trace`, `wram_anchors`, `wtrace_dump`, `wtrace_reset`, `wtrace_stats`.
 
-## Ring-Buffer Queries
+The oracle intentionally remains an independent emulator process. Its frontend
+supports frame control and inspection; instruction stepping/breakpoints belong
+to the recomp runtime. No guest state is copied between the two.
 
-```
-history                 get_frame             frame_range          frame_timeseries
-read_frame_ram          restore_frame
-```
-
-## Execution Control
-
-```
-pause                   continue              step                 run_to_frame
-set_input               press                 clear_input
-```
-
-## Comparison & Verification
-
-```
-frame_diff              memory_diff           first_divergence     framebuf_diff
-vip_diff                # tools/_vip_diff.py — cross-process VIP register diff
-```
-
-## wtrace (per-store ring) — ALWAYS-ON
-
-Every store the cart issues (via the recompiled `cpu->writeN` thunks
-into `vb_write{8,16,32}`) is recorded into a 1M-entry circular ring
-from process start. There is no arming. Probes query the ring for
-the seq window of interest. Source PC is sampled from the active
-CPU's pc, which the emitter sets to the current instruction's
-address before each store.
-
-```
-wtrace_stats        — total, capacity, wrapped, oldest_seq, newest_seq
-wtrace_dump         — slice the ring with filters:
-                        addr_min/addr_max   (target address range, exclusive max)
-                        pc_min/pc_max       (source PC range, exclusive max)
-                        from_seq/to_seq     (absolute index window)
-                        tail                (last N seqs before filtering)
-                        limit               (max entries returned; ≤4096)
-                      Each entry: {seq, cycle, pc, addr, value, width, region}
-wtrace_reset        — zero the seq counter (rarely needed)
-```
-
-## fntrace (per-call ring) — ALWAYS-ON
-
-Every recompiled function body records its entry into a 256K-entry
-ring (seq, cycle, pc, lp). Multi-leader functions only record on
-the "fresh call" path (after the leader-routing switch's default
-branch), so yielded resumes do not flood the ring. Single-leader
-functions record every entry; downstream analysis can collapse
-repeat-same-pc runs.
-
-```
-fntrace_stats       — total, capacity, wrapped, oldest_seq, newest_seq
-fntrace_dump        — slice the ring with filters:
-                        pc_min/pc_max       (callee range, exclusive max)
-                        lp_min/lp_max       (caller return-pc range)
-                        from_seq/to_seq
-                        tail / limit
-                      Each entry: {seq, cycle, pc, lp}
-fntrace_reset
-```
-
-## Diagnostics
-
-```
-dispatch_miss_info      watchdog_status       crash_status         freeze_status
-```
-
-## Disassembly (oracle side, used for L1 decoder validation)
-
-```
-disasm                  disasm_range
-```
-
----
-
-# DISPATCH MISSES
-
-Dispatch misses are logged to `dispatch_misses.log` next to the
-executable. This file is the PRIMARY source — check it after EVERY
-runtime run. `dispatch_miss_info` via TCP returns the same data live.
-
-A dispatch miss means `vb_dispatch(addr)` found no generated function.
-The game skips that entire subroutine. This is a SILENT GAME-BREAKING
-BUG.
-
-Resolution: add entries to the game's TOML under `[functions]`,
-regenerate, rebuild.
-
----
-
-# ADDING A NEW COMMAND
-
-1. Add a `handle_xxx` function in `runtime/src/debug_server.c`.
-2. Register it in the `s_commands[]` dispatch table.
-3. Mirror it on the oracle side (`runtime/src/beetle_debug_server.c`)
-   if it inspects emulator-internal state. Use a matching command
-   name so tools can switch ports.
-4. Document it in this file under the right section.
-5. Rebuild the runtime.
-6. **Never** add a side-channel debug log. If TCP can't see it, TCP
-   needs to grow until it can.
+See [PARITY.md](docs/PARITY.md) for the validation workflow.

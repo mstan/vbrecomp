@@ -26,6 +26,7 @@ void vb_debug_server_stop(void);
 int vb_debug_server_poll(void);
 int vb_debug_server_is_paused(void);
 void vb_debug_server_set_paused(int paused);
+int vb_debug_server_input_override(void);
 /* Optional host presentation capture, including UI. Callback returns 0 on success. */
 typedef int (*VbDebugHostCapture)(const char* path, void* context);
 void vb_debug_server_set_host_capture(VbDebugHostCapture capture, void* context);

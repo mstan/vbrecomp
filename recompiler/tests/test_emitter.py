@@ -101,8 +101,8 @@ class TestEmitFunctionShape(unittest.TestCase):
         # outer dispatch_call loop's `cpu->pc == saved_lp` check can
         # detect a clean return.
         callee_body_start = full.index(_fn_symbol(0x07000060))
-        callee_chunk = full[callee_body_start:callee_body_start + 800]
-        self.assertIn("cpu->pc = cpu->gpr[31];", callee_chunk)
+        callee_chunk = full[callee_body_start:full.index("\n}\n", callee_body_start)]
+        self.assertIn("cpu->pc = cpu->gpr[31] & 0xFFFFFFFEu;", callee_chunk)
         self.assertIn("return;", callee_chunk)
 
     def test_dispatch_table_covers_every_function(self):
@@ -115,12 +115,11 @@ class TestEmitFunctionShape(unittest.TestCase):
         img = RomImage.from_bytes(bytes(rom))
         result = recompile_rom(img, module_name="testcart")
         dispatch = result.files["generated/testcart_dispatch.c"]
-        # Each function appears as a range arm in vb_dispatch (range
-        # match supports resume-from-mid-function after a yield).
-        self.assertIn("pc >= 0x07000020u && pc < 0x07000026u", dispatch)
-        self.assertIn("vb_fn_07000020(cpu)", dispatch)
-        self.assertIn("pc >= 0x07000060u && pc < 0x07000064u", dispatch)
-        self.assertIn("vb_fn_07000060(cpu)", dispatch)
+        # Only real instruction boundaries are dispatchable, including
+        # the return address and the callee's second instruction.
+        for pc, entry in [(0x20,0x20),(0x24,0x20),(0x60,0x60),(0x62,0x60)]:
+            self.assertIn(f"{{0x070000{pc:02X}u, vb_fn_070000{entry:02X}}}", dispatch)
+        self.assertNotIn("{0x07000022u,", dispatch)
         # vb_dispatch_call must set up r31 and loop until the callee
         # returns to the caller's expected lp.
         self.assertIn("cpu->gpr[31] = lp;", dispatch)

@@ -927,7 +927,7 @@ def discover_functions(rom: RomImage,
         # its own function entries; the heuristic also surfaces the
         # 0x07/0x0F mirror VAs that alias to the same bytes but
         # aren't used as PCs by cart code.
-        candidates = {v for v in candidates if 0xFFF80000 <= v <= 0xFFFFFFFF}
+        candidates = {v for v in candidates if (0x100000000 - rom.rom_size) <= v <= 0xFFFFFFFF}
         if not candidates:
             break
         accepted: Set[int] = set()
@@ -975,6 +975,22 @@ def discover_functions(rom: RomImage,
             start_pc=start,
             end_pc=end,
         ))
+    # A discovered entry can overlap the second half of a 32-bit instruction.
+    # Bucketing alone then loses the alternate valid instruction stream.
+    # Retain each visited PC that the linear function emit would otherwise skip.
+    emitted = set()
+    for fn in fns:
+        pc = fn.start_pc
+        while pc < fn.end_pc:
+            emitted.add(pc)
+            ins = rom.decode_at_va(pc)
+            if ins is None:
+                break
+            pc += max(ins.size, 2)
+    for pc in sorted(set(walk.visited) - emitted):
+        fns.append(FunctionRange(name=f"fn_{pc:08X}", start_pc=pc,
+                                 end_pc=pc + walk.visited[pc]))
+    fns.sort(key=lambda fn: fn.start_pc)
     return fns
 
 

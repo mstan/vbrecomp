@@ -1,4 +1,4 @@
-# BRINGUP.md — vbrecomp first-time setup
+# BRINGUP.md â€” vbrecomp first-time setup
 
 ## Prerequisites
 
@@ -36,39 +36,25 @@ cmake --build build --target vb-runtime
 python tools/_ping.py --port 4390
 ```
 
-Without `-DVBRECOMP_GAME=<module>`, `vb-runtime` links the no-game stub and
-opens the TCP server. Pass `-DVBRECOMP_GAME=<module>` after generating
+Without `-DVBRECOMP_GAME=<module>`, `vb-runtime` uses the generic interpreter
+host. Pass `--rom <cartridge>` to run it with TCP control. Pass `-DVBRECOMP_GAME=<module>` after generating
 `generated/<module>_full.c`, `_dispatch.c`, and `.h` to run recompiled code.
 
-## Acquiring the Beetle VB oracle (Phase 2+)
+## Acquiring the Beetle VB oracle
 
-From **PowerShell** (MSYS2 bash silently fails to spawn cc1.exe — see
-auto-memory `reference_vbrecomp_build_via_powershell.md`):
+From PowerShell, run the pinned preparation recipe from this framework:
 
 ```powershell
-# One-time PATH prefix for the session
-$env:PATH = "C:\msys64\mingw64\bin;$env:PATH"
-Set-Location F:\Projects\virtualboyrecomp\virtualboyrecomp
-
-# Clone (skip if beetle-vb/ already populated)
-git clone https://github.com/libretro/beetle-vb-libretro.git beetle-vb
-Set-Location beetle-vb
-
-# Build the static archive. `platform=win` or `platform=mingw_x86_64`
-# both work in MSYS2's mingw64 shell.
-& "C:\msys64\mingw64\bin\mingw32-make.exe" platform=win STATIC_LINKING=1 -j8
-
-# Result on Windows: beetle-vb/mednafen_vb_libretro.dll
-#   — despite the `.dll` extension this is a real `ar rcs` archive,
-#     produced by libretro's STATIC_LINKING=1 mode. Verify with
-#     `file mednafen_vb_libretro.dll` → "current ar archive".
-# On Unix the equivalent file is `mednafen_vb_libretro.so`.
+.\tools\prepare-oracle.ps1 -Destination ..\beetle-vb
 ```
 
-The top-level CMake searches multiple candidates
-(`libmednafen_vb.a`, `mednafen_vb_libretro.dll`, `mednafen_vb_libretro.so`)
-and announces the one it found. The `vb-beetle` oracle target is built
-automatically when any of them is present.
+The destination must be new. The script clones the pinned independent Beetle
+revision, applies observation-only diagnostics from `tools/oracle-diagnostics.patch`,
+and builds its static library with native MinGW executables. Override
+`-Toolchain` and `-Git` for non-default installations. Existing checkouts are
+preserved. Configure with `-DBEETLE_VB_ROOT=<absolute oracle directory>` and
+build `vb-beetle`. See [PARITY.md](PARITY.md) for the state schema and comparison
+commands. The core is optional and is not linked into the player executable.
 
 ## Acquiring a ROM
 
@@ -85,22 +71,22 @@ live in the per-game sibling repos).
 
 See `ghidra/README.md` for the third-party SLEIGH module link and
 installation steps. Ghidra is reference-only: labels, xrefs, block
-discovery. **Never** trusted for execution semantics — that's the
+discovery. **Never** trusted for execution semantics â€” that's the
 oracle's job.
 
 ## Troubleshooting
 
-- **"python: command not found"** — ensure Python 3.10+ is on PATH.
+- **"python: command not found"** â€” ensure Python 3.10+ is on PATH.
   `py -3.11 -m unittest discover recompiler/tests` is a fallback on Windows.
-- **`tomllib` ImportError** — on Python 3.10, install the declared project
+- **`tomllib` ImportError** â€” on Python 3.10, install the declared project
   dependencies so the `tomli` compatibility package is available.
-- **CMake can't find SDL2** — the runtime falls back to a TCP-only build.
+- **CMake can't find SDL2** â€” the runtime falls back to a TCP-only build.
   Install SDL2 when a live window or audio output is needed.
-- **`vb_stub_abort` fired on first run** — that's the system working
+- **`vb_stub_abort` fired on first run** â€” that's the system working
   as designed. Read the banner, find the named subsystem (e.g.
   `"unmapped read at 0x02000028"`), and either:
   - Add the missing handler in the relevant `runtime/src/*.c`, OR
   - Fix the recompiler to not emit code that touches the unmapped
     address.
-- **TCP port already in use** — choose another via `--port N` or kill
+- **TCP port already in use** â€” choose another via `--port N` or kill
   the lingering process.

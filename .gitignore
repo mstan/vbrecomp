@@ -43,6 +43,7 @@ beetle-vb/
 dispatch_misses.log
 vb_last_run_report.json
 vb_freeze_dump_*.json
+vb_freeze_heartbeat_*.json
 starvation_dump.jsonl
 *.bmp
 *.png

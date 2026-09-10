@@ -57,6 +57,7 @@ extern "C" {
 
 /* ---- captured state ---- */
 std::vector<uint32_t> s_framebuffer;
+std::vector<uint32_t> s_right_framebuffer;
 unsigned s_fb_w = 0;
 unsigned s_fb_h = 0;
 bool     s_have_frame = false;
@@ -96,14 +97,15 @@ retro_pixel_format s_pixel_fmt = RETRO_PIXEL_FORMAT_XRGB8888;
 
 /* ---- libretro callback impls ---- */
 
+void core_log_noop(enum retro_log_level, const char*, ...) {}
 bool environ_cb(unsigned cmd, void* data) {
     switch (cmd) {
     case RETRO_ENVIRONMENT_GET_LOG_INTERFACE: {
-        /* Beetle uses log_cb if available; we suppress all log output
-         * because our runtime prints exactly one allowed line ever
-         * (the stub_abort banner). Force callers to ignore log
-         * messages by returning false. */
-        return false;
+        /* Core option changes call log_cb unconditionally. Supply a valid
+         * sink while keeping guest diagnostics on the TCP interface. */
+        if (!data) return false;
+        ((retro_log_callback*)data)->log=core_log_noop;
+        return true;
     }
     case RETRO_ENVIRONMENT_SET_PIXEL_FORMAT: {
         if (!data) return false;
@@ -117,8 +119,20 @@ bool environ_cb(unsigned cmd, void* data) {
         return true;
     }
     case RETRO_ENVIRONMENT_GET_VARIABLE: {
-        /* Return "no value set" — Beetle picks defaults for all of
-         * its config knobs (3D mode, color, etc.). */
+        /* Capture both independently rendered eyes. The interactive frontend
+         * continues to show the left eye; TCP can select either eye. */
+        if (data) {
+            auto* variable = (retro_variable*)data;
+            if (!std::strcmp(variable->key, "vb_3dmode")) {
+                variable->value = "side-by-side"; return true;
+            }
+            if (!std::strcmp(variable->key, "vb_sidebyside_separation")) {
+                variable->value = "0"; return true;
+            }
+            if (!std::strcmp(variable->key, "vb_color_mode")) {
+                variable->value = "black & red"; return true;
+            }
+        }
         if (data) ((retro_variable*)data)->value = nullptr;
         return false;
     }
@@ -145,19 +159,22 @@ void video_refresh_cb(const void* data, unsigned width, unsigned height,
          * convention); preserve the prior framebuffer. */
         return;
     }
-    s_fb_w = width;
+    s_fb_w = width / 2;
     s_fb_h = height;
-    s_framebuffer.resize((size_t)width * height);
+    s_framebuffer.resize((size_t)s_fb_w * height);
+    s_right_framebuffer.resize((size_t)s_fb_w * height);
 
     const uint8_t* src = (const uint8_t*)data;
     for (unsigned y = 0; y < height; ++y) {
         const uint32_t* row = (const uint32_t*)(src + y * pitch);
-        uint32_t* dst = s_framebuffer.data() + (size_t)y * width;
-        for (unsigned x = 0; x < width; ++x) {
+        uint32_t* dst = s_framebuffer.data() + (size_t)y * s_fb_w;
+        uint32_t* right = s_right_framebuffer.data() + (size_t)y * s_fb_w;
+        for (unsigned x = 0; x < s_fb_w; ++x) {
             /* Beetle's XRGB8888 alpha byte is undefined — force opaque
              * so an SDL renderer that respects alpha doesn't black
              * the frame. */
             dst[x] = row[x] | 0xFF000000u;
+            right[x] = row[x+s_fb_w] | 0xFF000000u;
         }
     }
     s_have_frame = true;
@@ -297,6 +314,11 @@ int vb_beetle_get_framebuffer(const uint32_t** out_pixels,
     if (out_h)      *out_h      = s_fb_h;
     return 1;
 }
+extern "C" int vb_beetle_get_eye(int eye, const uint32_t** pixels, unsigned* w, unsigned* h) {
+    if ((eye!=0 && eye!=1) || !vb_beetle_get_framebuffer(pixels,w,h)) return 0;
+    if (eye && pixels) *pixels=s_right_framebuffer.data();
+    return 1;
+}
 
 uint16_t vb_beetle_get_pad(void)         { return s_pad; }
 void     vb_beetle_set_pad(uint16_t pad) { s_pad = pad; }
@@ -344,7 +366,11 @@ size_t vb_beetle_read_memory(uint32_t va, uint8_t* out, size_t len) {
         uint8_t* src = nullptr;
         size_t available = 0;
 
-        if (phys >= 0x05000000 && phys < 0x06000000) {
+        if (phys < 0x40000) {
+            extern uint8_t vb_beetle_vram_byte(uint32_t);
+            out[filled++]=vb_beetle_vram_byte(phys);
+            continue;
+        } else if (phys >= 0x05000000 && phys < 0x06000000) {
             /* WRAM — 64 KB mirrored throughout bank 5. */
             void* wram = retro_get_memory_data(RETRO_MEMORY_SYSTEM_RAM);
             size_t wsz = retro_get_memory_size(RETRO_MEMORY_SYSTEM_RAM);
@@ -381,6 +407,17 @@ size_t vb_beetle_read_memory(uint32_t va, uint8_t* out, size_t len) {
         filled += take;
     }
     return filled;
+}
+
+int vb_beetle_write_ram(uint32_t addr, uint8_t value) {
+    unsigned region=(addr>>24)&7;
+    if(region!=5 && region!=6) return 0;
+    unsigned kind=region==5 ? RETRO_MEMORY_SYSTEM_RAM:RETRO_MEMORY_SAVE_RAM;
+    auto ram=(uint8_t*)retro_get_memory_data(kind);
+    size_t size=retro_get_memory_size(kind);
+    if(!ram || !size) return 0;
+    ram[(addr&0xffffff)%size]=value;
+    return 1;
 }
 
 /* VIP state — backed by Beetle's VIP_GetRegister. The mednafen-vb

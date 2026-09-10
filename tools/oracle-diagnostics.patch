@@ -1,0 +1,660 @@
+diff --git a/libretro.cpp b/libretro.cpp
+index bbdcb4f..e117354 100644
+--- a/libretro.cpp
++++ b/libretro.cpp
+@@ -99,6 +99,135 @@ static uint32 GPROM_Mask;
+ 
+ V810 *VB_V810 = NULL;
+ 
++/* ===== vbrecomp: always-on per-instruction CPU-hook ring =============
++ * RB_CPUHOOK (v810_cpu.cpp, both Run_Accurate and Run_Fast) calls
++ * vb_oracle_cpuhook() once per RETIRED guest instruction, recording
++ * {pc, psw, regs-fingerprint, cumulative cycle}. This is the oracle
++ * half of the recomp-vs-oracle first-divergence + cycle-Delta harness
++ * (Axis 1/2/3/6). Observability ONLY — it does not touch emulation
++ * (no timestamp/state writes), so the oracle stays bit-identical.
++ *
++ * The V810's v810_timestamp is FRAME-RELATIVE (RebaseTS/ResetTS each
++ * frame in Emulate()), so we add g_vb_cpuhook_frame_base — the cumulative
++ * cycle total of all prior frames, advanced in Emulate() after Run() —
++ * to recover a monotonic cumulative cycle per instruction. */
++#include <stdint.h>
++typedef struct {
++   uint32_t pc;
++   uint32_t psw;     /* S_REG[PSW] (CY=0x8 OV=0x4 S=0x2 Z=0x1, + ID/EP/NP/...) */
++   uint32_t fnv;     /* FNV-1a over PR1..PR31 (PR0 is hardwired 0) */
++   uint32_t pad;
++   uint64_t cycle;   /* cumulative guest cycle at this instruction */
++} vb_cpuhook_rec;
++
++/* Continuous history with absolute sequence numbers and explicit eviction. */
++#define VB_CPUHOOK_RING (1u << 23)
++static vb_cpuhook_rec s_vb_ch_ring[VB_CPUHOOK_RING];
++static uint64_t       s_vb_ch_total;          /* retired-instr count (caps at RING) */
++uint64_t              g_vb_cpuhook_frame_base; /* cumulative cycles before current frame */
++
++extern "C" void vb_oracle_cpuhook(uint32_t pc, const uint32_t *p_reg,
++                                  uint32_t psw, uint64_t cycle_rel)
++{
++   /* Version 2 includes all writable GPRs, including LP. */
++   uint32_t h = 2166136261u;
++   for (int i = 1; i < 32; ++i) { h = (h ^ p_reg[i]) * 16777619u; }
++   vb_cpuhook_rec *e = &s_vb_ch_ring[s_vb_ch_total & (VB_CPUHOOK_RING-1)];
++   e->pc = pc; e->psw = psw; e->fnv = h; e->pad = 2;
++   e->cycle = g_vb_cpuhook_frame_base + cycle_rel;
++   s_vb_ch_total++;
++}
++
++extern "C" uint64_t vb_oracle_cpuhook_head(void) { return s_vb_ch_total; }
++
++/* Copy up to `max` records starting at absolute seq `from` into `out`
++ * (caller-provided). Clamps `from` up to the oldest still-resident seq
++ * so a lagging consumer sees a gap, never a silent skip. Returns the
++ * count copied; *out_resident_lo gets the oldest readable seq. */
++extern "C" uint32_t vb_oracle_cpuhook_query(uint64_t from, uint32_t max,
++                                            vb_cpuhook_rec *out,
++                                            uint64_t *out_resident_lo)
++{
++   const uint64_t head = s_vb_ch_total;
++   const uint64_t lo = (head > VB_CPUHOOK_RING) ? head - VB_CPUHOOK_RING : 0;
++   if (out_resident_lo) *out_resident_lo = lo;
++   uint64_t cur = from < lo ? lo : from;
++   uint32_t n = 0;
++   while (n < max && cur < head) { out[n++] = s_vb_ch_ring[cur & (VB_CPUHOOK_RING-1)]; cur++; }
++   return n;
++}
++
++/* ---- VIP draw-timing phase ring (Axis-5a phase gate) ----------------
++ * mednafen/vb/vip.c calls vb_oracle_vipphase() at each INTPND-raise
++ * (FRAME_START/GAME_START/XP_END/L|R FB_END) with DPSTTS/XPSTTS computed at
++ * that instant. First-N-from-boot so the boot window never evicts. Record
++ * layout MUST match runtime/include/vip_phase.h (16 bytes). Observability
++ * only — does not change emulation, oracle stays bit-identical. */
++typedef struct {
++   uint64_t seq;
++   uint16_t event, dpstts, xpstts, reserved;
++} vb_vipphase_rec;
++#define VB_VIPPHASE_RING (1u << 16)
++static vb_vipphase_rec s_vb_vp_ring[VB_VIPPHASE_RING];
++static uint64_t        s_vb_vp_total;
++
++/* Axis-6 whole-session fidelity: per-game-frame WRAM fingerprint, hashed at
++ * each GAME_START (1:1-aligned with the recomp via the proven GAME_START
++ * sequence). 64 per-1KiB-region FNV-1a hashes so a single volatile cell does
++ * not avalanche the whole frame. Layout matches runtime/include/wram_hash.h
++ * (264 bytes). */
++#define VB_WRAMHASH_REGIONS 64
++typedef struct { uint64_t seq; uint32_t fnv[VB_WRAMHASH_REGIONS]; } vb_wramhash_rec;
++#define VB_WRAMHASH_RING (1u << 15)
++static vb_wramhash_rec s_vb_wh_ring[VB_WRAMHASH_RING];
++static uint64_t        s_vb_wh_total;
++
++extern "C" void vb_oracle_vipphase(uint16_t event, uint16_t dpstts, uint16_t xpstts)
++{
++   /* WRAM fingerprint at the game-frame boundary (GAME_START = 0x0008). */
++   if (event == 0x0008 && WRAM && s_vb_wh_total < VB_WRAMHASH_RING) {
++      vb_wramhash_rec *w = &s_vb_wh_ring[s_vb_wh_total];
++      w->seq = s_vb_wh_total;
++      for (int r = 0; r < VB_WRAMHASH_REGIONS; ++r) {
++         const uint8_t *p = WRAM + r * 1024;
++         uint32_t h = 2166136261u;
++         for (int i = 0; i < 1024; ++i) { h ^= p[i]; h *= 16777619u; }
++         w->fnv[r] = h;
++      }
++      s_vb_wh_total++;
++   }
++
++   if (s_vb_vp_total >= VB_VIPPHASE_RING) return;   /* frozen: boot window full */
++   vb_vipphase_rec *e = &s_vb_vp_ring[s_vb_vp_total];
++   e->seq = s_vb_vp_total;
++   e->event = event; e->dpstts = dpstts; e->xpstts = xpstts; e->reserved = 0;
++   s_vb_vp_total++;
++}
++extern "C" uint64_t vb_oracle_wramhash_head(void) { return s_vb_wh_total; }
++extern "C" uint32_t vb_oracle_wramhash_query(uint64_t from, uint32_t max,
++                                             vb_wramhash_rec *out,
++                                             uint64_t *out_resident_lo)
++{
++   const uint64_t head = s_vb_wh_total;
++   if (out_resident_lo) *out_resident_lo = 0;   /* first-N never evicts */
++   uint64_t cur = from; uint32_t n = 0;
++   while (n < max && cur < head) { out[n++] = s_vb_wh_ring[cur]; cur++; }
++   return n;
++}
++extern "C" uint64_t vb_oracle_vipphase_head(void) { return s_vb_vp_total; }
++extern "C" uint32_t vb_oracle_vipphase_query(uint64_t from, uint32_t max,
++                                             vb_vipphase_rec *out,
++                                             uint64_t *out_resident_lo)
++{
++   const uint64_t head = s_vb_vp_total;
++   if (out_resident_lo) *out_resident_lo = 0;   /* first-N never evicts */
++   uint64_t cur = from;
++   uint32_t n = 0;
++   while (n < max && cur < head) { out[n++] = s_vb_vp_ring[cur]; cur++; }
++   return n;
++}
++/* ===================================================================== */
++
+ static uint32 VSU_CycleFix;
+ 
+ static uint8 WCR;
+@@ -1938,6 +2067,11 @@ static void Emulate(EmulateSpecStruct *espec, int16_t *sound_buf)
+ 
+    v810_timestamp = VB_V810->Run(EventHandler);
+ 
++   /* vbrecomp cpuhook: advance the cumulative cycle base by this frame's
++    * total now that Run() has retired all of this frame's instructions
++    * (their records used the pre-frame base). See vb_oracle_cpuhook. */
++   g_vb_cpuhook_frame_base += (uint64_t)(uint32_t)v810_timestamp;
++
+    FixNonEvents();
+    ForceEventUpdates(v810_timestamp);
+ 
+diff --git a/mednafen/hw_cpu/v810/v810_cpu.cpp b/mednafen/hw_cpu/v810/v810_cpu.cpp
+index eb1fbef..ac42ddd 100644
+--- a/mednafen/hw_cpu/v810/v810_cpu.cpp
++++ b/mednafen/hw_cpu/v810/v810_cpu.cpp
+@@ -496,12 +496,18 @@ INLINE uint32 V810::GetSREG(unsigned int which)
+ #define RB_RDOP(PC_offset, ...) RDOP(timestamp, PC + PC_offset, ## __VA_ARGS__)
+ #endif
+ 
++/* vbrecomp: per-instruction CPU-hook recorder (defined in libretro.cpp).
++ * Observability-only; records {pc,regs,psw,cycle} for the recomp-vs-oracle
++ * divergence/cycle harness. */
++extern "C" void vb_oracle_cpuhook(uint32 pc, const uint32 *p_reg,
++                                  uint32 psw, uint64 cycle_rel);
++
+ void V810::Run_Accurate(int32 MDFN_FASTCALL (*event_handler)(const v810_timestamp_t timestamp))
+ {
+  const bool RB_AccurateMode = true;
+ 
+  #define RB_ADDBT(n,o,p)
+- #define RB_CPUHOOK(n)
++ #define RB_CPUHOOK(n) vb_oracle_cpuhook((n), P_REG, S_REG[PSW], (uint64)(uint32)timestamp_rl);
+ 
+  #include "v810_oploop.inc"
+ 
+@@ -533,7 +539,7 @@ void V810::Run_Fast(int32 MDFN_FASTCALL (*event_handler)(const v810_timestamp_t
+  const bool RB_AccurateMode = false;
+ 
+  #define RB_ADDBT(n,o,p)
+- #define RB_CPUHOOK(n)
++ #define RB_CPUHOOK(n) vb_oracle_cpuhook((n), P_REG, S_REG[PSW], (uint64)(uint32)timestamp_rl);
+ 
+  #include "v810_oploop.inc"
+ 
+diff --git a/mednafen/vb/input.c b/mednafen/vb/input.c
+index 1a5594e..b4443cb 100644
+--- a/mednafen/vb/input.c
++++ b/mednafen/vb/input.c
+@@ -207,3 +207,19 @@ int VBINPUT_StateAction(StateMem *sm, int load, int data_only)
+ 
+    return MDFNSS_StateAction(sm, load, data_only, StateRegs, "INPUT", false);
+ }
++
++/* Canonical, read-only device state. Ordered schema: tools/device_schema.json. */
++unsigned beetle_input_snapshot(uint32_t* out) {
++    const uint32_t words[] = {
++        (uint32_t)(PadData), /* pad */
++        (uint32_t)(PadLatched), /* latched */
++        (uint32_t)(SCR), /* control */
++        (uint32_t)(SDR), /* serial */
++        (uint32_t)(ReadBitPos), /* bit */
++        (uint32_t)(ReadCounter), /* counter */
++        (uint32_t)(IntPending), /* irq */
++    };
++    unsigned n=sizeof(words)/sizeof(words[0]);
++    for(unsigned i=0;i<n;++i) out[i]=words[i];
++    return n;
++}
+diff --git a/mednafen/vb/timer.c b/mednafen/vb/timer.c
+index 681acda..4c28754 100644
+--- a/mednafen/vb/timer.c
++++ b/mednafen/vb/timer.c
+@@ -207,3 +207,19 @@ void TIMER_SetRegister(const unsigned int id, const uint32 value)
+ 
+    }
+ }
++
++/* Canonical, read-only device state. Ordered schema: tools/device_schema.json. */
++unsigned beetle_timer_snapshot(uint32_t* out) {
++    const uint32_t words[] = {
++        (uint32_t)(TimerControl), /* control */
++        (uint32_t)(TimerReloadValue), /* reload */
++        (uint32_t)(TimerCounter), /* counter */
++        (uint32_t)(TimerDivider), /* divider */
++        (uint32_t)(TimerStatus), /* status */
++        (uint32_t)(TimerStatusShadow), /* status_shadow */
++        (uint32_t)(ReloadPending), /* reload_pending */
++    };
++    unsigned n=sizeof(words)/sizeof(words[0]);
++    for(unsigned i=0;i<n;++i) out[i]=words[i];
++    return n;
++}
+diff --git a/mednafen/vb/vip.c b/mednafen/vb/vip.c
+index 9de337a..71cc0df 100644
+--- a/mednafen/vb/vip.c
++++ b/mednafen/vb/vip.c
+@@ -1283,6 +1283,13 @@ static void CopyFBColumnToTarget_HLI(void)
+       CopyFBColumnToTarget_HLI_BASE(DisplayActive, 1, 1 ^ VB3DReverse);
+ }
+ 
++/* Axis-5a phase gate: record DPSTTS/XPSTTS at each draw-timing event into
++ * the always-on ring in libretro.cpp (mirror of vb-runtime's vip_phase).
++ * Observability only — does not change emulation. */
++extern void vb_oracle_vipphase(uint16_t event, uint16_t dpstts, uint16_t xpstts);
++#define VBB_VIPPHASE(ev, ts) \
++   vb_oracle_vipphase((ev), ReadRegister((ts), 0x20), ReadRegister((ts), 0x40))
++
+ v810_timestamp_t MDFN_FASTCALL VIP_Update(const v810_timestamp_t timestamp)
+ {
+    int32 clocks = timestamp - last_ts;
+@@ -1343,6 +1350,7 @@ v810_timestamp_t MDFN_FASTCALL VIP_Update(const v810_timestamp_t timestamp)
+ 
+                InterruptPending |= INT_XP_END;
+                CheckIRQ();
++               VBB_VIPPHASE(INT_XP_END, running_timestamp);
+             }
+             else
+                DrawingCounter += 1120 * 4;
+@@ -1385,6 +1393,8 @@ v810_timestamp_t MDFN_FASTCALL VIP_Update(const v810_timestamp_t timestamp)
+                      InterruptPending |= INT_LFB_END;
+ 
+                   CheckIRQ();
++                  VBB_VIPPHASE((DisplayRegion & 2) ? INT_RFB_END : INT_LFB_END,
++                               running_timestamp);
+                }
+             }
+ 
+@@ -1398,12 +1408,14 @@ v810_timestamp_t MDFN_FASTCALL VIP_Update(const v810_timestamp_t timestamp)
+                {
+                   InterruptPending |= INT_FRAME_START;
+                   CheckIRQ();
++                  VBB_VIPPHASE(INT_FRAME_START, running_timestamp);
+                }
+                GameFrameCounter++;
+                if(GameFrameCounter > FRMCYC) /* New game frame start? */
+                {
+                   InterruptPending |= INT_GAME_START;
+                   CheckIRQ();
++                  VBB_VIPPHASE(INT_GAME_START, running_timestamp);
+ 
+                   if(XPCTRL & XPCTRL_XP_EN)
+                   {
+@@ -1648,3 +1660,52 @@ void VIP_SetRegister(const unsigned int id, const uint32 value)
+          break;
+    }
+ }
++
++/* Canonical, read-only device state. Ordered schema: tools/device_schema.json. */
++unsigned beetle_vip_snapshot(uint32_t* out) {
++    const uint32_t words[] = {
++        (uint32_t)(InterruptPending), /* intpnd */
++        (uint32_t)(InterruptEnable), /* intenb */
++        (uint32_t)(DPCTRL), /* dpctrl */
++        (uint32_t)(XPCTRL), /* xpctrl */
++        (uint32_t)(SBCMP), /* sbcmp */
++        (uint32_t)(FRMCYC), /* frmcyc */
++        (uint32_t)(BKCOL), /* bkcol */
++        (uint32_t)(BRTA), /* brta */
++        (uint32_t)(BRTB), /* brtb */
++        (uint32_t)(BRTC), /* brtc */
++        (uint32_t)(REST), /* rest */
++        (uint32_t)(Repeat), /* brt_repeat */
++        (uint32_t)(Column), /* column */
++        (uint32_t)(ColumnCounter), /* column_counter */
++        (uint32_t)(DisplayRegion), /* display_region */
++        (uint32_t)(DisplayActive), /* display_active */
++        (uint32_t)(DisplayFB), /* display_fb */
++        (uint32_t)(GameFrameCounter), /* game_frame_counter */
++        (uint32_t)(DrawingCounter), /* drawing_counter */
++        (uint32_t)(DrawingActive), /* drawing_active */
++        (uint32_t)(DrawingFB), /* drawing_fb */
++        (uint32_t)(DrawingBlock), /* drawing_block */
++        (uint32_t)(SB_Latch), /* sb_latch */
++        (uint32_t)(SPT[0]), /* spt[0] */
++        (uint32_t)(SPT[1]), /* spt[1] */
++        (uint32_t)(SPT[2]), /* spt[2] */
++        (uint32_t)(SPT[3]), /* spt[3] */
++        (uint32_t)(GPLT[0]), /* gplt[0] */
++        (uint32_t)(GPLT[1]), /* gplt[1] */
++        (uint32_t)(GPLT[2]), /* gplt[2] */
++        (uint32_t)(GPLT[3]), /* gplt[3] */
++        (uint32_t)(JPLT[0]), /* jplt[0] */
++        (uint32_t)(JPLT[1]), /* jplt[1] */
++        (uint32_t)(JPLT[2]), /* jplt[2] */
++        (uint32_t)(JPLT[3]), /* jplt[3] */
++        (uint32_t)(BrightnessCache[0]), /* brt_cache[0] */
++        (uint32_t)(BrightnessCache[1]), /* brt_cache[1] */
++        (uint32_t)(BrightnessCache[2]), /* brt_cache[2] */
++        (uint32_t)(BrightnessCache[3]), /* brt_cache[3] */
++        (uint32_t)((SBOUT_InactiveTime > last_ts ? SBOUT_InactiveTime-last_ts:0)), /* sbout_remaining */
++    };
++    unsigned n=sizeof(words)/sizeof(words[0]);
++    for(unsigned i=0;i<n;++i) out[i]=words[i];
++    return n;
++}
+diff --git a/mednafen/vb/vsu.c b/mednafen/vb/vsu.c
+index de5e1f7..c61a97f 100644
+--- a/mednafen/vb/vsu.c
++++ b/mednafen/vb/vsu.c
+@@ -545,3 +545,319 @@ void VSU_PokeModWave(uint32 Address, uint8 value)
+ 
+    ModData[Address] = value & 0xFF;
+ }
++
++/* Canonical, read-only device state. Ordered schema: tools/device_schema.json. */
++unsigned beetle_vsu_snapshot(uint32_t* out) {
++    const uint32_t words[] = {
++        (uint32_t)(IntlControl[0]), /* intl_control[0] */
++        (uint32_t)(IntlControl[1]), /* intl_control[1] */
++        (uint32_t)(IntlControl[2]), /* intl_control[2] */
++        (uint32_t)(IntlControl[3]), /* intl_control[3] */
++        (uint32_t)(IntlControl[4]), /* intl_control[4] */
++        (uint32_t)(IntlControl[5]), /* intl_control[5] */
++        (uint32_t)(LeftLevel[0]), /* left_level[0] */
++        (uint32_t)(LeftLevel[1]), /* left_level[1] */
++        (uint32_t)(LeftLevel[2]), /* left_level[2] */
++        (uint32_t)(LeftLevel[3]), /* left_level[3] */
++        (uint32_t)(LeftLevel[4]), /* left_level[4] */
++        (uint32_t)(LeftLevel[5]), /* left_level[5] */
++        (uint32_t)(RightLevel[0]), /* right_level[0] */
++        (uint32_t)(RightLevel[1]), /* right_level[1] */
++        (uint32_t)(RightLevel[2]), /* right_level[2] */
++        (uint32_t)(RightLevel[3]), /* right_level[3] */
++        (uint32_t)(RightLevel[4]), /* right_level[4] */
++        (uint32_t)(RightLevel[5]), /* right_level[5] */
++        (uint32_t)(Frequency[0]), /* frequency[0] */
++        (uint32_t)(Frequency[1]), /* frequency[1] */
++        (uint32_t)(Frequency[2]), /* frequency[2] */
++        (uint32_t)(Frequency[3]), /* frequency[3] */
++        (uint32_t)(Frequency[4]), /* frequency[4] */
++        (uint32_t)(Frequency[5]), /* frequency[5] */
++        (uint32_t)(EnvControl[0]), /* env_control[0] */
++        (uint32_t)(EnvControl[1]), /* env_control[1] */
++        (uint32_t)(EnvControl[2]), /* env_control[2] */
++        (uint32_t)(EnvControl[3]), /* env_control[3] */
++        (uint32_t)(EnvControl[4]), /* env_control[4] */
++        (uint32_t)(EnvControl[5]), /* env_control[5] */
++        (uint32_t)(RAMAddress[0]), /* ram_address[0] */
++        (uint32_t)(RAMAddress[1]), /* ram_address[1] */
++        (uint32_t)(RAMAddress[2]), /* ram_address[2] */
++        (uint32_t)(RAMAddress[3]), /* ram_address[3] */
++        (uint32_t)(RAMAddress[4]), /* ram_address[4] */
++        (uint32_t)(RAMAddress[5]), /* ram_address[5] */
++        (uint32_t)(EffFreq[0]), /* eff_freq[0] */
++        (uint32_t)(EffFreq[1]), /* eff_freq[1] */
++        (uint32_t)(EffFreq[2]), /* eff_freq[2] */
++        (uint32_t)(EffFreq[3]), /* eff_freq[3] */
++        (uint32_t)(EffFreq[4]), /* eff_freq[4] */
++        (uint32_t)(EffFreq[5]), /* eff_freq[5] */
++        (uint32_t)(Envelope[0]), /* envelope[0] */
++        (uint32_t)(Envelope[1]), /* envelope[1] */
++        (uint32_t)(Envelope[2]), /* envelope[2] */
++        (uint32_t)(Envelope[3]), /* envelope[3] */
++        (uint32_t)(Envelope[4]), /* envelope[4] */
++        (uint32_t)(Envelope[5]), /* envelope[5] */
++        (uint32_t)(WavePos[0]), /* wave_pos[0] */
++        (uint32_t)(WavePos[1]), /* wave_pos[1] */
++        (uint32_t)(WavePos[2]), /* wave_pos[2] */
++        (uint32_t)(WavePos[3]), /* wave_pos[3] */
++        (uint32_t)(WavePos[4]), /* wave_pos[4] */
++        (uint32_t)(WavePos[5]), /* wave_pos[5] */
++        (uint32_t)(LatcherClockDivider[0]), /* latcher_clock_divider[0] */
++        (uint32_t)(LatcherClockDivider[1]), /* latcher_clock_divider[1] */
++        (uint32_t)(LatcherClockDivider[2]), /* latcher_clock_divider[2] */
++        (uint32_t)(LatcherClockDivider[3]), /* latcher_clock_divider[3] */
++        (uint32_t)(LatcherClockDivider[4]), /* latcher_clock_divider[4] */
++        (uint32_t)(LatcherClockDivider[5]), /* latcher_clock_divider[5] */
++        (uint32_t)(FreqCounter[0]), /* freq_counter[0] */
++        (uint32_t)(FreqCounter[1]), /* freq_counter[1] */
++        (uint32_t)(FreqCounter[2]), /* freq_counter[2] */
++        (uint32_t)(FreqCounter[3]), /* freq_counter[3] */
++        (uint32_t)(FreqCounter[4]), /* freq_counter[4] */
++        (uint32_t)(FreqCounter[5]), /* freq_counter[5] */
++        (uint32_t)(IntervalCounter[0]), /* interval_counter[0] */
++        (uint32_t)(IntervalCounter[1]), /* interval_counter[1] */
++        (uint32_t)(IntervalCounter[2]), /* interval_counter[2] */
++        (uint32_t)(IntervalCounter[3]), /* interval_counter[3] */
++        (uint32_t)(IntervalCounter[4]), /* interval_counter[4] */
++        (uint32_t)(IntervalCounter[5]), /* interval_counter[5] */
++        (uint32_t)(EnvelopeCounter[0]), /* envelope_counter[0] */
++        (uint32_t)(EnvelopeCounter[1]), /* envelope_counter[1] */
++        (uint32_t)(EnvelopeCounter[2]), /* envelope_counter[2] */
++        (uint32_t)(EnvelopeCounter[3]), /* envelope_counter[3] */
++        (uint32_t)(EnvelopeCounter[4]), /* envelope_counter[4] */
++        (uint32_t)(EnvelopeCounter[5]), /* envelope_counter[5] */
++        (uint32_t)(EffectsClockDivider[0]), /* effects_clock_divider[0] */
++        (uint32_t)(EffectsClockDivider[1]), /* effects_clock_divider[1] */
++        (uint32_t)(EffectsClockDivider[2]), /* effects_clock_divider[2] */
++        (uint32_t)(EffectsClockDivider[3]), /* effects_clock_divider[3] */
++        (uint32_t)(EffectsClockDivider[4]), /* effects_clock_divider[4] */
++        (uint32_t)(EffectsClockDivider[5]), /* effects_clock_divider[5] */
++        (uint32_t)(IntervalClockDivider[0]), /* interval_clock_divider[0] */
++        (uint32_t)(IntervalClockDivider[1]), /* interval_clock_divider[1] */
++        (uint32_t)(IntervalClockDivider[2]), /* interval_clock_divider[2] */
++        (uint32_t)(IntervalClockDivider[3]), /* interval_clock_divider[3] */
++        (uint32_t)(IntervalClockDivider[4]), /* interval_clock_divider[4] */
++        (uint32_t)(IntervalClockDivider[5]), /* interval_clock_divider[5] */
++        (uint32_t)(EnvelopeClockDivider[0]), /* envelope_clock_divider[0] */
++        (uint32_t)(EnvelopeClockDivider[1]), /* envelope_clock_divider[1] */
++        (uint32_t)(EnvelopeClockDivider[2]), /* envelope_clock_divider[2] */
++        (uint32_t)(EnvelopeClockDivider[3]), /* envelope_clock_divider[3] */
++        (uint32_t)(EnvelopeClockDivider[4]), /* envelope_clock_divider[4] */
++        (uint32_t)(EnvelopeClockDivider[5]), /* envelope_clock_divider[5] */
++        (uint32_t)(SweepControl), /* sweep_control */
++        (uint32_t)(ModWavePos), /* mod_wave_pos */
++        (uint32_t)(SweepModCounter), /* sweep_mod_counter */
++        (uint32_t)(SweepModClockDivider), /* sweep_mod_clock_divider */
++        (uint32_t)(NoiseLatcherClockDivider), /* noise_latcher_clock_divider */
++        (uint32_t)(NoiseLatcher), /* noise_latcher */
++        (uint32_t)(lfsr), /* lfsr */
++        (uint32_t)(WaveData[0][0]), /* wave[0][0] */
++        (uint32_t)(WaveData[0][1]), /* wave[0][1] */
++        (uint32_t)(WaveData[0][2]), /* wave[0][2] */
++        (uint32_t)(WaveData[0][3]), /* wave[0][3] */
++        (uint32_t)(WaveData[0][4]), /* wave[0][4] */
++        (uint32_t)(WaveData[0][5]), /* wave[0][5] */
++        (uint32_t)(WaveData[0][6]), /* wave[0][6] */
++        (uint32_t)(WaveData[0][7]), /* wave[0][7] */
++        (uint32_t)(WaveData[0][8]), /* wave[0][8] */
++        (uint32_t)(WaveData[0][9]), /* wave[0][9] */
++        (uint32_t)(WaveData[0][10]), /* wave[0][10] */
++        (uint32_t)(WaveData[0][11]), /* wave[0][11] */
++        (uint32_t)(WaveData[0][12]), /* wave[0][12] */
++        (uint32_t)(WaveData[0][13]), /* wave[0][13] */
++        (uint32_t)(WaveData[0][14]), /* wave[0][14] */
++        (uint32_t)(WaveData[0][15]), /* wave[0][15] */
++        (uint32_t)(WaveData[0][16]), /* wave[0][16] */
++        (uint32_t)(WaveData[0][17]), /* wave[0][17] */
++        (uint32_t)(WaveData[0][18]), /* wave[0][18] */
++        (uint32_t)(WaveData[0][19]), /* wave[0][19] */
++        (uint32_t)(WaveData[0][20]), /* wave[0][20] */
++        (uint32_t)(WaveData[0][21]), /* wave[0][21] */
++        (uint32_t)(WaveData[0][22]), /* wave[0][22] */
++        (uint32_t)(WaveData[0][23]), /* wave[0][23] */
++        (uint32_t)(WaveData[0][24]), /* wave[0][24] */
++        (uint32_t)(WaveData[0][25]), /* wave[0][25] */
++        (uint32_t)(WaveData[0][26]), /* wave[0][26] */
++        (uint32_t)(WaveData[0][27]), /* wave[0][27] */
++        (uint32_t)(WaveData[0][28]), /* wave[0][28] */
++        (uint32_t)(WaveData[0][29]), /* wave[0][29] */
++        (uint32_t)(WaveData[0][30]), /* wave[0][30] */
++        (uint32_t)(WaveData[0][31]), /* wave[0][31] */
++        (uint32_t)(WaveData[1][0]), /* wave[1][0] */
++        (uint32_t)(WaveData[1][1]), /* wave[1][1] */
++        (uint32_t)(WaveData[1][2]), /* wave[1][2] */
++        (uint32_t)(WaveData[1][3]), /* wave[1][3] */
++        (uint32_t)(WaveData[1][4]), /* wave[1][4] */
++        (uint32_t)(WaveData[1][5]), /* wave[1][5] */
++        (uint32_t)(WaveData[1][6]), /* wave[1][6] */
++        (uint32_t)(WaveData[1][7]), /* wave[1][7] */
++        (uint32_t)(WaveData[1][8]), /* wave[1][8] */
++        (uint32_t)(WaveData[1][9]), /* wave[1][9] */
++        (uint32_t)(WaveData[1][10]), /* wave[1][10] */
++        (uint32_t)(WaveData[1][11]), /* wave[1][11] */
++        (uint32_t)(WaveData[1][12]), /* wave[1][12] */
++        (uint32_t)(WaveData[1][13]), /* wave[1][13] */
++        (uint32_t)(WaveData[1][14]), /* wave[1][14] */
++        (uint32_t)(WaveData[1][15]), /* wave[1][15] */
++        (uint32_t)(WaveData[1][16]), /* wave[1][16] */
++        (uint32_t)(WaveData[1][17]), /* wave[1][17] */
++        (uint32_t)(WaveData[1][18]), /* wave[1][18] */
++        (uint32_t)(WaveData[1][19]), /* wave[1][19] */
++        (uint32_t)(WaveData[1][20]), /* wave[1][20] */
++        (uint32_t)(WaveData[1][21]), /* wave[1][21] */
++        (uint32_t)(WaveData[1][22]), /* wave[1][22] */
++        (uint32_t)(WaveData[1][23]), /* wave[1][23] */
++        (uint32_t)(WaveData[1][24]), /* wave[1][24] */
++        (uint32_t)(WaveData[1][25]), /* wave[1][25] */
++        (uint32_t)(WaveData[1][26]), /* wave[1][26] */
++        (uint32_t)(WaveData[1][27]), /* wave[1][27] */
++        (uint32_t)(WaveData[1][28]), /* wave[1][28] */
++        (uint32_t)(WaveData[1][29]), /* wave[1][29] */
++        (uint32_t)(WaveData[1][30]), /* wave[1][30] */
++        (uint32_t)(WaveData[1][31]), /* wave[1][31] */
++        (uint32_t)(WaveData[2][0]), /* wave[2][0] */
++        (uint32_t)(WaveData[2][1]), /* wave[2][1] */
++        (uint32_t)(WaveData[2][2]), /* wave[2][2] */
++        (uint32_t)(WaveData[2][3]), /* wave[2][3] */
++        (uint32_t)(WaveData[2][4]), /* wave[2][4] */
++        (uint32_t)(WaveData[2][5]), /* wave[2][5] */
++        (uint32_t)(WaveData[2][6]), /* wave[2][6] */
++        (uint32_t)(WaveData[2][7]), /* wave[2][7] */
++        (uint32_t)(WaveData[2][8]), /* wave[2][8] */
++        (uint32_t)(WaveData[2][9]), /* wave[2][9] */
++        (uint32_t)(WaveData[2][10]), /* wave[2][10] */
++        (uint32_t)(WaveData[2][11]), /* wave[2][11] */
++        (uint32_t)(WaveData[2][12]), /* wave[2][12] */
++        (uint32_t)(WaveData[2][13]), /* wave[2][13] */
++        (uint32_t)(WaveData[2][14]), /* wave[2][14] */
++        (uint32_t)(WaveData[2][15]), /* wave[2][15] */
++        (uint32_t)(WaveData[2][16]), /* wave[2][16] */
++        (uint32_t)(WaveData[2][17]), /* wave[2][17] */
++        (uint32_t)(WaveData[2][18]), /* wave[2][18] */
++        (uint32_t)(WaveData[2][19]), /* wave[2][19] */
++        (uint32_t)(WaveData[2][20]), /* wave[2][20] */
++        (uint32_t)(WaveData[2][21]), /* wave[2][21] */
++        (uint32_t)(WaveData[2][22]), /* wave[2][22] */
++        (uint32_t)(WaveData[2][23]), /* wave[2][23] */
++        (uint32_t)(WaveData[2][24]), /* wave[2][24] */
++        (uint32_t)(WaveData[2][25]), /* wave[2][25] */
++        (uint32_t)(WaveData[2][26]), /* wave[2][26] */
++        (uint32_t)(WaveData[2][27]), /* wave[2][27] */
++        (uint32_t)(WaveData[2][28]), /* wave[2][28] */
++        (uint32_t)(WaveData[2][29]), /* wave[2][29] */
++        (uint32_t)(WaveData[2][30]), /* wave[2][30] */
++        (uint32_t)(WaveData[2][31]), /* wave[2][31] */
++        (uint32_t)(WaveData[3][0]), /* wave[3][0] */
++        (uint32_t)(WaveData[3][1]), /* wave[3][1] */
++        (uint32_t)(WaveData[3][2]), /* wave[3][2] */
++        (uint32_t)(WaveData[3][3]), /* wave[3][3] */
++        (uint32_t)(WaveData[3][4]), /* wave[3][4] */
++        (uint32_t)(WaveData[3][5]), /* wave[3][5] */
++        (uint32_t)(WaveData[3][6]), /* wave[3][6] */
++        (uint32_t)(WaveData[3][7]), /* wave[3][7] */
++        (uint32_t)(WaveData[3][8]), /* wave[3][8] */
++        (uint32_t)(WaveData[3][9]), /* wave[3][9] */
++        (uint32_t)(WaveData[3][10]), /* wave[3][10] */
++        (uint32_t)(WaveData[3][11]), /* wave[3][11] */
++        (uint32_t)(WaveData[3][12]), /* wave[3][12] */
++        (uint32_t)(WaveData[3][13]), /* wave[3][13] */
++        (uint32_t)(WaveData[3][14]), /* wave[3][14] */
++        (uint32_t)(WaveData[3][15]), /* wave[3][15] */
++        (uint32_t)(WaveData[3][16]), /* wave[3][16] */
++        (uint32_t)(WaveData[3][17]), /* wave[3][17] */
++        (uint32_t)(WaveData[3][18]), /* wave[3][18] */
++        (uint32_t)(WaveData[3][19]), /* wave[3][19] */
++        (uint32_t)(WaveData[3][20]), /* wave[3][20] */
++        (uint32_t)(WaveData[3][21]), /* wave[3][21] */
++        (uint32_t)(WaveData[3][22]), /* wave[3][22] */
++        (uint32_t)(WaveData[3][23]), /* wave[3][23] */
++        (uint32_t)(WaveData[3][24]), /* wave[3][24] */
++        (uint32_t)(WaveData[3][25]), /* wave[3][25] */
++        (uint32_t)(WaveData[3][26]), /* wave[3][26] */
++        (uint32_t)(WaveData[3][27]), /* wave[3][27] */
++        (uint32_t)(WaveData[3][28]), /* wave[3][28] */
++        (uint32_t)(WaveData[3][29]), /* wave[3][29] */
++        (uint32_t)(WaveData[3][30]), /* wave[3][30] */
++        (uint32_t)(WaveData[3][31]), /* wave[3][31] */
++        (uint32_t)(WaveData[4][0]), /* wave[4][0] */
++        (uint32_t)(WaveData[4][1]), /* wave[4][1] */
++        (uint32_t)(WaveData[4][2]), /* wave[4][2] */
++        (uint32_t)(WaveData[4][3]), /* wave[4][3] */
++        (uint32_t)(WaveData[4][4]), /* wave[4][4] */
++        (uint32_t)(WaveData[4][5]), /* wave[4][5] */
++        (uint32_t)(WaveData[4][6]), /* wave[4][6] */
++        (uint32_t)(WaveData[4][7]), /* wave[4][7] */
++        (uint32_t)(WaveData[4][8]), /* wave[4][8] */
++        (uint32_t)(WaveData[4][9]), /* wave[4][9] */
++        (uint32_t)(WaveData[4][10]), /* wave[4][10] */
++        (uint32_t)(WaveData[4][11]), /* wave[4][11] */
++        (uint32_t)(WaveData[4][12]), /* wave[4][12] */
++        (uint32_t)(WaveData[4][13]), /* wave[4][13] */
++        (uint32_t)(WaveData[4][14]), /* wave[4][14] */
++        (uint32_t)(WaveData[4][15]), /* wave[4][15] */
++        (uint32_t)(WaveData[4][16]), /* wave[4][16] */
++        (uint32_t)(WaveData[4][17]), /* wave[4][17] */
++        (uint32_t)(WaveData[4][18]), /* wave[4][18] */
++        (uint32_t)(WaveData[4][19]), /* wave[4][19] */
++        (uint32_t)(WaveData[4][20]), /* wave[4][20] */
++        (uint32_t)(WaveData[4][21]), /* wave[4][21] */
++        (uint32_t)(WaveData[4][22]), /* wave[4][22] */
++        (uint32_t)(WaveData[4][23]), /* wave[4][23] */
++        (uint32_t)(WaveData[4][24]), /* wave[4][24] */
++        (uint32_t)(WaveData[4][25]), /* wave[4][25] */
++        (uint32_t)(WaveData[4][26]), /* wave[4][26] */
++        (uint32_t)(WaveData[4][27]), /* wave[4][27] */
++        (uint32_t)(WaveData[4][28]), /* wave[4][28] */
++        (uint32_t)(WaveData[4][29]), /* wave[4][29] */
++        (uint32_t)(WaveData[4][30]), /* wave[4][30] */
++        (uint32_t)(WaveData[4][31]), /* wave[4][31] */
++        (uint32_t)(ModData[0]), /* mod[0] */
++        (uint32_t)(ModData[1]), /* mod[1] */
++        (uint32_t)(ModData[2]), /* mod[2] */
++        (uint32_t)(ModData[3]), /* mod[3] */
++        (uint32_t)(ModData[4]), /* mod[4] */
++        (uint32_t)(ModData[5]), /* mod[5] */
++        (uint32_t)(ModData[6]), /* mod[6] */
++        (uint32_t)(ModData[7]), /* mod[7] */
++        (uint32_t)(ModData[8]), /* mod[8] */
++        (uint32_t)(ModData[9]), /* mod[9] */
++        (uint32_t)(ModData[10]), /* mod[10] */
++        (uint32_t)(ModData[11]), /* mod[11] */
++        (uint32_t)(ModData[12]), /* mod[12] */
++        (uint32_t)(ModData[13]), /* mod[13] */
++        (uint32_t)(ModData[14]), /* mod[14] */
++        (uint32_t)(ModData[15]), /* mod[15] */
++        (uint32_t)(ModData[16]), /* mod[16] */
++        (uint32_t)(ModData[17]), /* mod[17] */
++        (uint32_t)(ModData[18]), /* mod[18] */
++        (uint32_t)(ModData[19]), /* mod[19] */
++        (uint32_t)(ModData[20]), /* mod[20] */
++        (uint32_t)(ModData[21]), /* mod[21] */
++        (uint32_t)(ModData[22]), /* mod[22] */
++        (uint32_t)(ModData[23]), /* mod[23] */
++        (uint32_t)(ModData[24]), /* mod[24] */
++        (uint32_t)(ModData[25]), /* mod[25] */
++        (uint32_t)(ModData[26]), /* mod[26] */
++        (uint32_t)(ModData[27]), /* mod[27] */
++        (uint32_t)(ModData[28]), /* mod[28] */
++        (uint32_t)(ModData[29]), /* mod[29] */
++        (uint32_t)(ModData[30]), /* mod[30] */
++        (uint32_t)(ModData[31]), /* mod[31] */
++        (uint32_t)(last_output[0][0]), /* last_output[0][0] */
++        (uint32_t)(last_output[0][1]), /* last_output[0][1] */
++        (uint32_t)(last_output[1][0]), /* last_output[1][0] */
++        (uint32_t)(last_output[1][1]), /* last_output[1][1] */
++        (uint32_t)(last_output[2][0]), /* last_output[2][0] */
++        (uint32_t)(last_output[2][1]), /* last_output[2][1] */
++        (uint32_t)(last_output[3][0]), /* last_output[3][0] */
++        (uint32_t)(last_output[3][1]), /* last_output[3][1] */
++        (uint32_t)(last_output[4][0]), /* last_output[4][0] */
++        (uint32_t)(last_output[4][1]), /* last_output[4][1] */
++        (uint32_t)(last_output[5][0]), /* last_output[5][0] */
++        (uint32_t)(last_output[5][1]), /* last_output[5][1] */
++    };
++    unsigned n=sizeof(words)/sizeof(words[0]);
++    for(unsigned i=0;i<n;++i) out[i]=words[i];
++    return n;
++}

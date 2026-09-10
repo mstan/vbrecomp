@@ -158,6 +158,7 @@ static int      s_drawing_fb;            /* DrawingFB */
 static int32_t  s_drawing_block;         /* DrawingBlock 0..27 */
 static int32_t  s_sb_latch;              /* SB_Latch */
 static int64_t  s_sbout_inactive_time;   /* SBOUT_InactiveTime — VIP-cycle absolute */
+static uint64_t s_update_span;
 static uint64_t s_vip_cycles;            /* monotonic VIP cycle counter */
 
 /* ---- Always-on observation rings (experiment / collaborative capture) ----
@@ -475,7 +476,10 @@ static void vip_advance_chunk(int32_t chunk_clocks) {
         if (s_drawing_counter <= 0) {
             vip_draw_block_now((uint8_t)s_drawing_block);
             /* SBOUT goes inactive 1120 cycles into the next column. */
-            s_sbout_inactive_time = (int64_t)s_vip_cycles + 1120;
+            /* Beetle's VIP_Update starts running_timestamp at its target
+             * timestamp, then adds chunk clocks. Retain that observable
+             * SBOUT convention for independent-oracle comparisons. */
+            s_sbout_inactive_time = (int64_t)(s_vip_cycles+s_update_span) + 1120;
             s_sb_latch = s_drawing_block;
             s_drawing_block++;
             if (s_drawing_block == 28) {
@@ -498,6 +502,7 @@ static void vip_advance_chunk(int32_t chunk_clocks) {
 }
 
 void vb_vip_tick(uint64_t cycles) {
+    s_update_span=cycles;
     int64_t clocks = (int64_t)cycles;
     while (clocks > 0) {
         int32_t chunk = (int32_t)clocks;
@@ -519,8 +524,8 @@ void vb_vip_tick(uint64_t cycles) {
  * chunk. Always >= 1. */
 int32_t vb_vip_cycles_to_next_event(void) {
     int32_t n = s_column_counter;
-    if (s_drawing_counter > 0 && s_drawing_counter < n)
-        n = s_drawing_counter;
+    /* Beetle schedules external VIP updates at column boundaries. Drawing
+     * events are consumed inside that update, not exposed as CPU deadlines. */
     return n < 1 ? 1 : n;
 }
 
@@ -565,7 +570,7 @@ static uint16_t vip_read_register16(uint32_t offset) {
             if (s_drawing_active) {
                 ret |= (uint16_t)((1 + s_drawing_fb) << 2);
             }
-            if ((int64_t)s_vip_cycles < s_sbout_inactive_time) {
+            if ((int64_t)vb_memory_access_cycle() < s_sbout_inactive_time) {
                 ret |= 0x8000u;
                 ret |= (uint16_t)((s_sb_latch & 0xFFu) << 8);
             }
@@ -1616,3 +1621,54 @@ int vb_vip_aring_get(int i, uint32_t off, int len, uint32_t* seq, uint32_t* mask
 const VbSourceTexel* vb_vip_source_buffer(int eye) {
     return s_source_fb[s_display_fb & 1][eye != 0];
 }
+
+/* Canonical, read-only device state. Ordered schema: tools/device_schema.json. */
+#ifdef VBRECOMP_DEBUG_TOOLS
+unsigned vb_vip_snapshot(uint32_t* out) {
+    const uint32_t words[] = {
+        (uint32_t)(s_intpnd), /* intpnd */
+        (uint32_t)(s_intenb), /* intenb */
+        (uint32_t)(s_dpctrl), /* dpctrl */
+        (uint32_t)(s_xpctrl), /* xpctrl */
+        (uint32_t)(s_sbcmp), /* sbcmp */
+        (uint32_t)(s_frmcyc), /* frmcyc */
+        (uint32_t)(s_bkcol), /* bkcol */
+        (uint32_t)(s_brta), /* brta */
+        (uint32_t)(s_brtb), /* brtb */
+        (uint32_t)(s_brtc), /* brtc */
+        (uint32_t)(s_rest), /* rest */
+        (uint32_t)(s_brt_repeat), /* brt_repeat */
+        (uint32_t)(s_column), /* column */
+        (uint32_t)(s_column_counter), /* column_counter */
+        (uint32_t)(s_display_region), /* display_region */
+        (uint32_t)(s_display_active), /* display_active */
+        (uint32_t)(s_display_fb), /* display_fb */
+        (uint32_t)(s_game_frame_counter), /* game_frame_counter */
+        (uint32_t)(s_drawing_counter), /* drawing_counter */
+        (uint32_t)(s_drawing_active), /* drawing_active */
+        (uint32_t)(s_drawing_fb), /* drawing_fb */
+        (uint32_t)(s_drawing_block), /* drawing_block */
+        (uint32_t)(s_sb_latch), /* sb_latch */
+        (uint32_t)(s_spt[0]), /* spt[0] */
+        (uint32_t)(s_spt[1]), /* spt[1] */
+        (uint32_t)(s_spt[2]), /* spt[2] */
+        (uint32_t)(s_spt[3]), /* spt[3] */
+        (uint32_t)(s_gplt[0]), /* gplt[0] */
+        (uint32_t)(s_gplt[1]), /* gplt[1] */
+        (uint32_t)(s_gplt[2]), /* gplt[2] */
+        (uint32_t)(s_gplt[3]), /* gplt[3] */
+        (uint32_t)(s_jplt[0]), /* jplt[0] */
+        (uint32_t)(s_jplt[1]), /* jplt[1] */
+        (uint32_t)(s_jplt[2]), /* jplt[2] */
+        (uint32_t)(s_jplt[3]), /* jplt[3] */
+        (uint32_t)(s_brt_cache[0]), /* brt_cache[0] */
+        (uint32_t)(s_brt_cache[1]), /* brt_cache[1] */
+        (uint32_t)(s_brt_cache[2]), /* brt_cache[2] */
+        (uint32_t)(s_brt_cache[3]), /* brt_cache[3] */
+        (uint32_t)((s_sbout_inactive_time > (int64_t)s_vip_cycles ? s_sbout_inactive_time-(int64_t)s_vip_cycles:0)), /* sbout_remaining */
+    };
+    unsigned n=sizeof(words)/sizeof(words[0]);
+    for(unsigned i=0;i<n;++i) out[i]=words[i];
+    return n;
+}
+#endif

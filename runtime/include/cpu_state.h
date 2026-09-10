@@ -107,6 +107,10 @@ typedef struct CPUState {
      * cpu->cycles + cycles-to-next-device-event (VIP column / timer divider,
      * the same boundaries the HALT idle loop uses). UINT64_MAX disables it. */
     uint64_t cycle_deadline;
+    uint32_t bstr_src_cache;
+    uint8_t bstr_src_valid;
+    int8_t pipeline_class; /* 0 ALU, -1 long op, 1 LD, 2 ST, 3 IN, 4 OUT */
+    uint8_t bus_tail_cycles; /* pipeline charge after the memory access */
 
     /* Bus function pointers — wired by vb_memory_init(). */
     uint8_t  (*read8) (uint32_t addr);

@@ -16,3 +16,5 @@ int vb_host_prepare(const char* executable, const char*& rom, bool headless);
 void vb_host_save(void* unused = nullptr);
 const std::string& vb_host_error();
 bool vb_host_commit_mods();
+bool vb_host_load_sram();
+bool vb_host_save_sram();

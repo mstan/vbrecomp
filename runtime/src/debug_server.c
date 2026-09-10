@@ -1,3 +1,4 @@
+#include "device_debug.h"
 /* debug_server.c — TCP JSON debug server.
  *
  * Per CLAUDE.md Rule 3, this is the ONLY sanctioned debug surface.
@@ -10,6 +11,7 @@
  * time; non-blocking accept polled from the main loop.
  */
 #include "debug_server.h"
+#include "v810_interpreter.h"
 
 #include <stdarg.h>
 #include <stdint.h>
@@ -63,17 +65,31 @@
 #  define VB_EWOULDBLOCK EWOULDBLOCK
 #endif
 
+#include "debug_stream.h"
+
 static sock_t s_listener = VB_BAD_SOCKET;
 static sock_t s_client   = VB_BAD_SOCKET;
 static CPUState* s_cpu   = NULL;
 static int s_paused      = 0;
 static uint32_t s_step_target = 0;
+static int s_input_override;
+int vb_debug_server_input_override(void) {
+    if(s_input_override==2 && !vb_input_press_remaining()) s_input_override=0;
+    return s_input_override;
+}
 
 void vb_debug_server_set_paused(int paused) {
     s_paused = paused != 0;
     s_step_target = 0;
+    vb_execution.stopped=0;vb_execution.stepping=0;
+    vb_execution.skip_break=1;
 }
 int vb_debug_server_is_paused(void) {
+    /* HALT is a completed instruction: stepping must stop there even when
+     * no following instruction is available to run the boundary hook. */
+    if (vb_execution.stepping && s_cpu && s_cpu->halted)
+        vb_execution.stopped=1;
+    if (vb_execution.stopped) s_paused=1;
     if (s_step_target && s_cpu && s_cpu->frame >= s_step_target) {
         s_paused = 1;
         s_step_target = 0;
@@ -201,22 +217,14 @@ static void wprintf_(char** cur, char* end, const char* fmt, ...) {
     if (n > 0) *cur += (size_t)n;
 }
 
-static void send_all(const char* data, size_t n) {
-    size_t off = 0;
-    while (off < n) {
-        int sent = send(s_client, data + off, (int)(n - off), 0);
-        if (sent <= 0) return;   /* socket error/closed — drop the rest */
-        off += (size_t)sent;
-    }
-}
-
+static long long s_request_id;
 static void send_response(const char* body) {
-    if (s_client == VB_BAD_SOCKET) return;
-    /* Loop until the whole body is flushed: a single send() can transmit fewer
-     * bytes than requested, which would silently truncate large ring dumps
-     * (world_trace / wram_trace). */
-    send_all(body, strlen(body));
-    send_all("\n", 1);
+    if(body[0]=='{' && !strstr(body,"\"id\":")) {
+        size_t size=strlen(body)+64;char* reply=(char*)malloc(size);
+        if(!reply) { vb_stream.failed=1;return; }
+        snprintf(reply,size,"{\"id\":%lld,%s",s_request_id,body+1);
+        vb_stream_queue(reply);free(reply);
+    } else vb_stream_queue(body);
 }
 
 /* ---- Handlers ---- */
@@ -279,7 +287,7 @@ static void handle_psw_state(long long id) {
         "\"z\":%u,\"s\":%u,\"ov\":%u,\"cy\":%u,"
         "\"fpr\":%u,\"fud\":%u,\"fov\":%u,\"fzd\":%u,"
         "\"fiv\":%u,\"fro\":%u,"
-        "\"id\":%u,\"ae\":%u,\"ep\":%u,\"np\":%u,"
+        "\"interrupt_disable\":%u,\"ae\":%u,\"ep\":%u,\"np\":%u,"
         "\"int_level\":%u}",
         id, vb_psw_pack(s_cpu),
         s_cpu->psw_z, s_cpu->psw_s, s_cpu->psw_ov, s_cpu->psw_cy,
@@ -756,11 +764,13 @@ static void handle_pad_state(long long id) {
  * this on the next loop iteration. */
 static void handle_set_input(long long id, const char* line) {
     long long pad = 0;
-    if (!extract_int(line, "\"pad\"", &pad)) {
+    if (!extract_int(line, "\"pad\"", &pad) && !extract_int(line, "\"mask\"", &pad)) {
         send_response("{\"ok\":false,\"error\":\"set_input requires 'pad' (16-bit mask)\"}");
         return;
     }
-    vb_input_set_pad((uint16_t)(pad & 0xFFFFu));
+    if(pad<0 || pad>65535) { send_response("{\"ok\":false,\"error\":\"invalid input mask\"}");return; }
+    s_input_override=1;
+    vb_input_set_pad((uint16_t)pad);
     char buf[128];
     snprintf(buf, sizeof(buf),
              "{\"ok\":true,\"cmd\":\"set_input\",\"id\":%lld,\"pad\":\"0x%04X\"}",
@@ -782,6 +792,7 @@ static void handle_press(long long id, const char* line) {
     extract_int(line, "\"frames\"", &frames);
     if (frames < 1) frames = 1;
     vb_input_press((uint16_t)(buttons & 0xFFFFu), (int)frames);
+    s_input_override=2;
     char buf[160];
     snprintf(buf, sizeof(buf),
              "{\"ok\":true,\"cmd\":\"press\",\"id\":%lld,\"buttons\":\"0x%04X\","
@@ -1042,8 +1053,12 @@ static void handle_read_ram(long long id, const char* line) {
     long long addr = 0, len = 16;
     extract_int(line, "\"addr\"", &addr);
     extract_int(line, "\"len\"", &len);
-    if (len < 1) len = 1;
-    if (len > 4096) len = 4096;
+    uint32_t begin=(uint32_t)addr&0x07ffffffu;
+    uint64_t end=(uint64_t)begin+(uint64_t)len;
+    if(addr<0 || addr>UINT32_MAX || len<1 || len>65536 || end>0x08000000u ||
+       ((begin>>24)!=((end-1)>>24)) || (begin>=0x03000000u && begin<0x05000000u)) {
+        send_response("{\"ok\":false,\"error\":\"invalid or unmapped read range\"}");return;
+    }
     uint8_t* tmp = (uint8_t*)malloc((size_t)len);
     if (!tmp) {
         send_response("{\"ok\":false,\"error\":\"oom\"}");
@@ -1287,6 +1302,7 @@ static void dispatch_line(char* line) {
     char cmd[64] = {0};
     long long id = 0;
     extract_int(line, "\"id\"", &id);
+    s_request_id=id;
 
     /* Bare-command shortcut: a single token line. */
     char* nl = strpbrk(line, "\r\n");
@@ -1312,14 +1328,70 @@ static void dispatch_line(char* line) {
         return;
     }
 
-    if      (strcmp(cmd, "ping") == 0)         handle_ping(id);
+    if (strcmp(cmd, "device_state") == 0) { char body[16384]; vb_device_response(body,sizeof(body)); send_response(body); }
+    else if (strcmp(cmd, "capabilities") == 0) { send_response("{\"ok\":true,\"protocol\":2,\"commands\":[\"device_state\",\"audio_pcm\",\"audio_shadow_state\",\"breakpoint\",\"capabilities\",\"capture_dump\",\"clear_input\",\"continue\",\"cpuhook\",\"execution_stats\",\"fntrace_dump\",\"fntrace_reset\",\"fntrace_stats\",\"frame\",\"get_frame\",\"get_registers\",\"history\",\"irq_force\",\"irq_state\",\"memory_map\",\"overrides_state\",\"pad_state\",\"pause\",\"ping\",\"press\",\"psw_set\",\"psw_state\",\"quit\",\"read_ram\",\"recolor_reload\",\"recolor_state\",\"recolor_trace\",\"run_frames\",\"screenshot\",\"set_input\",\"source_dump\",\"step\",\"timer_state\",\"vip_phase\",\"vip_state\",\"watchdog\",\"world_map\",\"world_trace\",\"wram_anchors\",\"wram_hash\",\"write_ram\",\"wtrace_dump\",\"wtrace_reset\",\"wtrace_stats\"],\"max_read_bytes\":65536,\"instruction_control\":true,\"trace_version\":2}"); }
+    else if (strcmp(cmd, "ping") == 0)         handle_ping(id);
+    else if (strcmp(cmd, "step") == 0) {
+        long long count=1;extract_int(line,"\"count\"",&count);
+        if(!s_cpu || !vb_debug_server_is_paused() || count<1 || count>1000000 || s_cpu->halted) {
+            send_response("{\"ok\":false,\"error\":\"step requires paused, non-halted CPU and count 1..1000000\"}");
+        } else {
+            vb_debug_server_set_paused(0);vb_execution.stepping=1;vb_execution.step_remaining=(uint64_t)count;
+            char result[128];snprintf(result,sizeof(result),"{\"ok\":true,\"id\":%lld,\"count\":%lld}",id,count);send_response(result);
+        }
+    }
+    else if (strcmp(cmd, "breakpoint") == 0) {
+        long long pc=-1;extract_int(line,"\"pc\"",&pc);
+        if(pc < -1 || pc>UINT32_MAX || (pc!=-1 && (pc&1))) { send_response("{\"ok\":false,\"error\":\"invalid breakpoint PC\"}"); }
+        else { vb_execution.breakpoint_enabled=pc!=-1;vb_execution.breakpoint_pc=(uint32_t)pc;
+            char result[128];snprintf(result,sizeof(result),"{\"ok\":true,\"id\":%lld,\"enabled\":%d}",id,vb_execution.breakpoint_enabled);send_response(result);
+        }
+    }
+    else if (strcmp(cmd, "execution_stats") == 0) {
+        char result[384];
+        snprintf(result,sizeof(result),"{\"ok\":true,\"id\":%lld,\"mode\":%d,\"interpreted\":%llu,\"fallback\":%llu,\"native_entries\":%llu,\"first_fallback_pc\":%u,\"last_fallback_pc\":%u,\"native_instructions\":%llu,\"stopped\":%d}",
+                 id,vb_execution.mode,(unsigned long long)vb_execution.interpreted,
+                 (unsigned long long)vb_execution.fallback,(unsigned long long)vb_execution.native_entries,
+                 vb_execution.first_fallback_pc,vb_execution.last_fallback_pc,(unsigned long long)vb_execution.native_instructions,vb_execution.stopped);
+        send_response(result);
+    }
     else if (strcmp(cmd, "frame") == 0)        handle_frame(id);
     else if (strcmp(cmd, "get_registers") == 0)handle_get_registers(id);
     else if (strcmp(cmd, "psw_state") == 0)    handle_psw_state(id);
     else if (strcmp(cmd, "psw_set") == 0)      handle_psw_set(id, line);
+    else if (strcmp(cmd, "write_ram") == 0) {
+        long long addr=-1, value=-1;
+        extract_int(line,"\"addr\"",&addr); extract_int(line,"\"val\"",&value);
+        unsigned region=((uint32_t)addr>>24)&7;
+        if (!vb_debug_server_is_paused() || addr<0 || addr>UINT32_MAX || value<0 || value>255 || (region!=5 && region!=6)) {
+            send_response("{\"ok\":false,\"error\":\"write_ram needs paused CPU, WRAM/SRAM address and byte val\"}");
+        } else {
+            vb_write8((uint32_t)addr,(uint8_t)value);
+            char result[128];snprintf(result,sizeof(result),"{\"ok\":true,\"id\":%lld}",id);send_response(result);
+        }
+    }
+    else if (strcmp(cmd, "history") == 0 || strcmp(cmd, "get_frame") == 0) {
+        long long start=0,count=1;
+        extract_int(line,"\"start\"",&start);extract_int(line,"\"count\"",&count);
+        if(start<0 || count<1 || count>256) { send_response("{\"ok\":false,\"error\":\"invalid history range\"}"); }
+        else {
+            VBFrameRecord records[256];size_t n=vb_ring_frame_dump((uint64_t)start,records,(size_t)count);
+            char* body=(char*)malloc(n*640+256);
+            if(!body) { send_response("{\"ok\":false,\"error\":\"oom\"}");return; }
+            char* cur=body;
+            cur+=sprintf(cur,"{\"ok\":true,\"id\":%lld,\"head\":%llu,\"records\":[",id,(unsigned long long)vb_ring_frame_seq());
+            for(size_t i=0;i<n;++i) {
+                cur+=sprintf(cur,"%s{\"seq\":%llu,\"frame\":%u,\"pc\":%u,\"psw\":%u,\"gpr\":[",i?",":"",(unsigned long long)records[i].seq,records[i].frame_idx,records[i].pc,records[i].sysreg_psw);
+                for(unsigned j=0;j<32;++j) cur+=sprintf(cur,"%s%u",j?",":"",records[i].gpr_snapshot[j]);
+                cur+=sprintf(cur,"]}");
+            }
+            sprintf(cur,"]}");send_response(body);free(body);
+        }
+    }
     else if (strcmp(cmd, "read_ram") == 0)     handle_read_ram(id, line);
     else if (strcmp(cmd, "pad_state") == 0)    handle_pad_state(id);
     else if (strcmp(cmd, "set_input") == 0)    handle_set_input(id, line);
+    else if (strcmp(cmd, "clear_input") == 0) { handle_set_input(id, "{\"pad\":0}");s_input_override=0; }
     else if (strcmp(cmd, "press") == 0)        handle_press(id, line);
     else if (strcmp(cmd, "irq_state") == 0)    handle_irq_state(id);
     else if (strcmp(cmd, "irq_force") == 0)    handle_irq_force(id, line);
@@ -1355,10 +1427,10 @@ static void dispatch_line(char* line) {
             (uint64_t)s_cpu->frame + (uint64_t)frames > UINT32_MAX) {
             send_response("{\"ok\":false,\"error\":\"frames must be 1..10000\"}");
         } else {
+            vb_debug_server_set_paused(0);
             s_step_target = s_cpu->frame + (uint32_t)frames;
-            s_paused = 0;
             char result[128];
-            snprintf(result, sizeof(result), "{\"ok\":true,\"target\":%u}", s_step_target);
+            snprintf(result, sizeof(result), "{\"ok\":true,\"id\":%lld,\"target\":%u}", id, s_step_target);
             send_response(result);
         }
     }
@@ -1376,32 +1448,12 @@ int vb_debug_server_poll(void) {
         if (c != VB_BAD_SOCKET) {
             set_nonblocking(c);
             s_client = c;
+            vb_stream_reset();
         }
     }
-    if (s_client != VB_BAD_SOCKET) {
-        char line[8192];
-        int n = recv(s_client, line, (int)sizeof(line) - 1, 0);
-        if (n > 0) {
-            line[n] = 0;
-            /* Multiple lines may arrive in one read; dispatch each. */
-            char* p = line;
-            while (p && *p) {
-                char* nl = strpbrk(p, "\r\n");
-                if (nl) { *nl = 0; dispatch_line(p); p = nl + 1; }
-                else    { dispatch_line(p); break; }
-            }
-        } else if (n == 0) {
-            vb_close_socket(s_client); s_client = VB_BAD_SOCKET;
-        } else {
-            int e = vb_socket_errno();
-            if (e != VB_EWOULDBLOCK
-#if !defined(_WIN32)
-                && e != EAGAIN
-#endif
-            ) {
-                vb_close_socket(s_client); s_client = VB_BAD_SOCKET;
-            }
-        }
+    if (s_client != VB_BAD_SOCKET && !vb_stream_poll(s_client, dispatch_line)) {
+        vb_close_socket(s_client); s_client = VB_BAD_SOCKET;
+        vb_stream_reset();
     }
-    return s_quit;
+    return s_quit && vb_stream.size == 0;
 }

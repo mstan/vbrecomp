@@ -22,10 +22,12 @@
 #include "host.h"
 #include "png_write.h"
 #include "cpu_state.h"
+#include "v810_interpreter.h"
 #include "debug_server.h"
 #include "input.h"
 #include "interrupts.h"
 #include "memory.h"
+#include "stub_abort.h"
 #include "ring_frame.h"
 #include "timer.h"
 #include "vip.h"
@@ -63,6 +65,9 @@ static void print_help(const char* argv0) {
         "  --stereo         Show both eyes stacked vertically (L top / R bottom)\n"
         "                   instead of the single-eye default.\n"
         "  --paused         Start paused (requires debug tools).\n"
+        "  --execution MODE hybrid (default), native, or interpreter.\n"
+        "  --save PATH      Cartridge save (64KiB, saved on clean exit).\n"
+        "  --no-save        Disable cartridge save loading/writing.\n"
         "  --launcher       Always open the game launcher.\n"
         "  --no-launcher    Use saved settings and start directly.\n"
         "  --config PATH    Settings file (default: beside executable).\n"
@@ -257,10 +262,7 @@ static const uint16_t s_pad_bits[14] = {
     VB_PAD_A, VB_PAD_B, VB_PAD_LT, VB_PAD_RT, VB_PAD_START, VB_PAD_SELECT
 };
 static uint16_t pad_from_keyboard(void) {
-    /* vb-runtime's pad word is ACTIVE-HIGH (a set bit = pressed).
-     * This is opposite to vb-beetle's active-low convention; the
-     * V810 input register synthesises the active-low view at read
-     * time inside input.c. */
+    /* Hardware pad masks use one bit per pressed button. */
     const Uint8* keys = SDL_GetKeyboardState(nullptr);
     uint16_t pad = 0;
     if (!keys) return pad;
@@ -390,6 +392,12 @@ int main(int argc, char** argv) {
             port = std::atoi(argv[++i]);
         } else if (a == "--rom" && i + 1 < argc) {
             rom_path = argv[++i];
+        } else if (a == "--execution" && i + 1 < argc) {
+            std::string mode=argv[++i];
+            if(mode=="hybrid") vb_execution.mode=VB_EXEC_HYBRID;
+            else if(mode=="native") vb_execution.mode=VB_EXEC_NATIVE;
+            else if(mode=="interpreter") vb_execution.mode=VB_EXEC_INTERPRETER;
+            else { std::puts("Invalid --execution mode"); return 2; }
         } else if (a == "--paused") {
             start_paused = true;
         } else if (a == "--headless") {
@@ -464,15 +472,9 @@ int main(int argc, char** argv) {
         cpu.write16 = vb_write16;
         cpu.write32 = vb_write32;
         vb_cpu_reset(&cpu);
-        // Seed r31 with the dispatch sentinel ONCE here, not on every
-        // vb_dispatch entry. The cart's reset trampoline reaches its
-        // entry point via JR (no JAL) so r31 is never updated from this
-        // initial value until the first JAL fires. The cart then saves
-        // r31 onto its stack at function prologues so subsequent JMP r31
-        // unwinds correctly all the way back to the sentinel. Setting
-        // this in vb_dispatch instead would clobber the cart's live r31
-        // on every yielded resume and break the cart's main loop.
-        cpu.gpr[31] = 0xDEAD0000u;
+        vb_memory_set_cpu(&cpu);
+        if (!vb_host_load_sram()) { std::puts(vb_host_error().c_str()); vb_memory_shutdown(); return 6; }
+        // Architectural r31 remains zero at reset.
         std::printf("vb-runtime: loaded ROM %s (%u bytes), reset PC 0x%08X\n",
                     rom_path, vb_rom_size(), VB_RESET_VECTOR);
     } else {
@@ -669,7 +671,7 @@ int main(int argc, char** argv) {
      * "one frame ready to present" is the natural cadence; in halted
      * idle it takes ~20 passes (IDLE_TICK_CYCLES) to accumulate one
      * frame's worth, which still leaves TCP/SDL polls responsive. */
-    constexpr uint64_t VB_CYCLES_PER_FRAME = 397853;
+    constexpr uint64_t VB_CYCLES_PER_FRAME = 259u * 384u * 4u;
     uint64_t last_present_cycles = 0;
     /* Cycle-driven frame counter (Axis-6). Independent of the SDL present
      * path so cpu.frame advances in --headless too; cpu.frame was previously
@@ -708,6 +710,7 @@ int main(int argc, char** argv) {
          * case a single pass spanned more than one frame period. */
         while (cpu.cycles - last_frame_cycles >= VB_CYCLES_PER_FRAME) {
             last_frame_cycles += VB_CYCLES_PER_FRAME;
+            vb_devices_end_frame(cpu.cycles);
             cpu.frame++;
             vb_ring_frame_record(&cpu);
         }
@@ -748,12 +751,10 @@ int main(int argc, char** argv) {
             if (sdl_quit) break;
         }
 #endif
-        /* Compose the pad. With a window open, the keyboard is the
-         * authority and the game controller OR's in; this clobbers TCP
-         * press/set_input every frame. Controller support requires SDL,
-         * so a --headless run is driven purely by TCP commands. */
+        /* The configured keyboard/controller drives a windowed game unless
+         * a TCP input override is active. clear_input restores physical input. */
 #if VB_RUNTIME_HAVE_SDL
-        if (!headless) {
+        if (!headless && !vb_debug_server_input_override()) {
             uint16_t controller_pad = pad_from_gamecontroller(nullptr);
 #if defined(RECOMP_LAUNCHER)
             if (s_runtime_ui && recomp_runtime_ui_is_open(s_runtime_ui))
@@ -793,15 +794,13 @@ int main(int argc, char** argv) {
             // per frame. The frame-sized cap bounds a pass when nothing is
             // deliverable (e.g. all sources masked).
             uint64_t idle_consumed = 0;
-            while (idle_consumed < VB_CYCLES_PER_FRAME) {
-                int32_t step  = vb_vip_cycles_to_next_event();
-                int32_t tstep = vb_timer_cycles_to_next_event();
-                if (tstep < step) step = tstep;
+            while (cpu.cycles < last_frame_cycles + VB_CYCLES_PER_FRAME) {
+                int32_t step = vb_devices_cycles_to_next_event(cpu.cycles);
                 if (step < 1) step = 1;
+                uint64_t frame_remaining=last_frame_cycles + VB_CYCLES_PER_FRAME-cpu.cycles;
+                if ((uint64_t)step > frame_remaining) step=(int32_t)frame_remaining;
                 cpu.cycles += (uint64_t)step;
-                vb_timer_tick((uint32_t)step);
-                vb_vip_tick((uint64_t)step);
-                vb_vsu_tick((uint64_t)step);
+                vb_devices_sync(cpu.cycles);
                 idle_consumed += (uint64_t)step;
                 const int lvl = vb_irq_highest_pending_level();
                 if (lvl >= 0 && !cpu.psw_np && !cpu.psw_ep && !cpu.psw_id
@@ -823,11 +822,11 @@ int main(int argc, char** argv) {
         // into tempo drift. STEP_BUDGET remains the backstop for the case
         // where no device event is near (both sources disabled).
         {
-            int32_t vip_next = vb_vip_cycles_to_next_event();
-            int32_t tmr_next = vb_timer_cycles_to_next_event();
-            int32_t ev_next  = vip_next < tmr_next ? vip_next : tmr_next;
+            int32_t ev_next = vb_devices_cycles_to_next_event(cpu.cycles);
             if (ev_next < 1) ev_next = 1;
             cpu.cycle_deadline = cpu.cycles + (uint64_t)ev_next;
+            if (cpu.cycle_deadline > last_frame_cycles + VB_CYCLES_PER_FRAME)
+                cpu.cycle_deadline = last_frame_cycles + VB_CYCLES_PER_FRAME;
         }
         cpu.step_budget = STEP_BUDGET;
         cpu.yielded = 0;
@@ -842,9 +841,7 @@ int main(int argc, char** argv) {
         // estimate. step_budget is unchanged: it remains the per-basic-
         // block yield budget, fully decoupled from cycle accounting.
         const uint64_t cyc_delta = cpu.cycles - cyc_before;
-        vb_timer_tick((uint32_t)cyc_delta);
-        vb_vip_tick(cyc_delta);
-        vb_vsu_tick(cyc_delta);
+        vb_devices_sync(cpu.cycles);
 
         if (cpu.yielded) {
             // Resume from wherever the cart left off next tick.
@@ -865,30 +862,7 @@ int main(int argc, char** argv) {
                         cpu.pc);
             std::fflush(stdout);
         } else {
-            // Top-level JMP r31 — the cart "returned from main". VB
-            // carts often boot, set up VIP, and JMP r31 expecting an
-            // OS to take over; on real hardware the CPU would fetch
-            // garbage. Our recomp catches this via the DEAD0000
-            // sentinel and treats it as a HALT — the IRQ-driven
-            // main work then runs entirely from ISRs (VIP frame
-            // events) until input or another event extends the
-            // cart's state. Without this the runtime would idle on
-            // TCP and stop dispatching forever.
-            //
-            // Subsequent ISRs entering and RETI'ing back here cycle
-            // through this branch — so the print is gated to fire
-            // only on the first entry.
-            static bool s_sentinel_logged = false;
-            if (!s_sentinel_logged) {
-                std::printf("vb-runtime: top-level JMP r31 to sentinel "
-                            "(pc=0x%08X) — entering HALT-equivalent "
-                            "idle; ISRs will continue to dispatch on "
-                            "IRQ delivery\n", cpu.pc);
-                std::fflush(stdout);
-                s_sentinel_logged = true;
-            }
-            cpu.halted = 1;
-            dispatch_pc = cpu.pc;
+            vb_stub_abort("dispatcher returned without yielding or halting", cpu.pc, 0);
         }
 
         } else {
@@ -1008,11 +982,13 @@ int main(int argc, char** argv) {
     if (!headless) SDL_Quit();
 #endif
 
+    bool save_ok = !rom_path || vb_host_save_sram();
+    if (!save_ok) std::puts(vb_host_error().c_str());
     vb_mod_runtime_deactivate();
     vb_debug_server_stop();
     vb_memory_shutdown();
     vb_ring_frame_shutdown();
     vb_wtrace_shutdown();
     vb_fntrace_shutdown();
-    return 0;
+    return save_ok ? 0 : 6;
 }

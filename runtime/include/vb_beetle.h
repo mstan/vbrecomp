@@ -49,6 +49,7 @@ void vb_beetle_run_frame(uint16_t pad);
 
 /* Latest video frame. Returns 1 if a frame has been captured since
  * init; pixels are 32-bit XRGB8888 native-endian, `*w * *h` total. */
+int vb_beetle_get_eye(int eye, const uint32_t** pixels, unsigned* w, unsigned* h);
 int  vb_beetle_get_framebuffer(const uint32_t** out_pixels,
                                unsigned* out_w, unsigned* out_h);
 

@@ -64,6 +64,9 @@ int vb_irq_check_and_deliver(CPUState* cpu) {
     if (cpu->psw_np || cpu->psw_ep || cpu->psw_id) return 0;
     if ((int)cpu->psw_int_level > level) return 0;
 
+    /* Match the oracle's pre-decode boundary record before IRQ dispatch. */
+    VB_CPUHOOK(cpu);
+
     /* Beetle op_INT_HANDLER: save PC + PSW, retarget to vector,
      * set EP|ID, clear AE, raise interrupt-enable level by 1. */
     cpu->sysreg[VB_SR_EIPC]  = cpu->pc;
@@ -82,6 +85,7 @@ int vb_irq_check_and_deliver(CPUState* cpu) {
     cpu->sysreg[VB_SR_PSW] = vb_psw_pack(cpu);
 
     cpu->halted     = 0;
+    cpu->bstr_src_valid = 0;
     s_in_service   |= (1u << level);
     return 1;
 }
@@ -141,6 +145,9 @@ void vb_reti(CPUState* cpu) {
         cpu->pc = cpu->sysreg[VB_SR_EIPC] & 0xFFFFFFFEu;
         vb_psw_unpack(cpu, cpu->sysreg[VB_SR_EIPSW]);
     }
+    /* Restoring PSW can make an already pending interrupt acceptable.
+     * Return to the scheduler before executing the resumed instruction. */
+    cpu->cycle_deadline = cpu->cycles;
     /* No in-service bookkeeping — the V810 has no hardware
      * in-service register. The IRQ controller's s_in_service bit
      * for this level is cleared by software's acknowledge write
@@ -173,6 +180,11 @@ void vb_cpu_reset(CPUState* cpu) {
     cpu->halted      = 0;
     cpu->step_budget = 0;
     cpu->yielded     = 0;
+    cpu->cycle_deadline = UINT64_MAX;
+    cpu->bstr_src_cache = 0;
+    cpu->bstr_src_valid = 0;
+    cpu->pipeline_class = 0;
+    cpu->bus_tail_cycles = 0;
 
     cpu->read8  = r8;
     cpu->read16 = r16;
