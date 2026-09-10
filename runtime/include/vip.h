@@ -127,6 +127,10 @@ uint64_t vb_vip_cycles(void);
  * hash of a CHR slot. Populated when capture/recolor or a game renderer requests it. */
 const uint16_t* vb_vip_attr_buffer(int eye);
 const VbSourceTexel* vb_vip_source_buffer(int eye);
+/* Observe a bus store before its bytes are written. Updates only changed 2bpp
+ * framebuffer pixels, never guest state. VIP drawing replaces attribution
+ * normally; unchanged pixels retain their original owner through OR stores. */
+void vb_vip_record_cpu_write(uint32_t addr, uint32_t value, unsigned width, uint32_t tag);
 void vb_vip_copy_levels(int eye, uint8_t* levels);
 uint32_t        vb_vip_char_hash(uint32_t char_no);
 

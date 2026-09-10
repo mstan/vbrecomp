@@ -77,6 +77,34 @@ int main(void) {
         if(x<8)assert(s->world==31 && s->tile==2 && s->raw==3);
         else assert(s->world==(((x+2*y)%4)?32:0));
     }
-    puts("PASS: BG/HBias/affine/OBJ, flips, both eyes, native pixels and displayed source lifetime");
+    /* CPU software drawing shares native framebuffer ownership and lifetime.
+     * A packed OR store must not steal untouched pixels from another source. */
+    setup(0,0,0); s_display_fb=0;
+    for(unsigned slot=0;slot<2;++slot)for(unsigned eye=0;eye<2;++eye) {
+        unsigned base=slot*0x8000+eye*0x10000, at=base+64*10+4;
+        vb_vip_record_cpu_write(at,0x00000003,4,101);
+        assert(vb_vip_read32(at)==0); /* Observation has no guest side effect. */
+        vb_vip_write32(at,0x00000003);
+        vb_vip_record_cpu_write(at,0x0000000b,4,202);
+        vb_vip_write32(at,0x0000000b);
+        const VbSourceTexel* s=s_source_fb[slot][eye];
+        assert(s[16*384+10].tile_hash==101 && s[16*384+10].raw==3);
+        assert(s[17*384+10].tile_hash==202 && s[17*384+10].raw==2);
+        assert(s[17*384+10].kind==4 && s[17*384+10].world==0);
+        assert(s[17*384+10].x==10 && s[17*384+10].y==17);
+        vb_vip_record_cpu_write(at,0x000b,2,303); /* Identical write retains owners. */
+        vb_vip_write16(at,0x000b);
+        assert(s[17*384+10].tile_hash==202);
+        vb_vip_record_cpu_write(at,0x08,1,404); vb_vip_write8(at,0x08);
+        assert(s[16*384+10].kind==0 && s[17*384+10].tile_hash==202);
+        unsigned blank=base+64*10+56; /* Hidden rows never alias a visible row. */
+        vb_vip_record_cpu_write(blank,0xff,1,505); vb_vip_write8(blank,0xff);
+        assert(s[17*384+10].tile_hash==202);
+    }
+    s_drawing_fb=1;
+    vip_draw_block_into(2,left,right);
+    assert(s_source_fb[1][0][17*384+10].kind!=4);
+    assert(s_source_fb[0][0][17*384+10].tile_hash==202);
+    puts("PASS: native rasterizer and CPU source ownership, both eyes, packed stores and display lifetime");
     return 0;
 }

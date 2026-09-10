@@ -24,6 +24,18 @@
 #include "cpu_state.h"
 
 static CPUState* s_bus_cpu;
+static VbWriteObserver s_write_observer;
+int vb_memory_register_write_observer(VbWriteObserver observer) {
+    if (!observer || s_write_observer) return 0;
+    s_write_observer = observer;
+    return 1;
+}
+static void observe_write(uint32_t addr, uint32_t value, unsigned width) {
+    uint32_t tag = s_write_observer && s_bus_cpu
+        ? s_write_observer(s_bus_cpu, addr, value, width) : 0;
+    if (((addr >> 24) & 7u) == 0)
+        vb_vip_record_cpu_write(addr, value, width, tag);
+}
 static uint64_t s_timer_cycle,s_vip_cycle,s_vsu_cycle,s_input_cycle;
 void vb_memory_set_cpu(CPUState* cpu) { s_bus_cpu=cpu; }
 uint64_t vb_memory_access_cycle(void) {
@@ -286,6 +298,7 @@ uint32_t raw_read32(uint32_t addr) {
  */
 void raw_write8(uint32_t addr, uint8_t v) {
     vb_wtrace_record(addr, (uint32_t)v, 1u);
+    observe_write(addr, v, 1);
     uint32_t p = fold(addr);
     switch (region_of(p)) {
         case 0: vb_vip_write8(p, v); return;
@@ -310,6 +323,7 @@ void raw_write8(uint32_t addr, uint8_t v) {
 void raw_write16(uint32_t addr, uint16_t v) {
     addr &= ~1u;
     vb_wtrace_record(addr, (uint32_t)v, 2u);
+    observe_write(addr, v, 2);
     uint32_t p = fold(addr);
     switch (region_of(p)) {
         case 0: vb_vip_write16(p, v); return;
@@ -339,6 +353,7 @@ void raw_write16(uint32_t addr, uint16_t v) {
 void raw_write32(uint32_t addr, uint32_t v) {
     addr &= ~3u;
     vb_wtrace_record(addr, v, 4u);
+    observe_write(addr, v, 4);
     uint32_t p = fold(addr);
     switch (region_of(p)) {
         case 0: vb_vip_write32(p, v); return;

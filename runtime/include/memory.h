@@ -34,6 +34,13 @@ int vb_memory_init(const char* rom_path);
 void vb_memory_shutdown(void);
 struct CPUState;
 void vb_memory_set_cpu(struct CPUState* cpu);
+/* Trusted game-owned observation only; never alter the CPU or call the bus.
+ * Invoked before each aligned store. Return an opaque presentation tag for
+ * framebuffer writes (0 = unclassified). Registration persists across resets.
+ * The same path observes generated code and interpreter stores. */
+typedef uint32_t (*VbWriteObserver)(const struct CPUState* cpu, uint32_t addr,
+                                  uint32_t value, unsigned width);
+int vb_memory_register_write_observer(VbWriteObserver observer);
 void vb_devices_sync(uint64_t cycle);
 void vb_devices_end_frame(uint64_t cycle);
 uint64_t vb_memory_access_cycle(void);

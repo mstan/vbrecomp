@@ -11,7 +11,10 @@ extern "C" {
 
 /* Source artwork sampled by the native rasterizer. Recorded at draw time,
  * not reconstructed from VRAM after display. x/y are background-map texels;
- * u/v are unflipped CHR texels. kind 3 denotes OBJ, with map=255. */
+ * u/v are unflipped CHR texels. kind 3 denotes OBJ, with map=255.
+ * kind 4 is a changed CPU framebuffer pixel: tile_hash stores the opaque
+ * game-owned provenance tag, x/y are framebuffer coordinates, map=255,
+ * world=0. Tag 0 means unclassified. No CHR identity exists for kind 4. */
 typedef struct VbSourceTexel {
     uint32_t tile_hash;
     uint16_t x, y, tile;

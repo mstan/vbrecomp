@@ -127,11 +127,31 @@ also enables world tracking). `frame->sources` then provides a `VbSourceTexel`
 for each displayed pixel: original CHR content hash, unflipped tile `u/v`, raw
 2bpp value, BG-map `x/y`, world index, map base, and draw mode. Modes are normal
 BG (0), horizontal bias (1), affine (2), and OBJ (3, map 255). `world == 0`
-means no native drawing source. The rasterizer records this alongside its actual
+means no VIP world source. The rasterizer records this alongside its actual
 sampling and occlusion, in the same double-buffer slot as the native pixels.
 Changing CHR RAM for the next animation does not change the displayed metadata.
 This avoids guessing character identity from world numbers or reading mutable
 VRAM at presentation time. Only the game module interprets artwork or materials.
+
+CPU framebuffer drawing uses source kind **4**, map **255**, world **0**. For
+that kind, `tile_hash` holds an opaque game-owned presentation tag (0 means
+unclassified), `x/y` are framebuffer coordinates and `raw` is the written 2bpp
+pixel. CHR fields do not apply. The `VBSRC001` record stays 16 bytes; consumers
+must distinguish kind 4 before interpreting the first word as a CHR hash.
+
+A trusted game can register one `VbWriteObserver` through
+`vb_memory_register_write_observer`. It sees a read-only CPU pointer and aligned
+store address/value/width before each bus write, for both generated and
+interpreter execution. It may update host-only provenance and return a tag for
+direct framebuffer writes. It must not mutate guest state or call the bus.
+Registration persists across guest resets; game-specific metadata must tolerate
+that lifetime. No package can introduce this code dynamically.
+
+Only changed 2bpp pixels acquire the returned tag. Packed read/modify/write stores
+retain unchanged pixels' owners, zero pixels lose their source, and native VIP
+drawing replaces the affected source metadata normally. Eye and framebuffer slot
+follow the actual address, including VIP mirrors. Attribution is available even
+when the color feature is disabled, allowing later activation while paused.
 
 The framework resets the renderer before activating the next committed plan.
 Use the game's own module to interpret world identities and game state; generic

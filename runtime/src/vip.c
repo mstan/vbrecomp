@@ -744,6 +744,32 @@ void vb_vip_write8(uint32_t addr, uint8_t v) {
     s_vip_mem[vip_route(o)] = v;
 }
 
+void vb_vip_record_cpu_write(uint32_t addr, uint32_t value, unsigned width, uint32_t tag) {
+    if (!vb_renderer_tracks_texels()) return;
+    uint32_t o = vip_offset(addr);
+    if (o >= 0x20000u || (o & 0x7fffu) >= 0x6000u) return;
+    unsigned slot = (o >> 15) & 1u, eye = (o >> 16) & 1u;
+    for (unsigned byte = 0; byte < width; ++byte) {
+        unsigned at = o + byte, x = (at & 0x7fffu) / 64u;
+        unsigned y0 = (at & 63u) * 4u;
+        if (x >= 384 || y0 >= 224) continue;
+        uint8_t old = s_vip_mem[at], next = (uint8_t)(value >> (byte * 8));
+        for (unsigned bit = 0; bit < 8; bit += 2) {
+            uint8_t pixel = (next >> bit) & 3u;
+            if (pixel == ((old >> bit) & 3u)) continue;
+            unsigned y = y0 + bit / 2, i = y * 384 + x;
+            s_attr_fb[slot][eye][i] = 0;
+            VbSourceTexel source = {0};
+            if (pixel) {
+                source.tile_hash = tag;
+                source.x = (uint16_t)x; source.y = (uint16_t)y;
+                source.map = 255; source.kind = 4; source.raw = pixel;
+            }
+            s_source_fb[slot][eye][i] = source;
+        }
+    }
+}
+
 void vb_vip_write16(uint32_t addr, uint16_t v) {
     uint32_t o = vip_offset(addr) & ~1u;
     if (vip_is_register(o)) {
