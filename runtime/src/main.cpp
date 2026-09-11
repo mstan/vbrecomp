@@ -38,6 +38,7 @@
 
 #if VB_RUNTIME_HAVE_SDL
 #  include <SDL.h>
+#  include "host_controller.h"
 #endif
 #if defined(RECOMP_LAUNCHER) && VB_RUNTIME_HAVE_SDL
 #  include "recomp_runtime_ui.h"
@@ -256,11 +257,6 @@ static bool vb_runtime_ui_event(const SDL_Event& ev) {
 }
 #endif
 
-static const uint16_t s_pad_bits[14] = {
-    VB_PAD_LUP, VB_PAD_LDOWN, VB_PAD_LLEFT, VB_PAD_LRIGHT,
-    VB_PAD_RUP, VB_PAD_RDOWN, VB_PAD_RLEFT, VB_PAD_RRIGHT,
-    VB_PAD_A, VB_PAD_B, VB_PAD_LT, VB_PAD_RT, VB_PAD_START, VB_PAD_SELECT
-};
 static uint16_t pad_from_keyboard(void) {
     /* Hardware pad masks use one bit per pressed button. */
     const Uint8* keys = SDL_GetKeyboardState(nullptr);
@@ -269,7 +265,7 @@ static uint16_t pad_from_keyboard(void) {
     if (vb_host_config.player_source != 1) return 0;
     for (int i = 0; i < 14; ++i) {
         const int key = vb_host_config.keys[i];
-        if (key > 0 && key < SDL_NUM_SCANCODES && keys[key]) pad |= s_pad_bits[i];
+        if (key > 0 && key < SDL_NUM_SCANCODES && keys[key]) pad |= vb_host_pad_bits[i];
     }
     return pad;
 }
@@ -324,29 +320,7 @@ static uint16_t pad_from_gamecontroller(bool* out_connected) {
         return 0;
     }
     if (out_connected) *out_connected = true;
-    SDL_GameController* c = s_pad;
-    uint16_t pad = 0;
-
-    if (vb_host_config.player_source != 2) return 0;
-    for (int i = 0; i < 14; ++i) {
-        const int binding = vb_host_config.pads[i];
-        bool pressed = false;
-        if (binding > 0 && binding < 100 && binding - 1 < SDL_CONTROLLER_BUTTON_MAX)
-            pressed = SDL_GameControllerGetButton(c, (SDL_GameControllerButton)(binding - 1)) != 0;
-        else if (binding >= 100 && binding < 112) {
-            const int axis = (binding - 100) / 2;
-            const int value = SDL_GameControllerGetAxis(c, (SDL_GameControllerAxis)axis);
-            const int threshold = vb_host_config.deadzone * 32767 / 100;
-            pressed = ((binding - 100) & 1) ? value > threshold : value < -threshold;
-        } else if (binding >= 1000) {
-            const unsigned mask = (unsigned)(binding - 1000);
-            pressed = mask != 0;
-            for (int button = 0; button < SDL_CONTROLLER_BUTTON_MAX && button < 16; ++button)
-                if ((mask & (1u << button)) && !SDL_GameControllerGetButton(c, (SDL_GameControllerButton)button)) pressed = false;
-        }
-        if (pressed) pad |= s_pad_bits[i];
-    }
-    return pad;
+    return vb_host_controller_pad(s_pad, vb_host_config);
 }
 #endif  /* VB_RUNTIME_HAVE_SDL */
 
