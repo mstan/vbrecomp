@@ -335,6 +335,26 @@ def _is_terminator(ins: DecodedInstruction) -> bool:
     return False
 
 
+def _has_saved_link_prologue(rom: RomImage, target: int) -> bool:
+    """Recognize an ABI stack allocation followed by saving r31 in its top word.
+
+    Used only for constant ROM addresses materialized by reachable instructions.
+    Decodability alone is insufficient to promote an arbitrary data pointer.
+    """
+    if target & 1:
+        return False
+    allocate = rom.decode_at_va(target)
+    save = rom.decode_at_va(target + 4)
+    if allocate is None or save is None:
+        return False
+    return (allocate.fmt is Format.V and allocate.opcode6 == 0x29
+            and allocate.reg1 == allocate.reg2 == 3
+            and allocate.imm16_s <= -4 and allocate.imm16_s % 4 == 0
+            and save.fmt is Format.VI and save.opcode6 == 0x37
+            and save.reg1 == 3 and save.reg2 == 31
+            and save.imm16_s == -allocate.imm16_s - 4)
+
+
 def cfg_walk_from_seeds(rom: RomImage, seeds: Iterable[int]) -> WalkResult:
     """BFS over the V810 CFG starting at every seed PC.
 
@@ -432,6 +452,15 @@ def cfg_walk_from_seeds(rom: RomImage, seeds: Iterable[int]) -> WalkResult:
 
             if (ins.fmt is Format.I and ins.opcode6 == 0x06
                     and ins.reg1 != 31):
+                # Compiler-emitted indirect calls explicitly construct the
+                # next instruction's address in r31 before JMP rX. Follow
+                # that verified continuation as well as the callee edge.
+                # The callee may clobber registers, so carry no constants.
+                continuation = pc + ins.size
+                if (regs.get(31) == continuation
+                        and rom.va_to_offset(continuation) is not None
+                        and continuation not in result.visited):
+                    work.append((continuation, {0: 0}))
                 # Indirect JMP rX. Try to resolve from current regs.
                 if ins.reg1 in regs:
                     resolved = regs[ins.reg1] & 0xFFFFFFFF
@@ -464,6 +493,17 @@ def cfg_walk_from_seeds(rom: RomImage, seeds: Iterable[int]) -> WalkResult:
                 break
 
             regs = _apply_to_regs(ins, regs)
+            # Address-taken callbacks can be assembled as call arguments to
+            # a registration helper; they need not appear as raw ROM words.
+            # A complete tracked constant and exact stack/LP-save prologue
+            # distinguish these entries from arbitrary materialized data.
+            if (ins.fmt is Format.V and ins.opcode6 in (0x28, 0x2C)
+                    and ins.reg2 != 0 and ins.reg2 in regs):
+                callback = regs[ins.reg2] & 0xFFFFFFFF
+                if _has_saved_link_prologue(rom, callback):
+                    result.call_targets.add(callback)
+                    if callback not in result.visited:
+                        work.append((callback, {0: 0}))
             pc = pc + ins.size
 
     return result
@@ -907,10 +947,10 @@ def discover_functions(rom: RomImage,
     #      Mario's Tennis's real tables run 16/40/90/147 cells long
     #      while false-positive instruction-stream literals cluster
     #      at length 2-3.
-    #   2. Per-candidate walks below cap visited-PC count at 800. A
-    #      seed that walks past the cap is almost certainly walking
-    #      into data (real functions are ~100-1000 instructions); we
-    #      drop it before it pollutes the function set.
+    #   2. Per-candidate walks cap newly discovered PCs at 800 to
+    #      bound speculative data traversal. Known callees and shared
+    #      tails do not consume this budget: a tiny table target can
+    #      legitimately rejoin thousands of already-proven instructions.
     # Also restrict candidates to the cart's actual code range
     # (0xFFF80000-0xFFFFFFFF for a 512 KB cart at the top of memory)
     # so we don't admit the alias-mirrored 0x07/0x0F upper-bit
@@ -935,7 +975,7 @@ def discover_functions(rom: RomImage,
             step = cfg_walk_from_seeds(rom, [seed])
             if not step.visited:
                 continue
-            if len(step.visited) > PER_SEED_VISIT_CAP:
+            if len(step.visited.keys() - walk.visited.keys()) > PER_SEED_VISIT_CAP:
                 continue
             accepted.add(seed)
             _merge_walk_into(walk, step)

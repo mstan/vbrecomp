@@ -255,6 +255,64 @@ class TestCFGWalk(unittest.TestCase):
         self.assertNotIn(0x07000022, walk.visited)
         self.assertEqual(walk.indirect_jumps, {0x07000020: 1})
 
+    def test_indirect_call_discovers_explicit_link_continuation(self):
+        rom = _blank_rom()
+        # MOVHI/MOVEA construct the exact instruction after JMP in r31.
+        # The unknown callee is still unresolved, but its return site has
+        # another direct call that must participate in discovery.
+        rom[0x20:0x24] = _movhi(31, 0, 0x0700)
+        rom[0x24:0x28] = _movea(31, 31, 0x2a)
+        rom[0x28:0x2a] = _jmp(7)
+        rom[0x2a:0x2e] = _jal(0x60 - 0x2a)
+        rom[0x2e:0x30] = _ret()
+        rom[0x60:0x62] = _ret()
+        walk = cfg_walk_from_seeds(RomImage.from_bytes(bytes(rom)), [0x07000020])
+        self.assertIn(0x0700002a, walk.visited)
+        self.assertIn(0x07000060, walk.call_targets)
+        self.assertEqual(walk.indirect_jumps[0x07000028], 7)
+
+    def test_indirect_tail_jump_does_not_invent_fallthrough(self):
+        rom = _blank_rom()
+        rom[0x20:0x24] = _movhi(31, 0, 0x0700)
+        rom[0x24:0x28] = _movea(31, 31, 0x70)
+        rom[0x28:0x2a] = _jmp(7)
+        rom[0x2a:0x2c] = _halt()
+        walk = cfg_walk_from_seeds(RomImage.from_bytes(bytes(rom)), [0x07000020])
+        self.assertNotIn(0x0700002a, walk.visited)
+        self.assertNotIn(0x07000070, walk.visited)
+
+    def test_materialized_stored_callback_is_discovered(self):
+        rom = _blank_rom()
+        rom[0x20:0x24] = _movhi(10, 0, 0x0700)
+        rom[0x24:0x28] = _movea(10, 10, 0x100)
+        # Pass the callback as an argument to a registration helper. Its
+        # store sees fresh unknown registers during the interprocedural walk.
+        rom[0x28:0x2c] = _jal(0x180 - 0x28)
+        rom[0x2c:0x2e] = _halt()
+        rom[0x180:0x184] = _enc_fmt_v(0x37, 10, 4, 16)
+        rom[0x184:0x186] = _ret()
+        rom[0x100:0x104] = _enc_fmt_v(0x29, 3, 3, -24)
+        rom[0x104:0x108] = _enc_fmt_v(0x37, 31, 3, 20)
+        rom[0x108:0x10a] = _ret()
+        walk = cfg_walk_from_seeds(RomImage.from_bytes(bytes(rom)), [0x07000020])
+        self.assertIn(0x07000100, walk.call_targets)
+        self.assertIn(0x07000108, walk.visited)
+
+    def test_stored_data_pointer_is_not_a_callback(self):
+        rom = _blank_rom()
+        rom[0x20:0x24] = _movhi(10, 0, 0x0700)
+        rom[0x24:0x28] = _movea(10, 10, 0x100)
+        rom[0x28:0x2c] = _enc_fmt_v(0x37, 10, 4, 16)
+        rom[0x2c:0x2e] = _halt()
+        # Decodable bytes alone are insufficient. A mismatched LP save
+        # outside the allocated frame must also fail the prologue guard.
+        rom[0x100:0x104] = _enc_fmt_v(0x29, 3, 3, -24)
+        rom[0x104:0x108] = _enc_fmt_v(0x37, 31, 3, 24)
+        rom[0x108:0x10a] = _ret()
+        walk = cfg_walk_from_seeds(RomImage.from_bytes(bytes(rom)), [0x07000020])
+        self.assertNotIn(0x07000100, walk.call_targets)
+        self.assertNotIn(0x07000100, walk.visited)
+
     def test_branch_target_outside_cart_logged_not_followed(self):
         rom = _blank_rom()
         # JR with a disp landing in bank 6 (cart-RAM). The decoder
@@ -356,6 +414,33 @@ class TestBuildCFG(unittest.TestCase):
 
 
 class TestCartridgeCoverage(unittest.TestCase):
+    def test_pointer_target_can_rejoin_large_known_function(self):
+        data = bytearray(b'\xff' * TEST_ROM_SIZE)
+        base = 0x100000000 - len(data)
+        common = 0x400
+        _install_simple_trampoline(data, entry_va=base + common)
+        data[common:common + 1800] = _mov_rr(0, 0) * 900
+        data[common + 1800:common + 1802] = _ret()
+        targets = [base + off for off in (0x100, 0x110, 0x120, 0x130)]
+        for index, target in enumerate(targets):
+            off = target - base
+            data[off:off + 4] = _jr(common - off)
+            data[0x3000 + index * 4:0x3004 + index * 4] = target.to_bytes(4, 'little')
+        starts = {fn.start_pc for fn in discover_functions(RomImage.from_bytes(bytes(data)))}
+        self.assertTrue(set(targets).issubset(starts))
+
+    def test_large_unproven_pointer_target_remains_bounded(self):
+        data = bytearray(b'\xff' * TEST_ROM_SIZE)
+        base = 0x100000000 - len(data)
+        _install_simple_trampoline(data, entry_va=base + 0x20)
+        data[0x20:0x22] = _halt()
+        data[0x400:0x400 + 1800] = _mov_rr(0, 0) * 900
+        data[0x400 + 1800:0x400 + 1802] = _ret()
+        target = base + 0x400
+        data[0x3000:0x3010] = target.to_bytes(4, 'little') * 4
+        starts = {fn.start_pc for fn in discover_functions(RomImage.from_bytes(bytes(data)))}
+        self.assertNotIn(target, starts)
+
     def test_one_megabyte_high_mirror_pointer_table(self):
         data = bytearray(b'\xff' * 0x100000)
         targets = [0xfff00100, 0xfff00200, 0xfff00300, 0xfff00400]
