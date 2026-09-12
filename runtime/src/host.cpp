@@ -25,6 +25,9 @@
 #define VB_GAME_TITLE "Virtual Boy Recompiled"
 #define VB_GAME_CRC32 0
 #endif
+#ifndef VB_GAME_REGION
+#define VB_GAME_REGION "Japan / USA"
+#endif
 
 VbHostConfig vb_host_config;
 namespace {
@@ -162,7 +165,7 @@ int vb_host_prepare(const char* executable, const char*& rom, bool headless) {
         RecompLauncherCGameInfo game = {};
         launcher_profile_apply("vb", &game);
         game.name = VB_GAME_TITLE;
-        game.region = "Japan / USA";
+        game.region = VB_GAME_REGION;
         game.expected_crc = VB_GAME_CRC32;
         game.has_expected_crc = VB_GAME_CRC32 != 0;
         game.mods = vb_mod_runtime_launcher_provider_c();
