@@ -70,7 +70,7 @@ int vb_host_argument(int& i, int argc, char** argv) {
     if (arg == "--launcher") { no_launcher = false; force_launcher = true; return 1; }
     if (arg == "--no-save") { sram_disabled = true; return 1; }
     if (arg != "--mods-dir" && arg != "--config" && arg != "--install-mod" &&
-        arg != "--enable-mod" && arg != "--disable-mod" && arg != "--save") return 0;
+        arg != "--enable-mod" && arg != "--disable-mod" && arg != "--set-mod-option" && arg != "--save") return 0;
     if (i + 1 == argc) { error = "Missing value for " + arg; return -1; }
     const std::string value = argv[++i];
     if (arg == "--mods-dir") mods_path = value;
@@ -140,6 +140,18 @@ int vb_host_prepare(const char* executable, const char*& rom, bool headless) {
     for (const auto& action : actions) {
         int ok = 0;
         if (action.kind == "--install-mod") ok = vb_mod_install_archive(action.value.c_str());
+        else if (action.kind == "--set-mod-option") {
+            const auto first = action.value.find(':');
+            const auto second = first == std::string::npos ? first : action.value.find(':', first + 1);
+            const auto equal = second == std::string::npos ? second : action.value.find('=', second + 1);
+            if (first == std::string::npos || second == std::string::npos || equal == std::string::npos) {
+                error = "Mod option must use package:feature:option=value."; return -1;
+            }
+            ok = vb_mod_set_option(action.value.substr(0, first).c_str(),
+                action.value.substr(first + 1, second - first - 1).c_str(),
+                action.value.substr(second + 1, equal - second - 1).c_str(),
+                action.value.substr(equal + 1).c_str());
+        }
         else {
             const auto colon = action.value.find(':');
             if (colon != std::string::npos)

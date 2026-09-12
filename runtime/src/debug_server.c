@@ -32,6 +32,7 @@
 #include "asset_pack.h"
 #include "recolor.h"
 #include "renderer.h"
+#include "viewport.h"
 #include "watchdog.h"
 #include "wtrace.h"
 #include "fntrace.h"
@@ -345,34 +346,51 @@ static VbDebugHostCapture s_host_capture;
 static void source_put16(uint8_t* p, uint16_t v) { p[0]=(uint8_t)v; p[1]=(uint8_t)(v>>8); }
 static void source_put32(uint8_t* p, uint32_t v) { source_put16(p,(uint16_t)v); source_put16(p+2,(uint16_t)(v>>16)); }
 static void handle_source_dump(const char* line) {
-    char path[1024] = {0}; long long eye = 0;
+    char path[1024] = {0}; long long eye = 0, presented = 0;
     extract_str(line, "\"path\"", path, sizeof(path));
     extract_int(line, "\"eye\"", &eye);
+    extract_int(line, "\"presented\"", &presented);
     if (!path[0] || !vb_renderer_tracks_texels()) {
         send_response("{\"ok\":false,\"error\":\"source tracking and path required\"}"); return;
+    }
+    int width = presented ? vb_renderer_present_width() : 384;
+    if (presented) {
+        uint32_t* pixels = (uint32_t*)malloc(width * 224u * sizeof(uint32_t));
+        int rendered = pixels && vb_renderer_present_viewport(eye != 0, width, pixels);
+        free(pixels);
+        if (!rendered) { send_response("{\"ok\":false,\"error\":\"viewport source unavailable\"}"); return; }
     }
     FILE* file = fopen(path, "wb");
     if (!file) { send_response("{\"ok\":false,\"error\":\"cannot open source dump\"}"); return; }
     uint8_t header[24];memcpy(header,"VBSRC001",8);
-    source_put32(header+8,384);source_put32(header+12,224);
+    source_put32(header+8,width);source_put32(header+12,224);
     source_put32(header+16,eye != 0);source_put32(header+20,vb_vip_frame_seq());
     int ok = fwrite(header,1,sizeof(header),file)==sizeof(header);
-    const VbSourceTexel* sources=vb_vip_source_buffer(eye != 0);
+    const VbSourceTexel* sources=presented ? vb_renderer_present_sources(eye != 0, width) : vb_vip_source_buffer(eye != 0);
     /* Fixed little-endian wire format, independent of host struct padding. */
     for(int y=0;y<224 && ok;++y) {
-        uint8_t row[384*16];
-        for(int x=0;x<384;++x) {
-            const VbSourceTexel* s=&sources[y*384+x];uint8_t* p=&row[x*16];
+        uint8_t row[VB_VIEWPORT_MAX_WIDTH*16];
+        for(int x=0;x<width;++x) {
+            const VbSourceTexel* s=&sources[y*width+x];uint8_t* p=&row[x*16];
             source_put32(p,s->tile_hash);source_put16(p+4,s->x);
             source_put16(p+6,s->y);source_put16(p+8,s->tile);
             p[10]=s->u;p[11]=s->v;p[12]=s->map;p[13]=s->kind;p[14]=s->raw;p[15]=s->world;
         }
-        ok=fwrite(row,1,sizeof(row),file)==sizeof(row);
+        ok=fwrite(row,1,width*16u,file)==width*16u;
     }
     if (fclose(file)) ok = 0;
     send_response(ok ? "{\"ok\":true,\"format\":\"VBSRC001\"}" : "{\"ok\":false,\"error\":\"source dump failed\"}");
 }
 static void* s_host_capture_context;
+static void handle_viewport_state(const char* line) {
+    long long w = 0, h = 0;
+    extract_int(line, "\"window_width\"", &w); extract_int(line, "\"window_height\"", &h);
+    if (w > 0 && w <= 65536 && h > 0 && h <= 65536) vb_viewport_window((int)w, (int)h);
+    char body[256];
+    snprintf(body, sizeof(body), "{\"ok\":true,\"active\":%s,\"width\":%d,\"height\":224,\"maximum_width\":%d,\"plugin\":\"%s\"}",
+        vb_viewport_active() ? "true" : "false", vb_renderer_present_width(), VB_VIEWPORT_MAX_WIDTH, vb_viewport_id());
+    send_response(body);
+}
 void vb_debug_server_set_host_capture(VbDebugHostCapture capture, void* context) {
     s_host_capture = capture; s_host_capture_context = context;
 }
@@ -394,7 +412,18 @@ static void handle_screenshot(long long id, const char* line) {
             "{\"ok\":false,\"error\":\"host capture unavailable or failed\"}");
         return;
     }
-    uint32_t* buf = (uint32_t*)malloc(384u * 224u * 4u);
+    long long presented = 0, replay = 0, requested_width = 0;
+    extract_int(line, "\"presented\"", &presented);
+    extract_int(line, "\"viewport_raw\"", &replay);
+    extract_int(line, "\"width\"", &requested_width);
+    int width = presented || replay ? vb_renderer_present_width() : 384;
+    if (replay && requested_width) {
+        if (requested_width < 384 || requested_width > VB_VIEWPORT_MAX_WIDTH || (requested_width & 1)) {
+            send_response("{\"ok\":false,\"error\":\"invalid viewport replay width\"}"); return;
+        }
+        width = (int)requested_width;
+    }
+    uint32_t* buf = (uint32_t*)malloc(width * 224u * 4u);
     if (!buf) {
         send_response("{\"ok\":false,\"error\":\"oom\"}");
         return;
@@ -403,10 +432,19 @@ static void handle_screenshot(long long id, const char* line) {
      * raw render so the oracle compare path stays byte-identical. */
     long long recolor = 0;
     extract_int(line, "\"recolor\"", &recolor);
-    long long presented = 0;
-    extract_int(line, "\"presented\"", &presented);
-    if (presented && vb_renderer_active())
-        vb_renderer_present((int)eye, buf);
+    if (replay) {
+        uint8_t* levels = (uint8_t*)malloc(width * 224u);
+        uint16_t* worlds = (uint16_t*)malloc(width * 224u * sizeof(uint16_t));
+        VbSourceTexel* sources = (VbSourceTexel*)malloc(width * 224u * sizeof(VbSourceTexel));
+        int ok = levels && worlds && sources && vb_viewport_render(vb_vip_display_fb() & 1,
+            eye != 0, width, buf, levels, worlds, sources);
+        free(levels); free(worlds); free(sources);
+        if (!ok) { free(buf); send_response("{\"ok\":false,\"error\":\"VIP replay snapshot unavailable\"}"); return; }
+    } else if (presented && vb_renderer_active()) {
+        if (!vb_renderer_present_viewport((int)eye, width, buf)) {
+            free(buf); send_response("{\"ok\":false,\"error\":\"viewport unavailable\"}"); return;
+        }
+    }
     else if (recolor && vb_recolor_active())
         vb_vip_render_framebuffer_recolored((int)eye, buf);
     else
@@ -419,7 +457,7 @@ static void handle_screenshot(long long id, const char* line) {
      * its own world or shares the court world. Needs attribution (recolor on). */
     long long attr = 0;
     extract_int(line, "\"attr\"", &attr);
-    if (attr && vb_recolor_active()) {
+    if (attr && width == 384 && vb_recolor_active()) {
         /* Self-contained: render recolored to populate the attribution buffer
          * for THIS exact frame (works headless, no dependence on a live present
          * loop), then tint each pixel by its world index modulated by the
@@ -451,10 +489,13 @@ static void handle_screenshot(long long id, const char* line) {
      * byte-identical. */
     long long overlay = 0;
     extract_int(line, "\"overlay\"", &overlay);
-    if (overlay && vb_overrides_active()) {
+    if (overlay && width == 384 && vb_overrides_active()) {
         vb_overlay_composite(buf, 384, 224, (int)eye, vb_vip_display_fb() & 1);
     }
-    int rc = vb_write_png_32bpp(path, 384, 224, buf);
+    if (width != 384 && (attr || overlay)) {
+        free(buf); send_response("{\"ok\":false,\"error\":\"legacy attr/overlay diagnostics require native width\"}"); return;
+    }
+    int rc = vb_write_png_32bpp(path, width, 224, buf);
     free(buf);
     char body[384];
     if (rc != 0) {
@@ -465,8 +506,8 @@ static void handle_screenshot(long long id, const char* line) {
     } else {
         snprintf(body, sizeof(body),
                  "{\"ok\":true,\"cmd\":\"screenshot\",\"id\":%lld,"
-                 "\"eye\":%lld,\"path\":\"%s\",\"width\":384,\"height\":224}",
-                 id, eye, path);
+                 "\"eye\":%lld,\"path\":\"%s\",\"width\":%d,\"height\":224}",
+                 id, eye, path, width);
     }
     send_response(body);
 }
@@ -1329,7 +1370,7 @@ static void dispatch_line(char* line) {
     }
 
     if (strcmp(cmd, "device_state") == 0) { char body[16384]; vb_device_response(body,sizeof(body)); send_response(body); }
-    else if (strcmp(cmd, "capabilities") == 0) { send_response("{\"ok\":true,\"protocol\":2,\"commands\":[\"device_state\",\"audio_pcm\",\"audio_shadow_state\",\"breakpoint\",\"capabilities\",\"capture_dump\",\"clear_input\",\"continue\",\"cpuhook\",\"execution_stats\",\"fntrace_dump\",\"fntrace_reset\",\"fntrace_stats\",\"frame\",\"get_frame\",\"get_registers\",\"history\",\"irq_force\",\"irq_state\",\"memory_map\",\"overrides_state\",\"pad_state\",\"pause\",\"ping\",\"press\",\"psw_set\",\"psw_state\",\"quit\",\"read_ram\",\"recolor_reload\",\"recolor_state\",\"recolor_trace\",\"run_frames\",\"screenshot\",\"set_input\",\"source_dump\",\"step\",\"timer_state\",\"vip_phase\",\"vip_state\",\"watchdog\",\"world_map\",\"world_trace\",\"wram_anchors\",\"wram_hash\",\"write_ram\",\"wtrace_dump\",\"wtrace_reset\",\"wtrace_stats\"],\"max_read_bytes\":65536,\"instruction_control\":true,\"trace_version\":2}"); }
+    else if (strcmp(cmd, "capabilities") == 0) { send_response("{\"ok\":true,\"protocol\":2,\"commands\":[\"device_state\",\"audio_pcm\",\"audio_shadow_state\",\"breakpoint\",\"capabilities\",\"capture_dump\",\"clear_input\",\"continue\",\"cpuhook\",\"execution_stats\",\"fntrace_dump\",\"fntrace_reset\",\"fntrace_stats\",\"frame\",\"get_frame\",\"get_registers\",\"history\",\"irq_force\",\"irq_state\",\"memory_map\",\"overrides_state\",\"pad_state\",\"pause\",\"ping\",\"press\",\"psw_set\",\"psw_state\",\"quit\",\"read_ram\",\"recolor_reload\",\"recolor_state\",\"recolor_trace\",\"run_frames\",\"screenshot\",\"set_input\",\"source_dump\",\"step\",\"timer_state\",\"viewport_state\",\"vip_phase\",\"vip_state\",\"watchdog\",\"world_map\",\"world_trace\",\"wram_anchors\",\"wram_hash\",\"write_ram\",\"wtrace_dump\",\"wtrace_reset\",\"wtrace_stats\"],\"max_read_bytes\":65536,\"instruction_control\":true,\"trace_version\":2}"); }
     else if (strcmp(cmd, "ping") == 0)         handle_ping(id);
     else if (strcmp(cmd, "step") == 0) {
         long long count=1;extract_int(line,"\"count\"",&count);
@@ -1401,6 +1442,7 @@ static void dispatch_line(char* line) {
     else if (strcmp(cmd, "watchdog") == 0)     handle_watchdog(id);
     else if (strcmp(cmd, "capture_dump") == 0) handle_capture_dump(id, line);
     else if (strcmp(cmd, "source_dump") == 0) handle_source_dump(line);
+    else if (strcmp(cmd, "viewport_state") == 0) handle_viewport_state(line);
     else if (strcmp(cmd, "overrides_state") == 0) handle_overrides_state(id);
     else if (strcmp(cmd, "recolor_state") == 0) handle_recolor_state(id);
     else if (strcmp(cmd, "recolor_reload") == 0) handle_recolor_reload(id);

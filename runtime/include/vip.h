@@ -94,6 +94,8 @@ void vb_vip_render_framebuffer_recolored(int eye, uint32_t* argb_out);
 /* Returns the current brightness cache value (0..255) for 2bpp
  * framebuffer pixel value 0..3. */
 int32_t vb_vip_brightness(int v);
+/* Same current LED/gamma mapping used by the native framebuffer presenter. */
+uint32_t vb_vip_level_argb(unsigned level);
 
 /* Debug introspection (TCP vip_state command). */
 const uint8_t* vb_vip_shadow(void);

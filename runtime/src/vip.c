@@ -39,6 +39,7 @@
 #include "asset_pack.h"
 #include "recolor.h"
 #include "renderer.h"
+#include "viewport.h"
 #include "mod_runtime.h"
 
 #define VIP_WINDOW_SIZE 0x80000u
@@ -314,6 +315,7 @@ static uint16_t s_obj_suppress[1024];
 
 
 void vb_vip_init(void) {
+    vb_viewport_clear_frames();
     memset(s_vip_mem, 0, sizeof(s_vip_mem));
     memset(s_source_fb, 0, sizeof(s_source_fb));
     vb_vip_phase_reset();
@@ -1117,6 +1119,8 @@ static void draw_obj(uint8_t* fb_lr[2], uint16_t* attr_lr[2], uint16_t y, int lr
 /* Render one 8-row block (block 0..27) into the back-buffer FBs. */
 static void vip_draw_block_into(uint8_t block_no,
                                 uint8_t* fb_l, uint8_t* fb_r) {
+    vb_viewport_capture(s_drawing_fb & 1, block_no, dram_u16(), chr_u16(),
+                        s_spt, s_gplt_cache, s_jplt_cache, s_bkcol, s_obj_suppress);
     /* Per-row temp buffer, 512 bytes wide so OBJ pixels with x ∈
      * [-7, 384) land safely. The +8 left-pad mirrors Beetle's
      * `DrawingBuffers[lr][8 + x + 512 * row]`. */
@@ -1542,6 +1546,13 @@ void vb_vip_render_framebuffer_recolored(int eye, uint32_t* argb_out) {
             }
         }
     }
+}
+
+uint32_t vb_vip_level_argb(unsigned level) {
+    int value = s_brt_cache[level & 3];
+    if (value < 0) value = 0;
+    if (value > 255) value = 255;
+    return vb_red_lut_map(s_color_lut[value]);
 }
 
 int32_t vb_vip_brightness(int v) {

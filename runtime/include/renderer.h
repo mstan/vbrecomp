@@ -33,6 +33,7 @@ typedef struct VbRenderFrame {
     const uint8_t* levels;
     const uint16_t* worlds;
     const VbSourceTexel* sources;
+    int width, height; /* Presentation extent; native path remains 384x224. */
 } VbRenderFrame;
 typedef void (*VbRenderCallback)(const VbRenderFrame*, uint32_t* argb, void* context);
 
@@ -50,6 +51,11 @@ void vb_renderer_reset(void);
 int vb_renderer_active(void);
 const char* vb_renderer_id(void);
 void vb_renderer_present(int eye, uint32_t* argb);
+/* Variable-width presentation composes the viewport with the color callback.
+ * Native present() remains fixed-size for existing tools and raw comparisons. */
+int vb_renderer_present_width(void);
+int vb_renderer_present_viewport(int eye, int width, uint32_t* argb);
+const VbSourceTexel* vb_renderer_present_sources(int eye, int width);
 
 #ifdef __cplusplus
 }

@@ -4,6 +4,7 @@
  * Keep this translation unit independent of production interface headers.
  */
 #include <stdlib.h>
+#include <stdint.h>
 #define UNREACHABLE(name) void name(void) { abort(); }
 UNREACHABLE(vb_capture_active)
 UNREACHABLE(vb_capture_begin_frame)
@@ -25,7 +26,7 @@ UNREACHABLE(vb_recolor_active)
 UNREACHABLE(vb_recolor_init)
 UNREACHABLE(vb_recolor_select_scene)
 UNREACHABLE(vb_recolor_world_pixel)
-UNREACHABLE(vb_red_lut_map)
+uint32_t vb_red_lut_map(int value) { return 0xff000000u | ((uint32_t)value << 16); }
 UNREACHABLE(vb_vip_phase_record)
 UNREACHABLE(vb_vip_phase_reset)
 UNREACHABLE(vb_wram_hash_record)

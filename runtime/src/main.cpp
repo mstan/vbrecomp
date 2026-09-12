@@ -18,6 +18,7 @@
 #include "asset_pack.h"
 #include "recolor.h"
 #include "renderer.h"
+#include "viewport.h"
 #include "mod_runtime.h"
 #include "host.h"
 #include "png_write.h"
@@ -76,6 +77,7 @@ static void print_help(const char* argv0) {
         "  --mods-dir PATH  Package catalog and selections directory.\n"
         "  --install-mod P  Install a .vbmod archive.\n"
         "  --enable-mod P:F / --disable-mod P:F  Select package feature.\n"
+        "  --set-mod-option P:F:O=V  Set a package feature option.\n"
         "  --help, -h       Show this help and exit.\n"
         "\n"
         "Keyboard map (when the SDL window has focus):\n"
@@ -491,9 +493,10 @@ int main(int argc, char** argv) {
     Uint64            sdl_freq = 0;
     Uint64            sdl_period = 0;
     Uint64            sdl_deadline = 0;
-    const int         tex_w = VB_RT_EYE_W;
+    int               tex_w = VB_RT_EYE_W;
     const int         tex_h = stereo ? VB_RT_EYE_H * 2 : VB_RT_EYE_H;
-    uint32_t          tex_pixels[VB_RT_EYE_W * VB_RT_EYE_H * 2];
+    std::vector<uint32_t> tex_storage(VB_VIEWPORT_MAX_WIDTH * VB_RT_EYE_H * 2);
+    uint32_t*         tex_pixels = tex_storage.data();
     VbHostCapture host_capture{tex_pixels, tex_w, tex_h};
     if (!headless) vb_debug_server_set_host_capture(vb_capture_host, &host_capture);
 #if defined(RECOMP_LAUNCHER)
@@ -853,12 +856,32 @@ int main(int argc, char** argv) {
             last_present_cycles = cpu.cycles;
             vb_watchdog_beat(VB_WD_PRESENT, dispatch_pc, cpu.cycles, ++present_count);
 
+            int win_w = 0, win_h = 0;
+            SDL_GetRendererOutputSize(ren, &win_w, &win_h);
+            vb_viewport_window(win_w, stereo ? win_h / 2 : win_h);
+            const int view_width = vb_renderer_present_width();
+            if (view_width != tex_w) {
+                SDL_Texture* resized = SDL_CreateTexture(ren, SDL_PIXELFORMAT_ARGB8888,
+                    SDL_TEXTUREACCESS_STREAMING, view_width, tex_h);
+                if (!resized) vb_stub_abort("cannot resize presentation texture", cpu.pc, view_width);
+                SDL_DestroyTexture(tex); tex = resized; tex_w = view_width;
+                host_capture.width = tex_w;
+#if SDL_VERSION_ATLEAST(2, 0, 12)
+                SDL_SetTextureScaleMode(tex, vb_host_config.filter ? SDL_ScaleModeLinear : SDL_ScaleModeNearest);
+#endif
+#if defined(RECOMP_LAUNCHER)
+                runtime_ui_context.texture = tex;
+#endif
+            }
+
             /* Opt-in full-screen recolor uses the recolored present path;
              * otherwise the faithful render. */
             const bool recolor = vb_recolor_active();
             if (vb_renderer_active()) {
-                vb_renderer_present(0, tex_pixels);
-                if (stereo) vb_renderer_present(1, tex_pixels + VB_RT_EYE_W * VB_RT_EYE_H);
+                if (!vb_renderer_present_viewport(0, tex_w, tex_pixels))
+                    vb_stub_abort("viewport frame unavailable", cpu.pc, tex_w);
+                if (stereo && !vb_renderer_present_viewport(1, tex_w, tex_pixels + tex_w * VB_RT_EYE_H))
+                    vb_stub_abort("right viewport frame unavailable", cpu.pc, tex_w);
             } else if (recolor) {
                 vb_vip_render_framebuffer_recolored(0, &tex_pixels[0]);
                 if (stereo) {
@@ -879,11 +902,15 @@ int main(int argc, char** argv) {
              * VBRECOMP_OVERRIDES is unset (empty list) ⇒ unchanged output. */
             if (vb_overrides_active()) {
                 int slot = vb_vip_display_fb() & 1;
-                vb_overlay_composite(&tex_pixels[0],
-                                     VB_RT_EYE_W, VB_RT_EYE_H, 0, slot);
-                if (stereo) {
-                    vb_overlay_composite(&tex_pixels[VB_RT_EYE_H * VB_RT_EYE_W],
-                                         VB_RT_EYE_W, VB_RT_EYE_H, 1, slot);
+                static uint32_t center[VB_RT_EYE_W * VB_RT_EYE_H];
+                for (int eye = 0; eye < (stereo ? 2 : 1); ++eye) {
+                    uint32_t* image = tex_pixels + eye * tex_w * VB_RT_EYE_H;
+                    int margin = (tex_w - VB_RT_EYE_W) / 2;
+                    for (int y = 0; y < VB_RT_EYE_H; ++y)
+                        std::memcpy(center + y * VB_RT_EYE_W, image + y * tex_w + margin, VB_RT_EYE_W * sizeof(uint32_t));
+                    vb_overlay_composite(center, VB_RT_EYE_W, VB_RT_EYE_H, eye, slot);
+                    for (int y = 0; y < VB_RT_EYE_H; ++y)
+                        std::memcpy(image + y * tex_w + margin, center + y * VB_RT_EYE_W, VB_RT_EYE_W * sizeof(uint32_t));
                 }
             }
 
@@ -896,8 +923,6 @@ int main(int argc, char** argv) {
             SDL_UpdateTexture(tex, nullptr, tex_pixels,
                               tex_w * (int)sizeof(uint32_t));
 
-            int win_w = 0, win_h = 0;
-            SDL_GetRendererOutputSize(ren, &win_w, &win_h);
             double sx = (double)win_w / tex_w;
             double sy = (double)win_h / tex_h;
             double s  = (sx < sy) ? sx : sy;

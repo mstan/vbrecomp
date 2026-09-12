@@ -31,6 +31,7 @@ function(vb_add_runtime_target TARGET)
         ${VB_RUNTIME_DIR}/src/host.cpp
         ${VB_RUNTIME_DIR}/src/mod_runtime.cpp
         ${VB_RUNTIME_DIR}/src/renderer.c
+        ${VB_RUNTIME_DIR}/src/viewport.c
         ${VB_RUNTIME_DIR}/src/vb_sha256.c
         ${VB_RUNTIME_DIR}/src/vb_crc32.c
         ${VB_RUNTIME_DIR}/src/memory.c

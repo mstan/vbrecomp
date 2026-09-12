@@ -1,0 +1,48 @@
+{
+  "passed": true,
+  "date": "2026-09-12",
+  "baseline_commit": "44988f34b3bcc089985d9686717005401a96900b",
+  "manifest": "VIEWPORT.md",
+  "runtime_sha256": "ad73cfb665e30cbeccc5942fa7502328bc965909eeffc1443b5346986419b46d",
+  "ctest": {
+    "passed": 6,
+    "failed": 0,
+    "tests": [
+      "vb-rom-patch",
+      "vb-input",
+      "vb-controller",
+      "vb-interpreter",
+      "vb-vip-source",
+      "vb-mod-runtime"
+    ]
+  },
+  "source_sha256": {
+    "CMakeLists.txt": "e51e0918b578a0804786c9cc90c708888fad4a4c1c90f5d92e9790b4b3ba4f4b",
+    "runtime/include/renderer.h": "20b8f03e4f22378100fbeb1df690a2f5d830dc38b0dae0cc0ed7563d19a90bce",
+    "runtime/include/vip.h": "ebb418149aef836838086950c7885f7d59ae2182f57a6925ce0584fafd11f47a",
+    "runtime/runtime.cmake": "1044c939b1f96d235c7adbf0d88efd6e0a79962aab7562bd5ccc8e3ad3852ab6",
+    "runtime/src/debug_server.c": "265326a9bab0290e08db16effc5837fcf672c9129f50420e51727b4dce2e8b16",
+    "runtime/src/host.cpp": "e8d3389b2a9f2d92aacffa6c8c414c4b12528703f3ae6ba9689dc3645a67b347",
+    "runtime/src/main.cpp": "90191f7df4fc4d9bb31ca8f14b477ab03046011b9ce92838b13ce803b8b7a279",
+    "runtime/src/renderer.c": "3a0a51d3341243500f20227a52a62ec19df77a1b8efd254947274b03248a8e0d",
+    "runtime/src/vip.c": "889db96c0587894a5abfb8d6974d7e7dfe21f6670cb3711d4d7b7be4b02ef42f",
+    "runtime/tests/vip_source_test.c": "212db3bccbcd4a71f22afa5f94838055449d739077a6ee27c95cb4a96442a1c8",
+    "runtime/tests/vip_source_unreachable.c": "33a19f2a405396d8df773c561bd9984c34482fb7693b64fab0a2ae54c7c7b17c",
+    "runtime/include/viewport.h": "e37321310cbcc26115f4be919794c91539c777f6a54b2bcdd76553c48fe05fa5",
+    "runtime/src/viewport.c": "c32eb0a7e32d45f21b2873d97b660a3d9956a4525b3183117f91b860d3529074"
+  },
+  "title_evidence": {
+    "repository": "SDGundamDimensionWarVirtualBoyRecomp",
+    "branch": "codex/sd-gundam-japanese-20260911",
+    "manifest": "docs/widescreen-validation.json",
+    "sha256": "ade8ecd6f03c49e926d3a633b663c9d45a7116d2881fdb7ac064195e4eba4ce1",
+    "native_route_checkpoints": 25,
+    "last_frame": 34790,
+    "raw_planes_equal": true,
+    "native_replay_both_eyes_equal": true,
+    "fallback_instructions": 0,
+    "interpreter_instructions": 0,
+    "stacked_stereo_window_shapes": 5,
+    "restart_phases": 5
+  }
+}

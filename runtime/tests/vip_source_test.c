@@ -33,6 +33,100 @@ static void setup(unsigned mode,unsigned flips,int diagonal) {
         uint16_t* o=&bgm[(0x1e000+8)/2];o[0]=3;o[1]=0xc001;o[2]=0;o[3]=1|flips;
     }
 }
+static int viewport_scene(const VbViewportScene* scene, void* context) {
+    (void)scene; (void)context; return 1;
+}
+static void viewport_layout(const VbViewportScene* scene, int kind, int width,
+                            VbViewportLayout* layout, void* context) {
+    (void)scene; (void)kind; (void)width; (void)layout; (void)context;
+}
+static uint8_t extra_marker = 73;
+static void snapshot_extra(uint8_t* bytes, unsigned count) { memset(bytes,extra_marker,count); }
+static int extend_background(int x,int y,int* source_x,int* source_y,void* context) {
+    (void)context;*source_x=(x%8+8)%8;*source_y=y;return 1;
+}
+static void extended_layout(const VbViewportScene* scene,int kind,int width,
+                            VbViewportLayout* layout,void* context) {
+    (void)kind;(void)width;(void)context;
+    assert(scene->extra_size==4 && scene->extra[0]==73 && scene->extra[3]==73);
+    layout->worlds[31].outside=extend_background;
+    static const uint16_t cells[1]={0x3001};
+    for(int eye=0;eye<2;++eye)
+        layout->sprites[layout->sprite_count++]=(VbViewportSprite){31,eye,430+eye*2,8,1,1,2048,cells,scene->chars};
+}
+static void viewport_tests(void) {
+    enum { W = 796, N = W * 224 };
+    static uint32_t colors[N];
+    static uint8_t levels[N], saved[384 * 224];
+    static uint16_t worlds[N];
+    static VbSourceTexel sources[N];
+    vb_viewport_track();
+    assert(vb_viewport_register("test.viewport",32,9,0,viewport_scene,viewport_layout,0));
+    assert(!vb_viewport_register("test.conflict",16,9,0,viewport_scene,viewport_layout,0));
+    for(unsigned mode=0;mode<4;++mode)for(unsigned flip=0;flip<4;++flip)for(int diagonal=0;diagonal<2;++diagonal) {
+        setup(mode,flip<<12,diagonal);
+        uint16_t* bgm=(uint16_t*)(s_vip_mem+0x20000);
+        uint16_t* w=&bgm[(0x1d800+31*32)/2];
+        w[1]=(uint16_t)-12; w[7]=420; w[8]=7;
+        for(int block=0;block<28;++block)vip_draw_block_into(block,left,right);
+        s_display_fb=0;
+        assert(vb_viewport_width()==796);
+        for(int eye=0;eye<2;++eye) {
+            const uint8_t* fb=eye?right:left;
+            assert(vb_viewport_render(0,eye,384,colors,levels,worlds,sources));
+            for(int y=0;y<224;++y)for(int x=0;x<384;++x) {
+                unsigned i=y*384+x;
+                unsigned raw=(fb[x*64+y/4]>>(2*(y%4)))&3;
+                assert(levels[i]==raw);
+                assert(!memcmp(&sources[i],&s_source_fb[0][eye][i],sizeof(VbSourceTexel)));
+            }
+            memcpy(saved,levels,sizeof(saved));
+            assert(vb_viewport_render(0,eye,W,colors,levels,worlds,sources));
+            for(int y=0;y<224;++y)for(int x=0;x<384;++x)
+                assert(levels[y*W+x+(W-384)/2]==saved[y*384+x]);
+            if(mode!=3) {
+                int recovered=0;
+                for(int y=0;y<8;++y)for(int x=-12;x<0;++x)
+                    recovered+=worlds[y*W+x+(W-384)/2]==32;
+                assert(recovered>0); /* Recover lit edge texels, allowing original black gaps. */
+            }
+        }
+        /* CPU/next-frame table edits cannot rewrite already displayed inputs. */
+        assert(vb_viewport_render(0,0,384,colors,levels,worlds,sources));
+        memcpy(saved,levels,sizeof(saved));
+        memset(s_vip_mem,0,sizeof(s_vip_mem)); s_drawing_fb=1;
+        assert(vb_viewport_render(0,0,384,colors,levels,worlds,sources));
+        assert(!memcmp(saved,levels,sizeof(saved)));
+    }
+    vb_viewport_reset();
+    assert(vb_viewport_width()==384);
+    assert(vb_viewport_track_extra(4,snapshot_extra));
+    assert(!vb_viewport_track_extra(4,snapshot_extra));
+    assert(vb_viewport_register("test.extended",32,9,0,viewport_scene,extended_layout,0));
+    setup(0,0,0);
+    for(int block=0;block<28;++block)vip_draw_block_into(block,left,right);
+    s_display_fb=0;extra_marker=99;
+    for(int eye=0;eye<2;++eye) {
+        assert(vb_viewport_render(0,eye,W,colors,levels,worlds,sources));
+        for(int y=0;y<8;++y)for(int x=0;x<8;++x) {
+            unsigned u=7-x,v=7-y,raw=(u+2*v)%4;
+            unsigned at=(y+8)*W+430+eye*2+x+(W-384)/2;
+            assert(levels[at]==(raw?raw:2));
+            if(raw)assert(sources[at].u==u && sources[at].v==v && sources[at].kind==3 && sources[at].raw==raw);
+        }
+        assert(levels[(W-384)/2-1]==3); /* Extended BG samples original x=7. */
+    }
+    vb_viewport_reset();
+    assert(vb_viewport_register("test.adaptive",16,9,1,viewport_scene,viewport_layout,0));
+    vb_viewport_window(1600,900); assert(vb_viewport_width()==398);
+    vb_viewport_window(2100,900); assert(vb_viewport_width()==522);
+    vb_viewport_window(3200,900); assert(vb_viewport_width()==796);
+    vb_viewport_window(500,900); assert(vb_viewport_width()==384);
+    vb_viewport_window(65536,1); assert(vb_viewport_width()==VB_VIEWPORT_MAX_WIDTH);
+    vb_viewport_reset();
+    puts("PASS: VIP viewport replay, source identity, both eyes, edge recovery, snapshot lifetime and aspect sizing");
+}
+
 int main(void) {
     for(unsigned mode=0;mode<4;++mode)for(unsigned flip=0;flip<4;++flip)for(int diagonal=0;diagonal<2;++diagonal) {
         setup(mode,flip<<12,diagonal);
@@ -106,5 +200,6 @@ int main(void) {
     assert(s_source_fb[1][0][17*384+10].kind!=4);
     assert(s_source_fb[0][0][17*384+10].tile_hash==202);
     puts("PASS: native rasterizer and CPU source ownership, both eyes, packed stores and display lifetime");
+    viewport_tests();
     return 0;
 }

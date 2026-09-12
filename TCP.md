@@ -35,6 +35,8 @@ python tools/debug_client.py breakpoint pc=-1
 | `read_ram` | `addr`, `len=1..65536`. Hex bytes. Runtime rejects unmapped ranges. Oracle exposes VIP RAM, WRAM, SRAM, ROM; inspect `filled` for unsupported regions. |
 | `write_ram` | Paused WRAM/SRAM byte write: `addr`, `val=0..255`. |
 | `screenshot` | `path`, `eye=0|1`, native framebuffer by default. Runtime supports presentation/UI capture through existing capture options. |
+| `viewport_state` | Runtime: active provider, current width/height and maximum width. Optional `window_width`, `window_height` supply per-eye output dimensions for headless adaptive tests; SDL updates these from its live window. |
+| `source_dump` | Runtime: `path`, `eye=0|1`; `VBSRC001` source records at native extent. `presented=1` returns the current viewport's attribution; read width/height from the header. |
 | `device_state` | Canonical timer, controller, VIP and VSU counters/registers/tables; schema 1 in `tools/device_schema.json`. |
 | `cpuhook` | `start`, `max=1..65536`; absolute history window, explicit `head`, `resident_lo`, `begin`, `returned`. |
 | `history`, `get_frame` | Runtime: `start`, `count=1..256`; frame records containing PC, PSW and 32 GPRs. |
@@ -49,10 +51,18 @@ not a byte-level proof of all architectural state.
 
 Shared commands: `audio_pcm`, `capabilities`, `clear_input`, `continue`, `cpuhook`, `device_state`, `frame`, `get_registers`, `memory_map`, `pad_state`, `pause`, `ping`, `quit`, `read_ram`, `run_frames`, `screenshot`, `set_input`, `vip_phase`, `vip_state`, `wram_hash`, `write_ram`.
 
-Additional runtime commands: `audio_shadow_state`, `breakpoint`, `capture_dump`, `execution_stats`, `fntrace_dump`, `fntrace_reset`, `fntrace_stats`, `get_frame`, `history`, `irq_force`, `irq_state`, `overrides_state`, `press`, `psw_set`, `psw_state`, `recolor_reload`, `recolor_state`, `recolor_trace`, `source_dump`, `step`, `timer_state`, `watchdog`, `world_map`, `world_trace`, `wram_anchors`, `wtrace_dump`, `wtrace_reset`, `wtrace_stats`.
+Additional runtime commands: `audio_shadow_state`, `breakpoint`, `capture_dump`, `execution_stats`, `fntrace_dump`, `fntrace_reset`, `fntrace_stats`, `get_frame`, `history`, `irq_force`, `irq_state`, `overrides_state`, `press`, `psw_set`, `psw_state`, `recolor_reload`, `recolor_state`, `recolor_trace`, `source_dump`, `step`, `timer_state`, `viewport_state`, `watchdog`, `world_map`, `world_trace`, `wram_anchors`, `wtrace_dump`, `wtrace_reset`, `wtrace_stats`.
 
 The oracle intentionally remains an independent emulator process. Its frontend
 supports frame control and inspection; instruction stepping/breakpoints belong
 to the recomp runtime. No guest state is copied between the two.
 
 See [PARITY.md](docs/PARITY.md) for the validation workflow.
+
+For a registered [viewport provider](docs/VIEWPORT.md), `screenshot presented=1`
+captures the composed, variable-width output. `viewport_raw=1` replays captured
+VIP inputs without color; adding `width=384` bypasses layout transforms to check
+native-raster equivalence. Missing snapshots and invalid replay widths return
+errors. `host=1` still captures the actual SDL texture/UI, including stacked
+stereo when selected. Legacy `attr`/`overlay` diagnostics require native width.
+An unqualified screenshot always remains the native 384x224 eye buffer.
