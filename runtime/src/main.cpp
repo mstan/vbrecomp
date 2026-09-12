@@ -27,6 +27,7 @@
 #include "input.h"
 #include "interrupts.h"
 #include "memory.h"
+#include "rom_patch.h"
 #include "stub_abort.h"
 #include "ring_frame.h"
 #include "timer.h"
@@ -438,6 +439,11 @@ int main(int argc, char** argv) {
                 return 5;
             }
             std::printf("vb-runtime: CRC32 OK (0x%08X)\n", crc);
+        }
+        if (!vb_memory_activate_rom_patches()) {
+            std::fputs("vb-runtime: ROM data plan failed byte guards or bounds.\n", stderr);
+            vb_memory_shutdown();
+            return 7;
         }
         cpu.read8 = vb_read8;
         cpu.read16 = vb_read16;

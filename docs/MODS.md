@@ -158,6 +158,30 @@ Use the game's own module to interpret world identities and game state; generic
 VIP rasterization must remain game-independent. The raw VIP renderer remains
 available for oracle comparisons.
 
+## Guarded cartridge data
+
+Trusted game plugins can select a `VbRomDataPatch` plan with
+`vb_rom_patch_select` from `rom_patch.h`. Register such plugins with the
+exclusive resource `rom.assets`. Descriptors and source/target buffers must
+outlive selection; static generated tables work well. The source bytes come
+from the verified original cartridge, and targets must be data assets only.
+The game build must reject overlap with any generated instruction bytes.
+
+Before cartridge loading, selection is pending. The host attaches the in-memory
+cartridge only after the original file and loaded CRC pass their identity checks,
+before the first guest instruction. On later activation, a plan applies immediately
+on the runtime thread. Every span must match its exact source or target before
+any writes occur. Bounds, overlap, and guard failures reject the whole operation.
+No ROM file is modified, and generated code never changes.
+
+Register a reset callback that selects the same plan with `enabled=0` to restore
+the original bytes. Disable the previous plan before replacing it. There is one
+exclusive plan, with at most 4096 non-overlapping spans. Assets already copied
+into WRAM/VRAM remain there until the game reloads them; restart the game to
+replay all text in the newly selected language. No RAM/VRAM restoration or
+framebuffer overlay is implied. `vb-rom-patch` tests pending activation, atomic
+guards, idempotence, restoration, reload, overlap and bounds rejection.
+
 ## Verification
 
 `--paused` starts before the first guest instruction. TCP `run_frames` with

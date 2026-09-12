@@ -9,6 +9,7 @@
  * vb_stub_abort(). No silent zero-reads, no silent dropped writes.
  */
 #include "memory.h"
+#include "rom_patch.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -95,6 +96,9 @@ static uint8_t  s_wram[VB_WRAM_SIZE];
 uint32_t vb_rom_size(void) { return s_rom_size; }
 const uint8_t* vb_rom_data(void) { return s_rom; }
 const uint8_t* vb_wram_data(void) { return s_wram; }
+int vb_memory_activate_rom_patches(void) {
+    return s_rom && vb_rom_patch_attach(s_rom, s_rom_size);
+}
 
 /* Per-region FNV-1a over WRAM (Axis-6 whole-session fidelity ring): 64
  * regions of 1 KiB over the 64 KiB WRAM. Regional (not one whole-RAM hash) so
@@ -150,6 +154,7 @@ int vb_memory_init(const char* rom_path) {
 
 void vb_memory_shutdown(void) {
     s_bus_cpu=NULL;
+    vb_rom_patch_attach(NULL, 0);
     free(s_rom);
     s_rom = NULL;
     s_rom_size = 0;

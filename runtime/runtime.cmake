@@ -34,6 +34,7 @@ function(vb_add_runtime_target TARGET)
         ${VB_RUNTIME_DIR}/src/vb_sha256.c
         ${VB_RUNTIME_DIR}/src/vb_crc32.c
         ${VB_RUNTIME_DIR}/src/memory.c
+        ${VB_RUNTIME_DIR}/src/rom_patch.c
         ${VB_RUNTIME_DIR}/src/v810_interpreter.c
         ${VB_RUNTIME_DIR}/src/v810_extended.c
         ${VB_RUNTIME_DIR}/src/vip.c
