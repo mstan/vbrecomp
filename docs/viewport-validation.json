@@ -35,7 +35,7 @@
     "repository": "SDGundamDimensionWarVirtualBoyRecomp",
     "branch": "codex/sd-gundam-japanese-20260911",
     "manifest": "docs/widescreen-validation.json",
-    "sha256": "ade8ecd6f03c49e926d3a633b663c9d45a7116d2881fdb7ac064195e4eba4ce1",
+    "sha256": "bd0da3e03e564727339b7142e610db581adaa749edb1a46f2627d7c2606db915",
     "native_route_checkpoints": 25,
     "last_frame": 34790,
     "raw_planes_equal": true,

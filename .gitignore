@@ -58,3 +58,25 @@ starvation_dump.jsonl
 *.swp
 *~
 .DS_Store
+
+# Local credentials, cartridge data, saves and analysis databases
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+.aws/
+.ssh/
+.codex/
+.claude/
+.beads/
+*.vb
+*.ips
+*.sav
+*.sram
+*.state
+*.dmp
+*.gpr
+*.rep/
