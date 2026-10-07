@@ -1,4 +1,5 @@
 #include "v810_interpreter.h"
+#include "v810_bitstring.h"
 #include "interrupts.h"
 #include <assert.h>
 #include <stdlib.h>
@@ -88,9 +89,21 @@ int main(int argc,char** argv) {
     c=setup();c.gpr[1]=0;c.gpr[2]=0x3f800000;op(&c,0x3e,1,2,7<<10);assert(c.psw_fzd && c.gpr[2]==0x3f800000);
     c=setup();c.gpr[26]=30;c.gpr[27]=29;c.gpr[28]=6;c.gpr[29]=0x900;c.gpr[30]=0x800;
     write32(0x800,0xa0000000);write32(0x804,3);write32(0x900,0xffffffff);
-    op(&c,0x1f,11,0,0);assert(c.pc==0x100 && c.gpr[28]==4);
-    vb_interpreter_step(&c);assert(c.pc==0x102 && !c.gpr[28]);
+    op(&c,0x1f,11,0,0);
+    if (!strcmp(vb_bitstring_implementation(), "LLE")) {
+        assert(c.pc==0x100 && c.gpr[28]==4);
+        vb_interpreter_step(&c);
+    }
+    assert(c.pc==0x102 && !c.gpr[28]);
     assert(read32(0x900)==0x7fffffff && read32(0x904)==7);
+    if (vb_bitstring_diagnostics_enabled()) {
+        assert(vb_bitstring_stats.logical_calls ==
+               (!strcmp(vb_bitstring_implementation(), "LLE") ? 2u : 1u));
+        assert(vb_bitstring_stats.logical_bits == 6);
+        assert(vb_bitstring_stats.logical_completed == 1);
+    } else {
+        assert(!vb_bitstring_stats.logical_calls && !vb_bitstring_stats.logical_bits);
+    }
     c=setup();c.gpr[27]=0;c.gpr[28]=32;c.gpr[30]=0x800;write32(0x800,0x10);
     op(&c,0x1f,2,0,0);assert(!c.psw_z && c.gpr[29]==4 && c.gpr[27]==3 && c.gpr[28]==28);
     puts("V810 directed semantics passed");

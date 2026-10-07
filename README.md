@@ -12,6 +12,9 @@ uncompiled ROM entry points and RAM code, then resumes native dispatch.
 Independent cosimulation, deterministic TCP control, trace comparison and
 save persistence are described in [development parity](docs/PARITY.md).
 
+The opt-in build-fixed logical bit-string service replacement and its maintained
+LLE floor are documented in [engine bit-string HLE](docs/ENGINE_BITSTRING_HLE.md).
+
 This repo holds the **framework**: the Python recompiler, the C/C++
 runtime skeleton, the TCP debug server, the always-on ring buffers
 (wtrace / fntrace / frame ring), the VIP / VSU / IRQ / timer hardware

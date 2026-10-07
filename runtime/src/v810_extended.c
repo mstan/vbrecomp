@@ -1,8 +1,14 @@
 #include "v810_interpreter.h"
+#include "v810_bitstring.h"
 #include "interrupts.h"
 #include <math.h>
 #include <fenv.h>
 #include <string.h>
+VbBitstringStats vb_bitstring_stats;
+#ifndef VBRECOMP_BITSTRING_DIAGNOSTICS
+#define VBRECOMP_BITSTRING_DIAGNOSTICS 0
+#endif
+int vb_bitstring_diagnostics_enabled(void) { return VBRECOMP_BITSTRING_DIAGNOSTICS; }
 
 static float as_float(uint32_t u) { float f; memcpy(&f,&u,4); return f; }
 static uint32_t as_bits(float f) { uint32_t u; memcpy(&u,&f,4); return u; }
@@ -17,56 +23,22 @@ static int fp_input(CPUState* c, uint32_t u) {
     }
     return 1;
 }
-static void bitstring(CPUState* c, unsigned op) {
-    if (op>=16 || (op>=4 && op<8)) {
-        vb_exception(c,VB_INVALID_OP_HANDLER,VB_ECODE_INVALID_OP); return;
-    }
-    unsigned so=c->gpr[27]&31;
-    uint32_t src=c->gpr[30]&~3u, length=c->gpr[28];
-    if (op<4) {
-        int delta=(op&1) ? -1:1, found=0;
-        uint32_t skipped=c->gpr[29];
-        while (length) {
-            if (!c->bstr_src_valid) { c->bstr_src_cache=c->read32(src); c->bstr_src_valid=1; c->cycles+=5; }
-            if (((c->bstr_src_cache>>so)&1)==((op>>1)&1)) {
-                found=1; so-=delta;
-                if (so&32) { src-=delta*4; so&=31; }
-                break;
-            }
-            so=(so+delta)&31; ++skipped; --length;
-            if (!so) { c->bstr_src_valid=0; src+=delta*4; break; }
+void vb_interpreter_extended(CPUState* c, uint16_t first, uint16_t second) {
+    if ((first>>10)==0x1f) {
+        unsigned op = first & 31;
+#if VBRECOMP_BITSTRING_DIAGNOSTICS
+        uint32_t before = c->gpr[28];
+#endif
+        vb_bitstring_execute(c,op);
+#if VBRECOMP_BITSTRING_DIAGNOSTICS
+        if (op >= 8 && op < 16) {
+            ++vb_bitstring_stats.logical_calls;
+            vb_bitstring_stats.logical_bits += before - c->gpr[28];
+            if (!c->gpr[28]) ++vb_bitstring_stats.logical_completed;
         }
-        c->gpr[27]=so; c->gpr[28]=length; c->gpr[29]=skipped; c->gpr[30]=src;
-        if (found || !length) { c->psw_z=!found; c->pc+=2; c->bstr_src_valid=0; }
+#endif
         return;
     }
-    unsigned destoff=c->gpr[26]&31;
-    uint32_t dest=c->gpr[29]&~3u;
-    if (length) {
-        uint32_t value=c->read32(dest); c->cycles+=4;
-        do {
-            if (!c->bstr_src_valid) { c->bstr_src_cache=c->read32(src); c->bstr_src_valid=1; c->cycles+=4; }
-            unsigned bit=(c->bstr_src_cache>>so)&1;
-            if (op&4) bit^=1;
-            unsigned old=(value>>destoff)&1, result;
-            switch(op&3) {
-            case 0: result=old|bit; break;
-            case 1: result=old&bit; break;
-            case 2: result=old^bit; break;
-            default: result=bit; break;
-            }
-            value=(value&~(1u<<destoff))|(result<<destoff);
-            so=(so+1)&31; destoff=(destoff+1)&31; --length;
-            if (!so) { src+=4; c->bstr_src_valid=0; }
-        } while(length && destoff);
-        c->write32(dest,value); c->cycles+=4;
-        if (!destoff) dest+=4;
-    }
-    c->gpr[26]=destoff; c->gpr[27]=so; c->gpr[28]=length; c->gpr[29]=dest; c->gpr[30]=src;
-    if (!length) { c->pc+=2; c->bstr_src_valid=0; }
-}
-void vb_interpreter_extended(CPUState* c, uint16_t first, uint16_t second) {
-    if ((first>>10)==0x1f) { bitstring(c,first&31); return; }
     unsigned r1=first&31, r2=(first>>5)&31, op=second>>10;
     uint32_t a=c->gpr[r2], b=c->gpr[r1], result=0;
     if (op>=8 && op<=12 && op!=11) {

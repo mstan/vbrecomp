@@ -37,6 +37,8 @@
 #include "watchdog.h"
 #include "wtrace.h"
 #include "fntrace.h"
+#include "v810_bitstring.h"
+#include "vb_sha256.h"
 
 #if VB_RUNTIME_HAVE_SDL
 #  include <SDL.h>
@@ -65,6 +67,8 @@ static void print_help(const char* argv0) {
         "                   Game builds can select or reuse a ROM in the launcher.\n"
         "  --port N         TCP debug port (default: %d).\n"
         "  --headless       Do not open an SDL window. TCP-only.\n"
+        "  --benchmark N    Run N uncapped headless frames, report throughput, exit.\n"
+        "  --benchmark-route PATH  Lines of decimal frame-count and pad-mask.\n"
         "  --stereo         Show both eyes stacked vertically (L top / R bottom)\n"
         "                   instead of the single-eye default.\n"
         "  --paused         Start paused (requires debug tools).\n"
@@ -356,6 +360,10 @@ int main(int argc, char** argv) {
     bool headless = false;
     bool stereo = false;
     bool start_paused = false;
+    uint32_t benchmark_frames = 0;
+    const char* benchmark_route_path = nullptr;
+    struct BenchmarkSegment { uint32_t end; uint16_t pad; };
+    std::vector<BenchmarkSegment> benchmark_route;
 
     for (int i = 1; i < argc; ++i) {
         const int host_arg = vb_host_argument(i, argc, argv);
@@ -375,6 +383,17 @@ int main(int argc, char** argv) {
             else if(mode=="native") vb_execution.mode=VB_EXEC_NATIVE;
             else if(mode=="interpreter") vb_execution.mode=VB_EXEC_INTERPRETER;
             else { std::puts("Invalid --execution mode"); return 2; }
+        } else if (a == "--benchmark" && i + 1 < argc) {
+            char* end = nullptr;
+            const char* value = argv[++i];
+            unsigned long n = std::strtoul(value, &end, 10);
+            if (!*value || *end || *value == '-' || !n || n > 1000000) {
+                std::fputs("--benchmark requires 1..1000000 frames.\n", stderr); return 2;
+            }
+            benchmark_frames = (uint32_t)n;
+            headless = true;
+        } else if (a == "--benchmark-route" && i + 1 < argc) {
+            benchmark_route_path = argv[++i];
         } else if (a == "--paused") {
             start_paused = true;
         } else if (a == "--headless") {
@@ -384,6 +403,26 @@ int main(int argc, char** argv) {
         } else {
             std::fprintf(stderr, "unknown argument: %s (try --help)\n", argv[i]);
             return 2;
+        }
+    }
+    if (benchmark_frames && (start_paused || !rom_path)) {
+        std::fputs("--benchmark requires --rom and cannot use --paused.\n", stderr); return 2;
+    }
+    if (benchmark_route_path) {
+        if (!benchmark_frames) { std::fputs("--benchmark-route requires --benchmark.\n", stderr); return 2; }
+        FILE* route = std::fopen(benchmark_route_path, "r");
+        if (!route) { std::perror("benchmark route"); return 2; }
+        char line[128]; unsigned total = 0; bool valid = true;
+        while (std::fgets(line, sizeof(line), route)) {
+            unsigned long long frames = 0, pad = 0; char extra;
+            if (std::sscanf(line, "%llu %llu %c", &frames, &pad, &extra) != 2 ||
+                !frames || pad > 65535 || frames > benchmark_frames - total) { valid = false; break; }
+            total += (unsigned)frames; benchmark_route.push_back({total, (uint16_t)pad});
+        }
+        if (std::ferror(route)) valid = false;
+        std::fclose(route);
+        if (!valid || total != benchmark_frames) {
+            std::fputs("Benchmark route must contain positive counts and 16-bit pad masks totaling N.\n", stderr); return 2;
         }
     }
 
@@ -682,6 +721,9 @@ int main(int argc, char** argv) {
     /* Always-on hang watchdog (separate thread). Started here, from the main
      * thread, so it can capture this thread's stack on a freeze. */
     vb_watchdog_start();
+    const auto benchmark_start = std::chrono::steady_clock::now();
+    double benchmark_seconds = 0;
+    size_t benchmark_segment = 0;
     while (vb_debug_server_poll() == 0 && !sdl_quit) {
         vb_watchdog_beat(VB_WD_POLL, dispatch_pc, cpu.cycles, present_count);
 
@@ -696,6 +738,15 @@ int main(int argc, char** argv) {
             vb_devices_end_frame(cpu.cycles);
             cpu.frame++;
             vb_ring_frame_record(&cpu);
+        }
+        if (benchmark_frames && cpu.frame >= benchmark_frames) {
+            benchmark_seconds = std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - benchmark_start).count();
+            break;
+        }
+        if (!benchmark_route.empty()) {
+            while (cpu.frame >= benchmark_route[benchmark_segment].end) ++benchmark_segment;
+            vb_input_set_pad(benchmark_route[benchmark_segment].pad);
         }
 #if VB_RUNTIME_HAVE_SDL
         if (!headless) {
@@ -790,7 +841,7 @@ int main(int argc, char** argv) {
                     && lvl >= (int)cpu.psw_int_level)
                     break;   // acceptable IRQ pending — loop top will deliver
             }
-            std::this_thread::sleep_for(1ms);
+            if (!benchmark_frames) std::this_thread::sleep_for(1ms);
             continue;
         }
 
@@ -973,6 +1024,23 @@ int main(int argc, char** argv) {
     }
 
     vb_watchdog_stop();
+    if (benchmark_frames) {
+        if (cpu.frame != benchmark_frames || benchmark_seconds <= 0) {
+            std::fputs("Benchmark did not reach the requested frame boundary.\n", stderr); return 7;
+        }
+        uint8_t digest[32]; char hash[65];
+        vb_sha256_compute(vb_wram_data(), VB_WRAM_SIZE, digest);
+        for (unsigned i = 0; i < 32; ++i) std::sprintf(hash + 2*i, "%02x", digest[i]);
+        std::printf("VBRECOMP_BENCHMARK {\"bitstring_impl\":\"%s\",\"frames\":%u,"
+                    "\"seconds\":%.9f,\"fps\":%.3f,\"cycles\":%llu,\"pc\":%u,\"wram_sha256\":\"%s\","
+                    "\"bitstring_calls\":%llu,\"bitstring_bits\":%llu,\"bitstring_completed\":%llu,\"bitstring_diagnostics\":%s}\n",
+                    vb_bitstring_implementation(), cpu.frame, benchmark_seconds,
+                    cpu.frame/benchmark_seconds, (unsigned long long)cpu.cycles, cpu.pc, hash,
+                    (unsigned long long)vb_bitstring_stats.logical_calls,
+                    (unsigned long long)vb_bitstring_stats.logical_bits,
+                    (unsigned long long)vb_bitstring_stats.logical_completed,
+                    vb_bitstring_diagnostics_enabled() ? "true" : "false");
+    }
 #if defined(RECOMP_LAUNCHER) && VB_RUNTIME_HAVE_SDL
     recomp_runtime_ui_destroy(s_runtime_ui);
     s_runtime_ui = nullptr;

@@ -12,8 +12,13 @@
 #   )
 
 set(VB_RUNTIME_DIR "${CMAKE_CURRENT_LIST_DIR}")
+include("${VB_RUNTIME_DIR}/bitstring_backend.cmake")
 
 function(vb_add_runtime_target TARGET)
+    set_source_files_properties("${VB_RUNTIME_DIR}/src/v810_extended.c" PROPERTIES COMPILE_DEFINITIONS
+        "VBRECOMP_BITSTRING_DIAGNOSTICS=$<BOOL:${VBRECOMP_BITSTRING_DIAGNOSTICS}>")
+    file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/${TARGET}.bitstring-build.json"
+        CONTENT "{\"bitstring_impl\":\"${VBRECOMP_BITSTRING_IMPL}\",\"bitstring_diagnostics\":\"${VBRECOMP_BITSTRING_DIAGNOSTICS}\"}\n")
     set(options NO_GAME_LINKED)
     set(oneValue DEBUG_PORT WINDOW_TITLE GENERATED_DIR GENERATED_MODULE)
     set(multiValue GENERATED_SOURCES)
@@ -38,6 +43,7 @@ function(vb_add_runtime_target TARGET)
         ${VB_RUNTIME_DIR}/src/rom_patch.c
         ${VB_RUNTIME_DIR}/src/v810_interpreter.c
         ${VB_RUNTIME_DIR}/src/v810_extended.c
+        ${VB_BITSTRING_SOURCE}
         ${VB_RUNTIME_DIR}/src/vip.c
         # VIP draw-timing phase event ring (Axis-5a phase gate; always-on,
         # observability-only — does not touch emulation).
