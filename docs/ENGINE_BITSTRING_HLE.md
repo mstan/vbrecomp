@@ -153,159 +153,79 @@ regression/coverage evidence, not production AOT cost measurements.
 
 ## End-to-end engine strategy
 
-The first task is a finite production-native sampling adapter, not another BSU
-rewrite: drive the existing route with actual controller input, stop at a guest
-frame/event boundary, and preserve normal title runtime semantics. Use one
-short production capture per ready route with matching symbols and all-thread
-CPU accounting. Identify framework/pacing tails and unresolved external code
-rather than assigning them to a guessed device. Stop after this bounded
-three-title pass and choose one common engine service, or explicitly report
-that the measurements cannot select a material candidate. No automatic extra
-profiles or 90-leg matrix follow an inconclusive result.
+Windows is the first supported target. Use three actual games, one production
+configuration per game, and maintain a functioning LLE build with the same
+caller ABI. The owner judges practical appearance and playability; prospective
+validation does not require pixel-perfect old/new images or internal-state
+identity. Historical exact comparisons above remain completed evidence.
 
-| Title / role | Concrete route and comparison milestones | Production floor readiness and caller contract |
+### First task and implementation decision
+
+First add a finite production-native route adapter: feed actual controller
+input, stop at the selected guest frame/event boundary and retain normal title
+runtime semantics. The prior generic interpreter capture, with 63.712%
+unresolved external samples, cannot rank production AOT engine costs.
+
+Make a bounded production cost pass over the ready routes with matching binary
+symbols and relevant CPU/wall accounting. Separate startup/pacing/framework
+work and unresolved external code rather than assigning them to a guessed
+device. Stop after the three-title pass and select one material common service,
+or explicitly report that the measurements do not support a candidate.
+
+Choose VIP row/block rendering if it is the largest removable native cost;
+choose VSU block synthesis if audio is actually hot; choose bus/scheduler
+batching only when native caller evidence supports meaningful savings.
+Declare the service's input/output ABI, supported operations and concrete
+caller observations before code. Keep LLE as a fixed build alternative.
+The logical BSU draft is cold on tested routes: preserve it opt-in or retire it
+from this critical path. It is not ready for an owner playtest or promotion.
+
+### Selected games and floor readiness
+
+| Game | Actual route / useful observations | Production readiness |
 |---|---|---|
-| ZeroRacers / primary | `tests/race-driving-route.json`, 4,000 frames; reuse 39 milestone/273 audit route including menu-to-live-race progression and driving/pause state. Observe race HUD/player movement, both-eye presentation and pause/return responsiveness; final race damage/reverse HUD is not a finish. | Debug-free production near-AOT binary exists, but finite adapter is missing. Preserve/report its small fallback fraction. Match controller-visible race progress, both-eye VIP output and VSU continuity against the functioning floor; existing interpreter comparisons do not substitute for native qualification. |
-| Wario Land / companion | `tests/gameplay-route.json`: first-stage entry 2,120, walk 2,220, jump 2,250, attack 2,360, second jump 2,480, turn 2,610, final idle 2,730. Use the first-stage interval for active-game cost, retaining startup/transition checks. | Native-only Beetle floor is documented; available Release has debug/CPU hooks ON. Prepare a pinned production build with hooks OFF and revalidate this route before comparing costs. Preserve movement/jump/attack/hazard behavior, stereo output, audio and input response; no campaign claim. |
-| SD Gundam / companion | `tests/first-mission-route.json`, 4,500 frames: safety/alignment/auto-pause, opening Japanese mission map and unit-action menu. Reuse 40 milestones/280 audits, checking tactical cursor/menu progress and map presentation. Combat and mission completion are outside this route. | Debug-free normally optimized production binary exists; the passing native oracle report used historical O1 fast-build. Revalidate the production floor and bounded adapter before timing. Preserve menu/cursor/unit-action behavior, both-eye display, sound and transition responsiveness. |
+| ZeroRacers | `tests/race-driving-route.json`, 4,000 frames: menus, live driving and pause state. | Debug-free production near-AOT binary exists; finite adapter is missing. Preserve/report its small fallback fraction. Primary native profiling candidate. |
+| Wario Land | `tests/gameplay-route.json`, 2,730 frames: first-stage entry 2,120, walk/jump/attack, turn 2,610, idle 2,730. | Native-only Beetle floor is documented; available Release has hooks/debug tools ON. Prepare a pinned production build with them OFF and confirm basic route operation before timing. |
+| SD Gundam | `tests/first-mission-route.json`, 4,500 frames: opening Japanese mission map, cursor and unit-action menu. | Debug-free normally optimized production binary exists; historical passing oracle report used O1 fast-build. Confirm the production route works rather than assuming binary identity. |
 
-The decision point follows those captures. Choose VIP row/block rendering if
-production native samples and eligible active-game coverage make it the largest
-plausibly removable shared cost; choose VSU block synthesis if audio is actually
-hot; choose bus/scheduler service batching only when native caller attribution
-shows material avoidable work. Declare the chosen service's input/output ABI,
-completion/interrupt observations relevant to these callers, supported operation
-scope and allowed minor differences before code. Preserve the working LLE as a
-fixed build alternative. The existing logical BSU draft is cold on tested
-routes: retain it opt-in or retire it from this critical path. Do not force an
-owner to test an unused BSU path or infer savings from synthetic-only results.
+The caller contract is ordinary input response and progress, working both-eye
+VIP presentation and VSU sound for these routes. Operation timing changes need
+focused checks only for affected caller observations. Reuse relevant existing
+runtime/device tests and independent reference evidence. Add a test only for a
+concrete uncovered correctness risk. Complete IRQ/internal-state trace identity,
+automated screenshot/state/audio sweeps and campaign/lifecycle gates are not
+universal requirements for this prospective task.
 
-For the selected service, compare per-game caller behavior at the table's
-milestones and use independent Beetle evidence where applicable. Require exact
-outputs where the candidate promises exactness; assess any explicitly permitted
-small image/audio/timing differences practically against progress and normal
-input response. Complete internal-state or IRQ-trace identity is not a universal
-gate. A service that changes operation timing still needs concrete tests for
-its affected caller observations; do not hide a race/pause/menu stall behind a
-pixel match. Diagnostics establish eligible coverage separately from timing.
+### Measurement and decision
 
-Declare a material whole-work reduction target before implementation (10% is a
-planning target, not a universal threshold). On the same useful active-game work,
-measure all-thread CPU and wall/framework/pacing costs: primary ZeroRacers ABBA
-(two balanced pairs), Wario and SD Gundam one A/B each. Stop at that screen;
-park noisy, cold or immaterial outcomes rather than automatically repeating.
-Only a candidate that beats measured noise, meets its declared useful-work goal
-and passes the three scoped caller contracts reaches the owner handoff.
+Before code, declare the chosen boundary and material gain target; 10%
+whole-work reduction is a planning target, not a universal threshold. Start with
+one matched uninstrumented LLE/HLE performance pair per game and report FPS and
+percentage gain for equivalent finite inputs/useful work. Uncapped Windows
+measurements are allowed; coverage diagnostics remain separate from timing.
 
-Provide the owner a ready normal-paced ZeroRacers production HLE game, standard
-controls and ROM launch instructions, plus a fixed LLE build opt-out. The owner
-plays real driving and pause/return interactions and judges responsiveness,
-stereo presentation and audio feel. Passing that final feel check permits merge
-and HLE default only for the qualified platform/title/configuration scope, then
-issue closure with measurements and limitations. Broader defaults require
-broader evidence; the menu-only SD Gundam route cannot prove combat or completion.
+Repeat a reversed pair only if observed noise or ambiguity blocks a conclusion.
+There is no mandatory eight-run quota, automatic parameter matrix or indefinite
+profiling loop. A cold service, noisy result or immaterial gain parks the
+candidate. Synthetic-only improvement does not establish whole-game benefit,
+and skipped useful work does not count as faster service execution.
 
-## Measurement, decision and delivery protocol
+### Visual check and owner handoff
 
-Owner completion rule: establish a material game-workload gain and automated
-compatibility, then deliver the final playable build for the owner's feel check.
-After that check passes, integrate the prepared default change and close the
-scoped work. Exhaustive game coverage and completed campaigns are not additional
-completion requirements.
+For the new replacement, make one basic current-implementation visual sanity
+glance: does the game look right and avoid garbled output? No old/new baseline
+image matching is required. Escalate only for a concrete defect found in that
+glance, focused testing or owner feedback.
 
-1. **Pin the workload and floor.** Use the three games and concrete routes above.
-   Build LLE and HLE from the same title/framework revisions, compiler/options,
-   ROM/firmware identities, presentation/audio settings and initial game state;
-   only the selected implementation differs. Keep the replaced LLE service
-   runnable. An old executable is discovery evidence, not a mismatched control.
-   Use native game saves or replayed inputs when private savestates cannot cross
-   builds. First resolve the named route/build gaps; do not perfect unrelated
-   hardware before replacing a functioning operation.
-   Verify that companion routes actually exercise the replacement; an unaffected
-   title is a regression control, not evidence for that HLE service. If the
-   chosen service changes, replace an unsuitable companion in the three-title
-   set instead of accumulating extra games or claiming unexercised coverage.
-2. **Attribute only what is missing.** Reuse suitable profiles and collect at
-   most one new active-workload attribution capture per selected game in this
-   implementation round. Identify the intended service's eligible dynamic work.
-   Include worker threads and external modules or report them unresolved; a
-   main-thread symbol histogram cannot supply a whole-process cost percentage.
-   Capture diagnostics separately from performance. End discovery when there
-   is enough evidence to select a useful service, not when every subsystem has
-   a profile. The earlier six-launch discovery cap applied to that completed
-   pass, not to the whole implementation/qualification program.
-3. **Choose one replacement.** Record its caller ABI, inputs, outputs, observable
-   side effects, supported operation scope, permitted tiny differences, expected
-   cost removed, and candidate-specific useful gain before coding. Implement a
-   shared service with build-time LLE/HLE selection and explicit build identity.
-   Do not stack several speculative replacements into the same comparison.
-4. **Measure equivalent active play.** Delimit a fixed gameplay window by guest
-   frames and meaningful game events, excluding boot, warmup and teardown.
-   Choose enough active work to dominate measurement granularity once, then keep
-   it fixed. Report total process CPU milliseconds per guest frame (all threads),
-   critical-path frame work, median/p95 frame time and missed presentation/audio
-   deadlines where available. Record peak memory and code size, since constrained
-   targets matter. Preserve normal renderer and audio production; a benchmark
-   that omits presentation/audio is a core-only diagnostic, not end-to-end proof.
-   The owner selected Windows first and authorized uncapping for useful
-   measurements. Prefer a finite uncapped comparison where it preserves the
-   same game, render and audio-synthesis work. Remove host frame-delay/VSync
-   waits only in isolated benchmark configuration; do not change the guest
-   timing model, resolution, effects, audio workload or HLE coverage between
-   builds. Report uncapped FPS and milliseconds/frame alongside total CPU/frame,
-   and verify completed render/audio work and game progress rather than trusting
-   a frame counter alone. A legacy benchmark that skips rendering/presentation
-   or audio remains core-only evidence; use a complete paced CPU/frame comparison
-   until that benchmark path can exercise equivalent work. Normal capped play
-   can show reduced CPU/frame even when FPS stays unchanged. Measure GPU
-   completion/queue cost when work moves there; a shorter submission call alone
-   is not a win. Keep the final owner-playtest package normally paced.
-5. **Use a fixed comparison budget.** The primary game gets LLE/HLE/HLE/LLE:
-   two order-balanced pairs, four measured executions. Each of the two companion
-   games gets one LLE/HLE pair, two executions each. That is eight measured runs
-   per candidate on one declared host/configuration, not a Cartesian matrix.
-   Reuse their progression telemetry and final outputs; take expensive milestone
-   captures outside timing, and use isolated LLE/HLE fixtures for detailed
-   contracts. Do not automatically add separate full campaigns or trace runs.
-   Keep team builds/profiling out of the timed window, record host load/power/
-   thermal conditions, and preserve every result. A noisy or contradictory result
-   stops that screen; fix an identified condition before a bounded replacement
-   measurement. Never repeat until a passing subset appears.
-6. **Decide from useful gain and compatibility.** Report both paired percentage
-   and absolute savings, with the observed pair spread. About 10% lower whole
-   active-workload CPU time is a planning aim, not a universal acceptance rule.
-   A candidate may instead solve a declared frame-budget or stutter problem.
-   Both primary pairs must show a clear consistent useful improvement beyond
-   observed noise; two pairs are not a formal confidence interval. Companion
-   single pairs screen for large regressions, not proof of zero performance
-   change. Explain any apparent regression before broadening defaults. Exact
-   promises require exact outputs; permitted approximations use a declared
-   practical image/audio/result comparison. Check input, audio, progression,
-   affected completion/IRQ consumers, transitions and relevant pause/reset/save
-   behavior. No crash, softlock, stale buffer, lost completion or save corruption
-   passes. A huge isolated kernel ratio cannot substitute for this decision.
-7. **Hand off the actual finished candidate.** Provide the named primary game as
-   a ready-to-launch normal-paced HLE package, an LLE comparison build, isolated
-   save/checkpoint setup, launch instructions and checksums/build identity. Include
-   a short before/after report, companion results and any tiny known differences.
-   Prepare the intended default-selection/integration change in the draft PR so
-   the owner tests the package intended to ship. Ask the owner to play normally
-   and assess response, motion/collision, camera/scrolling, stereo where relevant,
-   audio rhythm and continued progression. There is no prescribed full-campaign
-   completion or multi-game human test matrix. Owner rejection reopens the
-   affected behavior; fix and recheck that change before another handoff.
-8. **Finish the scoped delivery.** After owner acceptance, integrate the reviewed
-   candidate, make HLE the default for the supported titles/platform/service,
-   retain a documented build-time LLE opt-out, and record the measured and manual
-   evidence before closing the issue. Do not add unrelated qualification gates
-   after the agreed playtest. If the replacement cannot deliver material gain,
-   preserve its branch and draft PR with results, explain why, and choose a new
-   boundary deliberately; an unsuccessful experiment is not a completed system.
+Once objective gain and focused correctness pass, prepare normal-paced Windows
+HLE builds of all three selected games with standard controls, ROM launch
+instructions and a fixed LLE alternative. Launch every ready selected game for
+the owner without asking again for launch permission; ask whether each looks
+and plays right. Cold BSU/interpreter-only artifacts are not this handoff, and
+uncapped benchmark mode is not the human playcheck.
 
-The owner selected **Windows first; port measurements later**. Windows x64 is
-therefore the initial implementation, measurement, final-playtest and default
-scope. After automated checks, material gain and the owner's normal-paced feel
-approval, finish that Windows delivery; a mobile/Xbox port is not a new gate
-before closure. Later port work carries the winning candidate and relevant
-routes to the chosen target and measures there before claiming target savings.
-Do not multiply all hosts into the Windows discovery/comparison matrix.
+Positive owner feedback plus material objective gain permits merge and HLE
+default for the supported Windows scope, retaining the fixed LLE build opt-out.
+Record the supported games/configuration and evidence, then close the owning
+issue. A reported defect triggers targeted investigation of that behavior;
+other platforms remain outside this initial scope.
