@@ -200,10 +200,12 @@ def compare(args, a_mode, b_mode, directory, planes, inject=False):
     report={"a_mode":a_mode,"b_mode":b_mode,"planes":planes,"rom_sha256":hashlib.sha256(args.rom.read_bytes()).hexdigest(),
             "runtime_sha256":hashlib.sha256(args.runtime.read_bytes()).hexdigest(),"checkpoints":0,"first_divergence":None,"byte_audits":0}
     if b_mode=="oracle": report["oracle_sha256"]=hashlib.sha256(args.oracle.read_bytes()).hexdigest()
+    elif args.runtime_b:
+        report["runtime_b_sha256"]=hashlib.sha256(args.runtime_b.read_bytes()).hexdigest()
     try:
         with ExitStack() as stack:
             a=stack.enter_context(Runner(args.oracle if a_mode=="oracle" else args.runtime,args.rom,a_mode,args.port,directory/"a"))
-            b=stack.enter_context(Runner(args.oracle if b_mode=="oracle" else args.runtime,args.rom,b_mode,args.port+1,directory/"b"))
+            b=stack.enter_context(Runner(args.oracle if b_mode=="oracle" else (args.runtime_b or args.runtime),args.rom,b_mode,args.port+1,directory/"b"))
             frame=0
             for i,segment in enumerate(schedule):
                 count=segment["frames"];pad=segment.get("pad",0)
@@ -235,6 +237,7 @@ def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument("action",choices=["compare","gates","trace"])
     p.add_argument("--runtime",type=Path,required=True);p.add_argument("--oracle",type=Path)
+    p.add_argument("--runtime-b",type=Path,help="Optional second build for non-oracle comparison")
     p.add_argument("--rom",type=Path,required=True);p.add_argument("--out",type=Path,required=True)
     p.add_argument("--route",type=Path);p.add_argument("--frames",type=int,default=10)
     p.add_argument("--port",type=int,default=4490)
@@ -246,6 +249,8 @@ def main():
     p.add_argument("--b-mode",choices=["hybrid","native","interpreter","oracle"],default="oracle")
     p.add_argument("--planes",default="cpu,wram,sram,vram,vip,devices,video,video_right,presented,audio")
     args=p.parse_args();planes=args.planes.split(",")
+    if args.runtime_b and (args.action != "compare" or args.b_mode == "oracle"):
+        p.error("--runtime-b requires compare with a non-oracle --b-mode")
     if args.frames<1 or any(x not in ("cpu","wram","sram","vram","vip","devices","video","video_right","presented","audio") for x in planes): p.error("invalid frames or planes")
     if args.start<0 or args.instructions<1 or any(field not in ("pc","psw","fnv","cycle") for field in args.trace_fields.split(",")): p.error("invalid trace range or fields")
     if args.action=="trace":

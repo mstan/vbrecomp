@@ -12,6 +12,7 @@
  */
 #include "debug_server.h"
 #include "v810_interpreter.h"
+#include "v810_bitstring.h"
 
 #include <stdarg.h>
 #include <stdint.h>
@@ -1389,11 +1390,14 @@ static void dispatch_line(char* line) {
         }
     }
     else if (strcmp(cmd, "execution_stats") == 0) {
-        char result[384];
-        snprintf(result,sizeof(result),"{\"ok\":true,\"id\":%lld,\"mode\":%d,\"interpreted\":%llu,\"fallback\":%llu,\"native_entries\":%llu,\"first_fallback_pc\":%u,\"last_fallback_pc\":%u,\"native_instructions\":%llu,\"stopped\":%d}",
+        char result[640];
+        snprintf(result,sizeof(result),"{\"ok\":true,\"id\":%lld,\"mode\":%d,\"interpreted\":%llu,\"fallback\":%llu,\"native_entries\":%llu,\"first_fallback_pc\":%u,\"last_fallback_pc\":%u,\"native_instructions\":%llu,\"stopped\":%d,\"bitstring_impl\":\"%s\",\"bitstring_calls\":%llu,\"bitstring_bits\":%llu,\"bitstring_completed\":%llu}",
                  id,vb_execution.mode,(unsigned long long)vb_execution.interpreted,
                  (unsigned long long)vb_execution.fallback,(unsigned long long)vb_execution.native_entries,
-                 vb_execution.first_fallback_pc,vb_execution.last_fallback_pc,(unsigned long long)vb_execution.native_instructions,vb_execution.stopped);
+                 vb_execution.first_fallback_pc,vb_execution.last_fallback_pc,(unsigned long long)vb_execution.native_instructions,vb_execution.stopped,vb_bitstring_implementation(),
+                 (unsigned long long)vb_bitstring_stats.logical_calls,
+                 (unsigned long long)vb_bitstring_stats.logical_bits,
+                 (unsigned long long)vb_bitstring_stats.logical_completed);
         send_response(result);
     }
     else if (strcmp(cmd, "frame") == 0)        handle_frame(id);

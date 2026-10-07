@@ -1117,6 +1117,9 @@ static void draw_obj(uint8_t* fb_lr[2], uint16_t* attr_lr[2], uint16_t y, int lr
 }
 
 /* Render one 8-row block (block 0..27) into the back-buffer FBs. */
+#if VBRECOMP_VIP_BATCHED && defined(__GNUC__)
+__attribute__((noinline))
+#endif
 static void vip_draw_block_into(uint8_t block_no,
                                 uint8_t* fb_l, uint8_t* fb_r) {
     vb_viewport_capture(s_drawing_fb & 1, block_no, dram_u16(), chr_u16(),
@@ -1250,6 +1253,21 @@ static void vip_draw_block_into(uint8_t block_no,
         for (int lr = 0; lr < 2; lr++) {
             const uint16_t* asrc = s_attr_row[lr];
             uint16_t* adst = s_attr_fb[s_drawing_fb & 1][lr];
+#if VBRECOMP_VIP_BATCHED
+            /* Tracking configuration cannot change within this synchronous
+             * drawing service. Copy each contiguous visible row once instead
+             * of querying it for every pixel, including the tracking-off case. */
+            const int tracks_texels = vb_renderer_tracks_texels();
+            for (int row = 0; row < 8; row++) {
+                int yy = block_no * 8 + row;
+                memcpy(adst + yy * 384, asrc + PAD_LEFT + 512 * row,
+                       384 * sizeof(*adst));
+                if (tracks_texels)
+                    memcpy(s_source_fb[s_drawing_fb & 1][lr] + yy * 384,
+                           s_source_row[lr] + PAD_LEFT + 512 * row,
+                           384 * sizeof(VbSourceTexel));
+            }
+#else
             for (int row = 0; row < 8; row++) {
                 int yy = block_no * 8 + row;
                 for (int x = 0; x < 384; x++)
@@ -1260,6 +1278,7 @@ static void vip_draw_block_into(uint8_t block_no,
                             s_source_row[lr][PAD_LEFT + x + 512 * row];
                 }
             }
+#endif
         }
     }
 }
