@@ -153,6 +153,87 @@ regression/coverage evidence, not production AOT cost measurements.
 
 ## End-to-end engine strategy
 
+### Native VIP candidate, 2026-10-06 (implementation in progress)
+
+The finite native ZeroRacers adapter is now prepared: the public
+`tools/prepare_benchmark_route.py` converts the existing 4,000-frame driving
+route without guest-memory writes. The Release floor uses current framework
+code, CPU hooks/debug tools OFF, BSU diagnostics OFF and BSU LLE. It remains
+hybrid: 888,495,917 native instructions and 23,922 fallback instructions.
+
+The single main-thread native capture collected 274 samples: 92 generated
+cartridge (33.58%), 61 VIP (22.26%), 36 bus/memory (13.14%), 26 native dispatch
+(9.49%), 17 WRAM fingerprinting (6.20%), one VSU (0.36%) and 13 unresolved
+(4.74%). `vb_vip_tick` accounts for 56 (20.44%). Thirteen samples land inside
+the attribution row-copy loop, where LLE calls the tracking predicate once per
+pixel even with tracking disabled. This supports a shared VIP draw-service
+candidate rather than further cold-BSU work.
+
+Fixed `VBRECOMP_VIP_IMPL=LLE|BATCHED` retains LLE by default. BATCHED copies
+contiguous attribution/source rows and prevents heavy block drawing from being
+inlined into the frequent tick front end. The synchronous tracking flag is
+stable within drawing. Guest framebuffer reads, status/register behavior,
+drawing deadlines and IRQ service remain the caller contract; device timing is
+not replaced. This is an exact native renderer optimization, separate from
+the bitstring HLE draft. Target: roughly 10% useful whole-runtime reduction.
+
+Capture artifacts are private under `build/qualification/native-zero-racers`;
+matching `samples.csv`, `symbols.txt`, `preferred-base.txt`, `attribution.json`
+and child log are retained. Sampling includes startup and fingerprint work,
+perturbs execution, excludes SDL presentation/device delivery and observes only
+the main thread. Foreign compiler activity was recorded. Its printed FPS is
+not a throughput result or isolated-host claim.
+
+`--measure-runtime N --benchmark-route PATH` provides an uncapped finite SDL
+path retaining conversion/upload/presentation, VSU synthesis and device audio.
+It reports FPS, process CPU, presented frames and synthesized audio frames;
+the existing bounded audio ring may overwrite samples when uncapped. Normal
+human launches remain paced. No gain, visual acceptance or default promotion
+is claimed before the matched production run and owner playcheck. Both native
+Release arms now build successfully. Existing VIP/source/viewport checks pass
+for both choices; route-adapter checks and malformed finite CLI checks pass.
+
+The first attempted 4,000-frame full-runtime LLE launch timed out at 120 seconds;
+BATCHED never ran, so it supplied no performance evidence. Unlike headless
+benchmarking, the initial finite SDL mode still entered the default shared
+launcher despite a supplied ROM. Finite workloads now bypass that waiting UI
+while retaining runtime SDL rendering/audio; both arms rebuilt successfully.
+The private pair harness streams logs and saves failed/timeout metadata. The
+old timeout output was discarded and cannot be reconstructed; its failure is
+recorded under `build/qualification/vip-runtime-initial`.
+
+The corrected 60-frame SDL smoke, without `--no-launcher`, completed exit 0:
+59 presentations, 52,632 synthesized audio frames and active native execution.
+The single corrected 4,000-frame production runtime pair then completed:
+
+| VIP build | FPS | Runtime wall seconds | All-thread process CPU seconds |
+|---|---:|---:|---:|
+| LLE | 564.123 | 7.090654 | 8.000000 |
+| BATCHED | 550.790 | 7.262302 | 7.953125 |
+
+Both performed 3,999 presentations and synthesized 3,508,807 audio frames;
+native/fallback counts matched the production route above. FPS changed
+**-2.36%**, with only **0.59%** process-CPU reduction: no material whole-runtime
+win. Foreign compiler census was 4→3 processes for LLE and 3→3 for BATCHED;
+this is not an isolated-host claim. The candidate stays draft/default LLE.
+No reverse pair, companion compilation/timing or owner playcheck is justified
+by this negligible result. Private raw JSON/logs and binary hashes are under
+`build/qualification/vip-runtime-corrected`; smoke under `vip-runtime-smoke`.
+
+Companion preparation preserves generated files privately, without regeneration:
+
+| Game | Pinned isolated title / existing floor | Prepared route and configuration |
+|---|---|---|
+| Wario Land | `_wt-vip-native-wario`, title `e0bd7215a2ea3e40115b60383daeeee8036f4c9a`; historical native framework `1dac7603074cf8d69f7ce96ff84936ee9d2257f4` | Original `tests/gameplay-route.json`, 2,730 frames; current-framework Release LLE/BATCHED configured, hooks/debug OFF. Existing `validation/native-oracle-01/report.json` passed 27 checkpoints/189 audits with 496,082,918 native instructions, zero fallback. |
+| SD Gundam | `_wt-vip-native-sd-gundam`, title `4f2cee37d1fd69576a8ce9f595bd6d52768649c3`; historical native framework `794a200f4001cb8314955794d2726ae1ea3f5123` | Original `tests/first-mission-route.json`, 4,500 frames; current-framework Release LLE/BATCHED configured, hooks/debug OFF, fast-build OFF. Existing Japanese native callback report passed 40 checkpoints/280 audits, 914,443,855 native instructions, zero fallback, with historical O1 generated optimization. |
+
+Both companions reuse the same UI pin as ZeroRacers. Their configured current
+production binaries are not yet built or qualified; historical reports do not
+assert current binary identity. Clean companion compilation and any pairs are
+parked after ZeroRacers failed to show material runtime gain. Matching generated
+hashes and pins are recorded in private `companion-identity.json` beside the
+native profile. This is preparation, not an additional profile matrix.
+
 Windows is the first supported target. Use three actual games, one production
 configuration per game, and maintain a functioning LLE build with the same
 caller ABI. The owner judges practical appearance and playability; prospective
@@ -161,16 +242,15 @@ identity. Historical exact comparisons above remain completed evidence.
 
 ### First task and implementation decision
 
-First add a finite production-native route adapter: feed actual controller
-input, stop at the selected guest frame/event boundary and retain normal title
+The prepared finite production-native route adapter feeds actual controller
+input, stops at the selected guest frame/event boundary and retains normal title
 runtime semantics. The prior generic interpreter capture, with 63.712%
 unresolved external samples, cannot rank production AOT engine costs.
 
-Make a bounded production cost pass over the ready routes with matching binary
-symbols and relevant CPU/wall accounting. Separate startup/pacing/framework
-work and unresolved external code rather than assigning them to a guessed
-device. Stop after the three-title pass and select one material common service,
-or explicitly report that the measurements do not support a candidate.
+The single native ZeroRacers pass above selects VIP row/block work. Do not
+extend the profile matrix before testing this concrete candidate. Keep startup,
+framework work and unresolved external code explicit; companion routes become
+useful once a material primary gain supports further qualification.
 
 Choose VIP row/block rendering if it is the largest removable native cost;
 choose VSU block synthesis if audio is actually hot; choose bus/scheduler
@@ -184,7 +264,7 @@ from this critical path. It is not ready for an owner playtest or promotion.
 
 | Game | Actual route / useful observations | Production readiness |
 |---|---|---|
-| ZeroRacers | `tests/race-driving-route.json`, 4,000 frames: menus, live driving and pause state. | Debug-free production near-AOT binary exists; finite adapter is missing. Preserve/report its small fallback fraction. Primary native profiling candidate. |
+| ZeroRacers | `tests/race-driving-route.json`, 4,000 frames: menus, live driving and pause state. | Debug-free production near-AOT LLE/BATCHED builds and finite adapter ready. Preserve/report its small fallback fraction. Primary runtime gain candidate. |
 | Wario Land | `tests/gameplay-route.json`, 2,730 frames: first-stage entry 2,120, walk/jump/attack, turn 2,610, idle 2,730. | Native-only Beetle floor is documented; available Release has hooks/debug tools ON. Prepare a pinned production build with them OFF and confirm basic route operation before timing. |
 | SD Gundam | `tests/first-mission-route.json`, 4,500 frames: opening Japanese mission map, cursor and unit-action menu. | Debug-free normally optimized production binary exists; historical passing oracle report used O1 fast-build. Confirm the production route works rather than assuming binary identity. |
 

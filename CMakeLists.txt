@@ -59,6 +59,8 @@ if(BUILD_TESTING)
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
     add_test(NAME vb-benchmark-cli COMMAND "${Python3_EXECUTABLE}"
         "${CMAKE_CURRENT_SOURCE_DIR}/runtime/tests/benchmark_cli_test.py" "$<TARGET_FILE:vb-runtime>")
+    add_test(NAME vb-benchmark-route-adapter COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/runtime/tests/benchmark_route_adapter_test.py")
     set(_bridge_dir "${CMAKE_CURRENT_BINARY_DIR}/bridge-fixture")
     add_custom_command(OUTPUT "${_bridge_dir}/bridge_full.c" "${_bridge_dir}/bridge_dispatch.c" "${_bridge_dir}/bridge.h" "${_bridge_dir}/bridge.rom"
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/runtime/tests/generate_bridge_fixture.py" "${_bridge_dir}"
@@ -84,6 +86,17 @@ if(BUILD_TESTING)
         target_link_libraries(vb-vip-source-test PRIVATE m)
     endif()
     add_test(NAME vb-vip-source COMMAND vb-vip-source-test)
+    add_executable(vb-vip-batched-source-test runtime/tests/vip_source_test.c runtime/tests/vip_source_unreachable.c
+        runtime/src/viewport.c)
+    target_include_directories(vb-vip-batched-source-test PRIVATE runtime/include)
+    target_compile_definitions(vb-vip-batched-source-test PRIVATE VBRECOMP_VIP_BATCHED=1)
+    if(MSVC)
+        target_compile_options(vb-vip-batched-source-test PRIVATE /UNDEBUG)
+    else()
+        target_compile_options(vb-vip-batched-source-test PRIVATE -UNDEBUG)
+        target_link_libraries(vb-vip-batched-source-test PRIVATE m)
+    endif()
+    add_test(NAME vb-vip-batched-source COMMAND vb-vip-batched-source-test)
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
     add_executable(vb-mod-runtime-test runtime/tests/mod_runtime_test.cpp
         runtime/src/mod_runtime.cpp runtime/src/vb_sha256.c runtime/src/vb_crc32.c)
