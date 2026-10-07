@@ -122,3 +122,31 @@ Exact sampled binary, binary/ROM identity, `samples.csv`, matching `symbols.txt`
 `build/qualification/host-profile/`. This single bounded profile motivates
 common interpreter fetch/decode service investigation and better external-code
 attribution before another subsystem rewrite. It is not throughput evidence.
+
+## Representative workload pool
+
+Use these three existing routes for bounded hypothesis discovery, reusing
+correctness evidence before fresh sampling. The generic interpreter profile
+above, with **63.712% unresolved external samples**, is inadequate for ranking
+production AOT costs. Its fetch/decode ranking must not become a production
+optimization priority without production evidence.
+
+This pool is not an automatic matrix. The shared six-system pass permits at
+most six new captures total, one configuration per selected game, reusing
+existing evidence first; it is not six captures per system.
+
+| Workload | Existing local build and route | Reused evidence / production cost gap |
+|---|---|---|
+| ZeroRacers | `_wt-zero-racers/build-release/vbrecomp/runtime/ZeroRacersVirtualBoyRecomp.exe`; `tests/race-driving-route.json`, 4,000 frames | Release, CPU hooks/debug tools OFF. `validation/driving-release/report.json` passed 39 milestones/273 byte audits. Hybrid: 888,495,917 native instructions and 23,922 interpreted/fallback instructions; near-AOT, not zero-fallback. Production subsystem costs unknown. |
+| Wario Land | `WarioLandVirtualBoyRecomp/build/vbrecomp/runtime/WarioLandVirtualBoyRecomp.exe`; `tests/gameplay-route.json`, 2,730 frames | Movement/jump/attack/turn/hazard route. Historical native-only Beetle comparison matched ten planes/189 audits, 496,082,918 native instructions, zero fallback. Available Release build has CPU hooks/debug tools ON; identify that overhead in any profile. No campaign completion or production cost ranking. |
+| SD Gundam | `_wt-sd-gundam/build-release/vbrecomp/runtime/SDGundamDimensionWarVirtualBoyRecomp.exe`; `tests/first-mission-route.json`, 4,500 frames | Production Release uses normal generated optimization, hooks/debug tools OFF. Historical `validation/japanese-native-callback/report.json` passed 40 milestones/280 audits, 914,443,855 native instructions, zero fallback, using an O1 fast-build configuration. Do not equate that validated binary with the production binary. Opening mission/unit-action menu only; combat/completion and production costs unqualified. |
+
+ZeroRacers is the next single useful production capture: a debug-free near-AOT
+build and recorded driving route already exist. Older title runners lack this
+branch's finite `--benchmark` interface; prepare a bounded route-driven sampler
+adapter before launching. Preserve matching binary/symbol identity and report
+unresolved samples explicitly. No production VB capture was added in this pass.
+The earlier SD Gundam `japanese-native-final/report.json` failed with a socket
+reset and is not passing evidence; the callback report is the passing record.
+Cold logical-bit-string findings on generic ZeroRacers and MarioTennis remain
+regression/coverage evidence, not production AOT cost measurements.
