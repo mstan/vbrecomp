@@ -113,5 +113,33 @@ int main(int argc,char** argv) {
         }
         puts("Native/RAM-interpreter return and instruction-yield bridge passed");
     }
+    c=setup();memset(&vb_execution,0,sizeof(vb_execution));
+    vb_execution.breakpoint_enabled=1;vb_execution.breakpoint_pc=c.pc;
+    vb_interpreter_fallback(&c);
+    assert(c.pc==0x100 && c.step_budget==100 && !vb_execution.fallback && !vb_execution.interpreted);
+    assert(vb_execution.stopped);
+    /* Fill the bounded fallback map, then verify collision accounting and
+     * explicit overflow without dropping hits or writing past the table. */
+    uint64_t previous_hits=vb_fallback_coverage_overflow();
+    for(unsigned n=0;n<VB_FALLBACK_COVERAGE_CAPACITY;++n) {
+        uint32_t pc;uint64_t hits;
+        if(vb_fallback_coverage_get(n,&pc,&hits)) previous_hits+=hits;
+    }
+    c=setup();memset(&vb_execution,0,sizeof(vb_execution));
+    for (unsigned n=0;n<VB_FALLBACK_COVERAGE_CAPACITY+8;++n) {
+        c.pc=0x10000u+n*2;c.step_budget=1;
+        vb_interpreter_fallback(&c);
+    }
+    uint64_t recorded=0;unsigned occupied=0;
+    for(unsigned n=0;n<VB_FALLBACK_COVERAGE_CAPACITY;++n) {
+        uint32_t pc;uint64_t hits;
+        if(vb_fallback_coverage_get(n,&pc,&hits)) { assert(!(pc&1));recorded+=hits;++occupied; }
+    }
+    assert(occupied==VB_FALLBACK_COVERAGE_CAPACITY);
+    assert(vb_fallback_coverage_overflow()>=8);
+    assert(recorded+vb_fallback_coverage_overflow()==previous_hits+vb_execution.fallback);
+    uint32_t ignored_pc;uint64_t ignored_hits;
+    assert(!vb_fallback_coverage_get(VB_FALLBACK_COVERAGE_CAPACITY,&ignored_pc,&ignored_hits));
+    puts("Bounded fallback PC coverage and overflow passed");
     return 0;
 }
