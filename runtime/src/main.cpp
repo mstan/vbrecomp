@@ -683,6 +683,9 @@ int main(int argc, char** argv) {
      * thread, so it can capture this thread's stack on a freeze. */
     vb_watchdog_start();
     while (vb_debug_server_poll() == 0 && !sdl_quit) {
+        // Debugger PC writes are applied while paused. Resume from the
+        // architectural PC rather than overwriting it with the prior cache.
+        dispatch_pc = cpu.pc;
         vb_watchdog_beat(VB_WD_POLL, dispatch_pc, cpu.cycles, present_count);
 
         /* Axis-6 frame ring: advance the VIP-frame counter from elapsed

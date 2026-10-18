@@ -14,6 +14,13 @@ typedef struct {
     int stepping, breakpoint_enabled, stopped, skip_break;
 } VbExecutionStats;
 extern VbExecutionStats vb_execution;
+
+/* Always-on bounded PC/hit coverage. Overflow is explicit; consumers must not
+ * treat an incomplete report as an exhaustive set of missing native blocks. */
+enum { VB_FALLBACK_COVERAGE_CAPACITY = 4096 };
+int vb_fallback_coverage_get(unsigned slot, uint32_t* pc, uint64_t* hits);
+uint64_t vb_fallback_coverage_overflow(void);
+
 /* Virtual Boy has a 16-bit external bus in every region. Preserve load/store
  * pipeline state across native calls, interpreter handoffs and device yields.
  * Reference: Beetle v810_oploop.inc LD/ST/IN/OUT handlers and lastop updates. */

@@ -8,6 +8,25 @@
 
 VbExecutionStats vb_execution;
 
+typedef struct { uint32_t pc; uint64_t hits; } VbFallbackCoverage;
+static VbFallbackCoverage fallback_coverage[VB_FALLBACK_COVERAGE_CAPACITY];
+static uint64_t fallback_coverage_overflow;
+static void record_fallback_pc(uint32_t pc) {
+    unsigned slot=((pc>>1)*2654435761u)&(VB_FALLBACK_COVERAGE_CAPACITY-1);
+    for (unsigned n=0;n<VB_FALLBACK_COVERAGE_CAPACITY;++n) {
+        VbFallbackCoverage* row=fallback_coverage+slot;
+        if (!row->hits || row->pc==pc) { row->pc=pc;++row->hits;return; }
+        slot=(slot+1)&(VB_FALLBACK_COVERAGE_CAPACITY-1);
+    }
+    ++fallback_coverage_overflow;
+}
+int vb_fallback_coverage_get(unsigned slot,uint32_t* pc,uint64_t* hits) {
+    if (slot>=VB_FALLBACK_COVERAGE_CAPACITY || !fallback_coverage[slot].hits) return 0;
+    *pc=fallback_coverage[slot].pc;*hits=fallback_coverage[slot].hits;return 1;
+}
+uint64_t vb_fallback_coverage_overflow(void) { return fallback_coverage_overflow; }
+
+
 int vb_execution_debug_check(CPUState* c) {
     int stop=vb_execution.stepping && !vb_execution.step_remaining;
     stop=stop || (vb_execution.breakpoint_enabled && c->pc==vb_execution.breakpoint_pc && !vb_execution.skip_break);
@@ -155,9 +174,15 @@ void vb_interpreter_fallback(CPUState* c) {
     if (vb_execution.mode==VB_EXEC_NATIVE)
         vb_stub_abort("native-only dispatch miss",c->pc,c->pc);
     if (!c->step_budget || c->cycles>=c->cycle_deadline) { c->yielded=1; return; }
-    if (!vb_execution.fallback) vb_execution.first_fallback_pc=c->pc;
-    vb_execution.last_fallback_pc=c->pc;
-    ++vb_execution.fallback;
-    --c->step_budget;
+    uint32_t pc=c->pc;
+    uint64_t before=vb_execution.interpreted;
     vb_interpreter_step(c);
+    /* A debugger breakpoint/finished step can stop before execution. Such a
+     * dispatch attempt must not consume budget or inflate fallback coverage. */
+    if (before==vb_execution.interpreted) return;
+    if (!vb_execution.fallback) vb_execution.first_fallback_pc=pc;
+    vb_execution.last_fallback_pc=pc;
+    ++vb_execution.fallback;
+    record_fallback_pc(pc);
+    --c->step_budget;
 }
