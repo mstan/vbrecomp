@@ -112,6 +112,50 @@ int main(int argc,char** argv) {
             assert(c.halted && c.pc==0xdead0002);
         }
         puts("Native/RAM-interpreter return and instruction-yield bridge passed");
+        for(int enabled=0;enabled<2;++enabled) for(int mode=0;mode<=2;mode+=2) {
+            c=setup();FILE* f=fopen(argv[1],"rb");assert(f);assert(fread(ram,1,sizeof(ram),f)==sizeof(ram));fclose(f);
+            vb_branch_rules_reset();
+            if(enabled) assert(vb_branch_rule_add(0x0700010a,0x8c06,11,VB_BRANCH_LT,800));
+            c.pc=0x07000100;memset(&vb_execution,0,sizeof(vb_execution));vb_execution.mode=mode;
+            vb_dispatch(&c,c.pc);
+            unsigned expected=0;
+#ifdef VB_BRANCH_OVERRIDES
+            expected=(unsigned)enabled;
+#endif
+            assert(c.halted && c.gpr[10]==expected && c.gpr[11]==500);
+            assert(!c.psw_s && !c.psw_ov); /* Comparisons do not change PSW. */
+            if(mode==0) assert(vb_execution.native_instructions && !vb_execution.fallback);
+        }
+        vb_branch_rules_reset();
+        assert(vb_branch_rule_add(0x0700010a,0x8c06,11,VB_BRANCH_LT,800));
+        assert(!vb_branch_rule_add(0x0700010a,0x8c06,11,VB_BRANCH_LT,801));
+        vb_branch_rules_enable(0);assert(!VB_BRANCH_PREDICATE(&c,0x0700010a,0x8c06,0));
+        vb_branch_rules_reset();
+        assert(!vb_branch_rule_add(0x0700010b,0x8c06,11,VB_BRANCH_LT,800));
+        assert(!vb_branch_rule_add(0x0500010a,0x8c06,11,VB_BRANCH_LT,800));
+        assert(!vb_branch_rule_add(0x0700010a,0x8c06,0,VB_BRANCH_LT,800));
+        assert(!vb_branch_rule_add(0x0700010a,0x8c06,11,99,800));
+        assert(!vb_branch_rule_add(0x0700010a,0x9a00,11,VB_BRANCH_LT,800));
+        for(unsigned n=0;n<VB_BRANCH_RULE_CAPACITY;++n) assert(vb_branch_rule_add(0x07000000+n*2,0x8c06,11,VB_BRANCH_LT,800));
+        assert(!vb_branch_rule_add(0x07001000,0x8c06,11,VB_BRANCH_LT,800));
+        c.gpr[11]=500;
+        assert(vb_branch_predicate_lookup(&c,0xff000000,0x8c06,0)==1);
+        assert(vb_branch_predicate_lookup(&c,0x07000000,0x8c08,0)==0);
+        assert(vb_branch_predicate_lookup(&c,0x07001000,0x8c06,0)==0);
+        unsigned observed=0;uint64_t hits=0;
+        for(unsigned n=0;n<VB_BRANCH_RULE_SLOTS;++n) { VbBranchRule row;if(vb_branch_rule_get(n,&row)) { ++observed;hits+=row.hits; } }
+        assert(observed==VB_BRANCH_RULE_CAPACITY && hits==1);
+        vb_branch_rules_reset();assert(!vb_branch_rule_count);
+        for(unsigned comparison=VB_BRANCH_LT;comparison<=VB_BRANCH_GE;++comparison) {
+            vb_branch_rules_reset();assert(vb_branch_rule_add(0x0700010a,0x8c06,11,comparison,0));
+            for(int value=-100;value<=100;value+=100) {
+                c.gpr[11]=(uint32_t)value;
+                int expected=comparison==VB_BRANCH_LT ? value<0 : comparison==VB_BRANCH_LE ? value<=0 : comparison==VB_BRANCH_GT ? value>0 : value>=0;
+                assert(vb_branch_predicate_lookup(&c,0x0700010a,0x8c06,!expected)==expected);
+            }
+        }
+        vb_branch_rules_reset();
+        puts("Guarded branch rules: native/interpreter, stock/reset, aliases, bounds and capacity passed");
     }
     c=setup();memset(&vb_execution,0,sizeof(vb_execution));
     vb_execution.breakpoint_enabled=1;vb_execution.breakpoint_pc=c.pc;

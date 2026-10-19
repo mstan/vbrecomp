@@ -5,12 +5,12 @@
         --module marios_tennis --out generated/ --limit 50 \\
         --seeds-toml marios_tennis.toml
 
-The driver discovers functions via the CFG-aware walker, emits the
-three generated artifacts (`<module>_full.c`, `<module>_dispatch.c`,
-`<module>.h`), and writes them to `--out`. `--limit N` truncates the
-function set to the first N (BFS-from-entry order); functions outside
-the limit will fatal-abort if reached at runtime, surfacing the gap
-per CLAUDE.md §0.
+The driver discovers functions via the CFG-aware walker and writes C bodies,
+an exact-PC dispatch source, a header and a CMake source manifest to `--out`.
+Bodies are partitioned at function boundaries using `--unit-instructions`
+(default 8192; 0 selects one body source). `--limit N` truncates the function
+set; native-only execution stops on missing entries, while hybrid mode uses
+instruction-level interpreter fallback.
 
 `--seeds-toml PATH` reads a per-cart toml and treats its
 `[functions].seeds = ["0xFFF8...", ...]` list as extra function-
@@ -48,6 +48,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--limit", type=int, default=None,
                    help="recompile only the first N functions "
                         "(BFS-from-entry order)")
+    p.add_argument("--unit-instructions", type=int, default=8192,
+                   help="target instructions per C source, split between functions; 0 emits one body source")
     p.add_argument("--seeds-toml", type=Path, default=None,
                    help="per-cart toml file with explicit "
                         "[functions].seeds = [...] PCs to seed CFG "
@@ -85,6 +87,8 @@ def _load_extra_seeds(path: Path) -> List[int]:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.unit_instructions < 0:
+        raise SystemExit("--unit-instructions must be nonnegative")
     rom_bytes = args.rom.read_bytes()
     header = parse_header(rom_bytes)
     safe_title = header.game_title.encode("ascii", "replace").decode("ascii")
@@ -103,7 +107,8 @@ def main(argv: list[str] | None = None) -> int:
     img = RomImage.from_bytes(rom_bytes)
     result = recompile_rom(img, module_name=module,
                            function_limit=args.limit,
-                           extra_seeds=extra_seeds or None)
+                           extra_seeds=extra_seeds or None,
+                           unit_instruction_limit=args.unit_instructions or None)
 
     if not result.files:
         print("error: codegen produced no output (function discovery "

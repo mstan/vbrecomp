@@ -40,6 +40,13 @@ static void viewport_layout(const VbViewportScene* scene, int kind, int width,
                             VbViewportLayout* layout, void* context) {
     (void)scene; (void)kind; (void)width; (void)layout; (void)context;
 }
+static int unwrap_origin;
+static void unwrapped_layout(const VbViewportScene* scene,int kind,int width,
+                              VbViewportLayout* layout,void* context) {
+    (void)scene;(void)kind;(void)width;(void)context;
+    layout->unwrapped_object_coordinates=1;
+    for(int i=0;i<1024;++i)layout->object_shift[i]=unwrap_origin;
+}
 static uint8_t extra_marker = 73;
 static void snapshot_extra(uint8_t* bytes, unsigned count) { memset(bytes,extra_marker,count); }
 static int extend_background(int x,int y,int* source_x,int* source_y,void* context) {
@@ -115,6 +122,26 @@ static void viewport_tests(void) {
             if(raw)assert(sources[at].u==u && sources[at].v==v && sources[at].kind==3 && sources[at].raw==raw);
         }
         assert(levels[(W-384)/2-1]==3); /* Extended BG samples original x=7. */
+    }
+    vb_viewport_reset();
+    assert(vb_viewport_register("test.unwrapped-objects",32,9,0,viewport_scene,unwrapped_layout,0));
+    const int positions[]={700,510,-100};
+    for(unsigned n=0;n<3;++n) for(int parallax=-8;parallax<=8;parallax+=16) {
+        setup(3,0,0);unwrap_origin=n==0 ? -(W-384)/2 : 0;
+        uint16_t* bgm=(uint16_t*)(s_vip_mem+0x20000);
+        uint16_t* object=&bgm[(0x1e000+8)/2];
+        object[0]=(uint16_t)positions[n];object[1]=0xc000|(parallax&0x3fff);
+        for(int block=0;block<28;++block)vip_draw_block_into(block,left,right);
+        s_display_fb=0;
+        for(int eye=0;eye<2;++eye) {
+            assert(vb_viewport_render(0,eye,384,colors,levels,worlds,sources));
+            const uint8_t* fb=eye?right:left;
+            for(int y=0;y<224;++y)for(int x=0;x<384;++x)
+                assert(levels[y*384+x]==((fb[x*64+y/4]>>(2*(y%4)))&3));
+            assert(vb_viewport_render(0,eye,W,colors,levels,worlds,sources));
+            int x=positions[n]+(eye?parallax:-parallax)+(W-384)/2+unwrap_origin+1;
+            unsigned at=W+x;assert(levels[at]==3 && worlds[at]==32 && sources[at].kind==3);
+        }
     }
     vb_viewport_reset();
     assert(vb_viewport_register("test.adaptive",16,9,1,viewport_scene,viewport_layout,0));
