@@ -85,3 +85,11 @@ signed parallax before clipping, avoiding ten-bit wrap in wide margins. The
 default and native-width replay retain the original hardware behavior. Synthetic
 VIP tests exercise x=700, the x=510 parallax seam, negative x, both eyes and
 native replay parity on Windows and Linux.
+
+Production supports `--headless --frames N` (1..1000000) for a finite, clean
+guest-frame run without TCP tools. It prints final frame/native/fallback counts
+and follows normal shutdown/save handling. `tools/test_frame_limit.py` checks
+invalid limits and exact clean exits at frames one and three. Pass `--rom` for a
+game build; omit it only for the generic interpreter host's synthetic fixture.
+The comparison runner uses file-backed stdout/stderr logs so a long route
+cannot stall on a full console pipe, and retains both streams after failures.

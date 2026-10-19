@@ -53,6 +53,9 @@
 #ifndef VB_DEFAULT_WINDOW_TITLE
 #define VB_DEFAULT_WINDOW_TITLE "vbrecomp"
 #endif
+#ifndef VB_GAME_TITLE
+#define VB_GAME_TITLE VB_DEFAULT_WINDOW_TITLE
+#endif
 
 static void print_help(const char* argv0) {
     std::printf(
@@ -64,7 +67,8 @@ static void print_help(const char* argv0) {
         "  --rom PATH       Load a Virtual Boy ROM into the simulated cart slot.\n"
         "                   Game builds can select or reuse a ROM in the launcher.\n"
         "  --port N         TCP debug port (default: %d).\n"
-        "  --headless       Do not open an SDL window. TCP-only.\n"
+        "  --headless       Do not open an SDL window.\n"
+        "  --frames N       Exit cleanly after N guest frames (1..1000000).\n"
         "  --stereo         Show both eyes stacked vertically (L top / R bottom)\n"
         "                   instead of the single-eye default.\n"
         "  --paused         Start paused (requires debug tools).\n"
@@ -356,6 +360,7 @@ int main(int argc, char** argv) {
     bool headless = false;
     bool stereo = false;
     bool start_paused = false;
+    uint32_t frame_limit = 0;
 
     for (int i = 1; i < argc; ++i) {
         const int host_arg = vb_host_argument(i, argc, argv);
@@ -375,6 +380,14 @@ int main(int argc, char** argv) {
             else if(mode=="native") vb_execution.mode=VB_EXEC_NATIVE;
             else if(mode=="interpreter") vb_execution.mode=VB_EXEC_INTERPRETER;
             else { std::puts("Invalid --execution mode"); return 2; }
+        } else if (a == "--frames" && i + 1 < argc) {
+            std::string count=argv[++i];
+            if(count.empty() || count.find_first_not_of("0123456789")!=std::string::npos) {
+                std::puts("--frames requires a positive decimal count (maximum 1000000)");return 2;
+            }
+            unsigned long long value=std::strtoull(count.c_str(),nullptr,10);
+            if(!value || value>1000000) { std::puts("Invalid --frames count");return 2; }
+            frame_limit=(uint32_t)value;
         } else if (a == "--paused") {
             start_paused = true;
         } else if (a == "--headless") {
@@ -519,7 +532,7 @@ int main(int argc, char** argv) {
     }
     if (!headless) {
         win = SDL_CreateWindow(
-            VB_DEFAULT_WINDOW_TITLE,
+            VB_GAME_TITLE,
             SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
             tex_w * vb_host_config.scale, tex_h * vb_host_config.scale,
             SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
@@ -699,6 +712,11 @@ int main(int argc, char** argv) {
             vb_devices_end_frame(cpu.cycles);
             cpu.frame++;
             vb_ring_frame_record(&cpu);
+        }
+        if(frame_limit && cpu.frame>=frame_limit) {
+            std::printf("vb-runtime: frame limit reached frame=%u native=%llu fallback=%llu\n",cpu.frame,
+                        (unsigned long long)vb_execution.native_instructions,(unsigned long long)vb_execution.fallback);
+            break;
         }
 #if VB_RUNTIME_HAVE_SDL
         if (!headless) {

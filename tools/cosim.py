@@ -33,9 +33,16 @@ class Runner:
         with socket.socket() as probe:
             if os.name=="nt": probe.setsockopt(socket.SOL_SOCKET,socket.SO_EXCLUSIVEADDRUSE,1)
             probe.bind(("127.0.0.1",port))
-        self.process=subprocess.Popen(command,cwd=self.directory,stdout=subprocess.PIPE,stderr=subprocess.PIPE,
-            env=environment,
-            creationflags=subprocess.CREATE_NO_WINDOW if os.name=="nt" else 0)
+        # Long routes must not block the guest on an undrained console pipe.
+        # Keep complete logs even when the process exits before the debugger.
+        self.stdout_log=(self.directory/'stdout.log').open('wb')
+        self.stderr_log=(self.directory/'stderr.log').open('wb')
+        try:
+            self.process=subprocess.Popen(command,cwd=self.directory,stdout=self.stdout_log,stderr=self.stderr_log,
+                env=environment,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name=="nt" else 0)
+        except BaseException:
+            self.stdout_log.close();self.stderr_log.close();raise
         self.client=None
         deadline=time.monotonic()+15
         try:
@@ -59,11 +66,13 @@ class Runner:
             try: self.client.command("quit")
             except Exception: pass
             self.client.close();self.client=None
-        try: out,err=self.process.communicate(timeout=4)
+        try: self.process.wait(timeout=4)
         except subprocess.TimeoutExpired:
-            self.process.terminate();out,err=self.process.communicate(timeout=4)
+            self.process.terminate();self.process.wait(timeout=4)
+        self.stdout_log.close();self.stderr_log.close()
         if self.process.returncode:
-            (self.directory/"crash.json").write_text(json.dumps({"exit":self.process.returncode,"report":err.decode(errors="replace")[-4000:]},indent=2))
+            err=(self.directory/'stderr.log').read_bytes()
+            (self.directory/"crash.json").write_text(json.dumps({"exit":self.process.returncode,"report":err.decode(errors="replace")[-4000:],"stdout":"stdout.log","stderr":"stderr.log"},indent=2))
 
     def memory(self, base, count=65536):
         data=bytearray()

@@ -26,6 +26,7 @@ def main():
     p.add_argument('--case',action='append',default=[])
     p.add_argument('--allow-fallback',action='store_true')
     p.add_argument('--matched-mods',action='store_true',help='Apply the same simulation-changing mods to both processes')
+    p.add_argument('--compare-presented',action='store_true',help='Also require identical enhanced output surfaces')
     args=p.parse_args()
     spec=json.loads(args.suite.read_text())
     if digest(args.rom)!=spec['rom_sha256']:p.error('Unsupported cartridge identity')
@@ -40,7 +41,8 @@ def main():
         for feature in manifest.get('feature',[]):extra+=['--enable-mod',manifest['id']+':'+feature['id']]
         for option in manifest.get('option',[]):
             if option['id']=='aspect':extra+=['--set-mod-option',manifest['id']+':'+option['feature']+':aspect=32:9']
-    report=dict(runtime_sha256=digest(args.runtime),rom_sha256=digest(args.rom),suite_sha256=digest(args.suite),mods={str(m):digest(m) for m in args.mod},matched_mods=args.matched_mods,planes=PLANES,cases=[])
+    planes=PLANES+(['presented'] if args.compare_presented else [])
+    report=dict(runtime_sha256=digest(args.runtime),rom_sha256=digest(args.rom),suite_sha256=digest(args.suite),mods={str(m):digest(m) for m in args.mod},matched_mods=args.matched_mods,allow_fallback=args.allow_fallback,planes=planes,cases=[])
     args.out.mkdir(parents=True,exist_ok=False)
     def save(): (args.out/'report.json').write_text(json.dumps(report,indent=2)+'\n',newline='\n')
     def run_steps(pair,steps,case):
@@ -70,7 +72,7 @@ def main():
                 label=event['label']
                 if not re.fullmatch(r'[A-Za-z0-9_-]+',label):raise ValueError('Invalid capture label')
                 frames=[r.client.command('frame')['frame'] for r in pair];assert frames[0]==frames[1],frames
-                snapshots=[r.snapshot(frames[0],PLANES) for r in pair]
+                snapshots=[r.snapshot(frames[0],planes) for r in pair]
                 differences=compare_snapshots(*snapshots)
                 row=dict(label=label,frame=frames[0],differences=differences,stats=pair[0].client.command('execution_stats'),viewport=pair[0].client.command('viewport_state'),checks=[])
                 for expect in event.get('expect',[]):
@@ -95,6 +97,8 @@ def main():
                 if fresh:run_steps(pair,spec.get('initial',[]),case)
                 run_steps(pair,plan['steps'],case)
                 coverage=pair[0].client.command('fallback_coverage');stats=pair[0].client.command('execution_stats')
+                if 'branch_rules' in pair[0].client.command('capabilities')['commands']:
+                    case['branch_rules']=[r.client.command('branch_rules') for r in pair]
                 assert sum(e['hits'] for e in coverage['entries'])+coverage['overflow_hits']==stats['fallback']
                 case.update(stats=stats,fallback_coverage=coverage);save()
                 assert not coverage['overflow_hits'],'Incomplete fallback-PC map'
