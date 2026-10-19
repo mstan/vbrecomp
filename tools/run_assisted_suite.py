@@ -27,6 +27,10 @@ def main():
     p.add_argument('--allow-fallback',action='store_true')
     p.add_argument('--matched-mods',action='store_true',help='Apply the same simulation-changing mods to both processes')
     p.add_argument('--compare-presented',action='store_true',help='Also require identical enhanced output surfaces')
+    p.add_argument('--control-runtime',type=Path,help='Optional older runtime for regression comparisons')
+    p.add_argument('--control-mode',choices=['hybrid','interpreter'],default='interpreter')
+    p.add_argument('--aspect',choices=['adaptive','16:9','21:9','32:9'],default='32:9')
+    p.add_argument('--require-branch-changes',action='store_true',help='Reject a simulation-extension survey that never changes an original branch decision')
     args=p.parse_args()
     spec=json.loads(args.suite.read_text())
     if digest(args.rom)!=spec['rom_sha256']:p.error('Unsupported cartridge identity')
@@ -40,9 +44,10 @@ def main():
         extra+=['--install-mod',str(package.resolve())]
         for feature in manifest.get('feature',[]):extra+=['--enable-mod',manifest['id']+':'+feature['id']]
         for option in manifest.get('option',[]):
-            if option['id']=='aspect':extra+=['--set-mod-option',manifest['id']+':'+option['feature']+':aspect=32:9']
+            if option['id']=='aspect':extra+=['--set-mod-option',manifest['id']+':'+option['feature']+':aspect='+args.aspect]
     planes=PLANES+(['presented'] if args.compare_presented else [])
-    report=dict(runtime_sha256=digest(args.runtime),rom_sha256=digest(args.rom),suite_sha256=digest(args.suite),mods={str(m):digest(m) for m in args.mod},matched_mods=args.matched_mods,allow_fallback=args.allow_fallback,planes=planes,cases=[])
+    control=(args.control_runtime or args.runtime).resolve()
+    report=dict(runtime_sha256=digest(args.runtime),control_runtime_sha256=digest(control),control_mode=args.control_mode,rom_sha256=digest(args.rom),suite_sha256=digest(args.suite),mods={str(m):digest(m) for m in args.mod},matched_mods=args.matched_mods,allow_fallback=args.allow_fallback,planes=planes,cases=[])
     args.out.mkdir(parents=True,exist_ok=False)
     def save(): (args.out/'report.json').write_text(json.dumps(report,indent=2)+'\n',newline='\n')
     def run_steps(pair,steps,case):
@@ -91,19 +96,23 @@ def main():
                 fresh=pair is None or spec.get('reset_between_cases',True)
                 if fresh:
                     stack=inner if spec.get('reset_between_cases',True) else outer
-                    pair=[stack.enter_context(Runner(args.runtime.resolve(),args.rom.resolve(),mode,port(),args.out/(plan['id']+'-'+mode),extra=extra if mode=='hybrid' or args.matched_mods else ())) for mode in ('hybrid','interpreter')]
+                    pair=[stack.enter_context(Runner(exe,args.rom.resolve(),mode,port(),args.out/(plan['id']+'-'+label),extra=extra if label=='native' or args.matched_mods else ())) for label,mode,exe in [('native','hybrid',args.runtime.resolve()),('control',args.control_mode,control)]]
                     for runner in pair:runner.client.socket.settimeout(60);runner.client.command('viewport_state',window_width=1280,window_height=360)
                 case=dict(id=plan['id'],kind=plan.get('kind','sample'),checkpoints=[]);report['cases'].append(case)
                 if fresh:run_steps(pair,spec.get('initial',[]),case)
                 run_steps(pair,plan['steps'],case)
                 coverage=pair[0].client.command('fallback_coverage');stats=pair[0].client.command('execution_stats')
                 if 'branch_rules' in pair[0].client.command('capabilities')['commands']:
-                    case['branch_rules']=[r.client.command('branch_rules') for r in pair]
+                    case['branch_rules']=[r.client.command('branch_rules') if 'branch_rules' in r.client.command('capabilities')['commands'] else None for r in pair]
                 assert sum(e['hits'] for e in coverage['entries'])+coverage['overflow_hits']==stats['fallback']
                 case.update(stats=stats,fallback_coverage=coverage);save()
+                case['control_stats']=pair[1].client.command('execution_stats');save()
                 assert not coverage['overflow_hits'],'Incomplete fallback-PC map'
                 assert args.allow_fallback or not stats['fallback'],stats
                 assert case['checkpoints'],'Case has no audited checkpoints'
                 print(plan['id'],'PASS, fallback',stats['fallback'],flush=True)
+    if args.require_branch_changes:
+        rules=report['cases'][-1].get('branch_rules',[None])[0]
+        assert rules and rules['count'] and any(r['changed'] for r in rules['rules']),'Survey did not exercise widened branch decisions'
     report['passed']=True;save()
 if __name__=='__main__':main()

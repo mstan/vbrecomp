@@ -76,7 +76,8 @@ int vb_mod_register_exclusive_plugin(const char* id, const char* resource,
  */
 int vb_mod_register_reset_callback(VBModActivationCallback callback);
 
-/* Frame callbacks run at guest GAME_START, independent of host presentation. */
+/* Frame callbacks run at guest GAME_START, independent of host presentation.
+ * Register inside plugin activation: activation/deactivation clears this list. */
 int vb_mod_register_frame_callback(VBModFrameCallback callback);
 void vb_mod_runtime_frame_tick_c(void);
 
