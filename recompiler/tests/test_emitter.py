@@ -9,6 +9,7 @@ on the decoder side, and the C compiler covers syntactic validity).
 from __future__ import annotations
 
 import unittest
+import re
 
 from recompiler.v810.analysis import (
     FunctionRange,
@@ -135,6 +136,41 @@ class TestEmitFunctionShape(unittest.TestCase):
         result = recompile_rom(img, module_name="testcart")
         header = result.files["generated/testcart.h"]
         self.assertIn(f"void {_fn_symbol(0x07000020)}(CPUState* cpu);", header)
+
+
+class TestTranslationUnits(unittest.TestCase):
+    def test_split_preserves_all_bodies_calls_and_dispatch(self):
+        rom = bytearray(b'\xff' * 0x4000)
+        _install_trampoline(rom, 0x07000020)
+        rom[0x20:0x24] = _enc_fmt_iv(0x2B, 0x40)
+        rom[0x24:0x26] = _enc_fmt_i(0x06, 0, 31)
+        rom[0x60:0x62] = _enc_fmt_i(0x06, 0, 31)
+        image = RomImage.from_bytes(bytes(rom))
+        full = recompile_rom(image, module_name="units")
+        split = recompile_rom(image, module_name="units", unit_instruction_limit=1)
+        body_pattern = r"void vb_fn_[A-F0-9]+\(CPUState\* cpu\) \{.*?\n\}"
+        original = re.findall(body_pattern, full.files['generated/units_full.c'], re.S)
+        parts = [name for name in split.files
+                 if name.endswith('.c') and not name.endswith('_dispatch.c')]
+        bodies = [body for name in parts
+                  for body in re.findall(body_pattern, split.files[name], re.S)]
+        self.assertGreater(len(parts), 1)
+        self.assertCountEqual(original, bodies)
+        self.assertEqual(len(bodies), split.function_count)
+        for name in ('units_dispatch.c', 'units.h'):
+            self.assertEqual(full.files['generated/' + name], split.files['generated/' + name])
+        self.assertEqual(full.instruction_count, split.instruction_count)
+        manifest = split.files['generated/units_sources.cmake']
+        self.assertEqual(re.findall(r'"([^"]+)"', manifest),
+                         [name.removeprefix('generated/') for name in parts])
+        # A later unsplit run lists only its live body, leaving any old part
+        # files unreferenced even if they remain on disk.
+        self.assertEqual(re.findall(r'"([^"]+)"', full.files['generated/units_sources.cmake']),
+                         ['units_full.c'])
+
+    def test_invalid_unit_budget_is_rejected(self):
+        with self.assertRaises(ValueError):
+            recompile_rom(RomImage.from_bytes(bytes(0x4000)), unit_instruction_limit=0)
 
 
 class TestEmitAluPatterns(unittest.TestCase):

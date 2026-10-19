@@ -5,8 +5,55 @@
 #include "interrupts.h"
 #include "stub_abort.h"
 #include <limits.h>
+#include <string.h>
 
 VbExecutionStats vb_execution;
+
+static VbBranchRule branch_rules[256];
+unsigned vb_branch_rule_count;
+int vb_branch_rules_enabled;
+void vb_branch_rules_reset(void) {
+    memset(branch_rules,0,sizeof(branch_rules));vb_branch_rule_count=0;vb_branch_rules_enabled=0;
+}
+void vb_branch_rules_enable(int enabled) { vb_branch_rules_enabled=enabled!=0; }
+int vb_branch_rule_add(uint32_t pc,uint16_t word,unsigned reg,unsigned comparison,int32_t bound) {
+    unsigned opcode=word>>10,condition=(word>>9)&15;
+    if((pc&1) || ((pc>>24)&7)!=7 || opcode<0x20 || opcode>0x27 ||
+       condition==5 || condition==13 || reg<1 || reg>31 || comparison>VB_BRANCH_GE ||
+       vb_branch_rule_count>=VB_BRANCH_RULE_CAPACITY) return 0;
+    pc&=0x07fffffeu;unsigned slot=((pc>>1)*2654435761u)&255;
+    for(unsigned n=0;n<256;++n,slot=(slot+1)&255) {
+        VbBranchRule* rule=branch_rules+slot;
+        if(rule->pc==pc) return 0;
+        if(!rule->pc) {
+            *rule=(VbBranchRule){pc,word,reg,comparison,bound,0,0,0};++vb_branch_rule_count;vb_branch_rules_enabled=1;return 1;
+        }
+    }
+    return 0;
+}
+int vb_branch_rule_get(unsigned index,VbBranchRule* result) {
+    if(index>=256 || !branch_rules[index].pc) return 0;
+    *result=branch_rules[index];return 1;
+}
+int vb_branch_predicate_lookup(const CPUState* cpu,uint32_t pc,uint16_t word,int original) {
+    pc&=0x07fffffeu;unsigned slot=((pc>>1)*2654435761u)&255;
+    for(unsigned n=0;n<256;++n,slot=(slot+1)&255) {
+        VbBranchRule* rule=branch_rules+slot;
+        if(!rule->pc) break;
+        if(rule->pc!=pc) continue;
+        if(rule->word!=word) break;
+        int32_t value=(int32_t)cpu->gpr[rule->reg];rule->last_value=value;++rule->hits;
+        int result=original;
+        switch(rule->comparison) {
+        case VB_BRANCH_LT:result=value<rule->bound;break;
+        case VB_BRANCH_LE:result=value<=rule->bound;break;
+        case VB_BRANCH_GT:result=value>rule->bound;break;
+        case VB_BRANCH_GE:result=value>=rule->bound;break;
+        }
+        rule->changed+=(result!=!!original);return result;
+    }
+    return original;
+}
 
 typedef struct { uint32_t pc; uint64_t hits; } VbFallbackCoverage;
 static VbFallbackCoverage fallback_coverage[VB_FALLBACK_COVERAGE_CAPACITY];
@@ -90,7 +137,7 @@ void vb_interpreter_step(CPUState* c) {
     ++vb_execution.interpreted;
     vb_execution_charge(c,op,costs[op]);
     if (op>=0x20 && op<=0x27) {
-        if (condition(c,(word>>9)&15)) {
+        if (VB_BRANCH_PREDICATE(c,pc,word,condition(c,(word>>9)&15))) {
             next=pc+(uint32_t)(((int32_t)(word&0x1ff)^0x100)-0x100);
             c->cycles+=2;
         }

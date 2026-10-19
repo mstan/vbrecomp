@@ -1370,7 +1370,7 @@ static void dispatch_line(char* line) {
     }
 
     if (strcmp(cmd, "device_state") == 0) { char body[16384]; vb_device_response(body,sizeof(body)); send_response(body); }
-    else if (strcmp(cmd, "capabilities") == 0) { send_response("{\"ok\":true,\"protocol\":2,\"commands\":[\"device_state\",\"audio_pcm\",\"audio_shadow_state\",\"breakpoint\",\"capabilities\",\"capture_dump\",\"clear_input\",\"continue\",\"cpuhook\",\"execution_stats\",\"fallback_coverage\",\"set_gpr\",\"pc_set\",\"fntrace_dump\",\"fntrace_reset\",\"fntrace_stats\",\"frame\",\"get_frame\",\"get_registers\",\"history\",\"irq_force\",\"irq_state\",\"memory_map\",\"overrides_state\",\"pad_state\",\"pause\",\"ping\",\"press\",\"psw_set\",\"psw_state\",\"quit\",\"read_ram\",\"recolor_reload\",\"recolor_state\",\"recolor_trace\",\"run_frames\",\"screenshot\",\"set_input\",\"source_dump\",\"step\",\"timer_state\",\"viewport_state\",\"vip_phase\",\"vip_state\",\"watchdog\",\"world_map\",\"world_trace\",\"wram_anchors\",\"wram_hash\",\"write_ram\",\"wtrace_dump\",\"wtrace_reset\",\"wtrace_stats\"],\"max_read_bytes\":65536,\"instruction_control\":true,\"trace_version\":2}"); }
+    else if (strcmp(cmd, "capabilities") == 0) { send_response("{\"ok\":true,\"protocol\":2,\"commands\":[\"device_state\",\"audio_pcm\",\"audio_shadow_state\",\"breakpoint\",\"capabilities\",\"capture_dump\",\"clear_input\",\"continue\",\"cpuhook\",\"execution_stats\",\"fallback_coverage\",\"branch_rules\",\"set_gpr\",\"pc_set\",\"fntrace_dump\",\"fntrace_reset\",\"fntrace_stats\",\"frame\",\"get_frame\",\"get_registers\",\"history\",\"irq_force\",\"irq_state\",\"memory_map\",\"overrides_state\",\"pad_state\",\"pause\",\"ping\",\"press\",\"psw_set\",\"psw_state\",\"quit\",\"read_ram\",\"recolor_reload\",\"recolor_state\",\"recolor_trace\",\"run_frames\",\"screenshot\",\"set_input\",\"source_dump\",\"step\",\"timer_state\",\"viewport_state\",\"vip_phase\",\"vip_state\",\"watchdog\",\"world_map\",\"world_trace\",\"wram_anchors\",\"wram_hash\",\"write_ram\",\"wtrace_dump\",\"wtrace_reset\",\"wtrace_stats\"],\"max_read_bytes\":65536,\"instruction_control\":true,\"trace_version\":2}"); }
     else if (strcmp(cmd, "ping") == 0)         handle_ping(id);
     else if (strcmp(cmd, "step") == 0) {
         long long count=1;extract_int(line,"\"count\"",&count);
@@ -1405,6 +1405,20 @@ static void dispatch_line(char* line) {
         } else {
             s_cpu->pc=(uint32_t)pc;
             char result[128];snprintf(result,sizeof(result),"{\"ok\":true,\"id\":%lld}",id);send_response(result);
+        }
+    }
+    else if (strcmp(cmd, "branch_rules") == 0) {
+        char* body=(char*)malloc(256u+192u*VB_BRANCH_RULE_CAPACITY);
+        if(!body) { send_response("{\"ok\":false,\"error\":\"oom\"}"); }
+        else {
+            char* p=body;int comma=0;
+            p+=sprintf(p,"{\"ok\":true,\"id\":%lld,\"count\":%u,\"enabled\":%s,\"rules\":[",id,vb_branch_rule_count,vb_branch_rules_enabled?"true":"false");
+            for(unsigned i=0;i<VB_BRANCH_RULE_SLOTS;++i) {
+                VbBranchRule row;if(!vb_branch_rule_get(i,&row)) continue;
+                p+=sprintf(p,"%s{\"pc\":%u,\"word\":%u,\"reg\":%u,\"comparison\":%u,\"bound\":%d,\"last_value\":%d,\"hits\":%llu,\"changed\":%llu}",
+                           comma?",":"",row.pc,row.word,row.reg,row.comparison,row.bound,row.last_value,(unsigned long long)row.hits,(unsigned long long)row.changed);comma=1;
+            }
+            sprintf(p,"]}");send_response(body);free(body);
         }
     }
     else if (strcmp(cmd, "fallback_coverage") == 0) {

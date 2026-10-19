@@ -42,6 +42,9 @@ typedef struct VbViewportSprite {
 typedef struct VbViewportLayout {
     VbViewportWorldLayout worlds[32];
     int object_shift[1024]; /* shifts base x, preserving native eye parallax */
+    /* A game that stores full signed JPX values may recover offscreen OBJ
+     * coordinates before the hardware's ten-bit wrap, independently per eye. */
+    int unwrapped_object_coordinates;
     VbViewportSprite sprites[VB_VIEWPORT_MAX_SPRITES];
     unsigned sprite_count;
 } VbViewportLayout;

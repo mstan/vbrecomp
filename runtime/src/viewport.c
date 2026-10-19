@@ -205,6 +205,10 @@ static void objects(ViewTarget* t, int group, int limited) {
         if (row >= 8) continue;
         int parallax = o[1] & 0x3fff;
         int x = sx(o[0] + (t->eye ? parallax : -parallax), 10);
+        if(t->layout->unwrapped_object_coordinates) {
+            parallax=sx(parallax,14);
+            x=sx(o[0],16)+(t->eye ? parallax : -parallax);
+        }
         int shift = t->layout->object_shift[at];
         int min_x = limited ? 0 : -t->margin;
         int max_x = limited ? 383 : t->width - t->margin - 1;

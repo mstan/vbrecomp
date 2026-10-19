@@ -21,6 +21,28 @@ enum { VB_FALLBACK_COVERAGE_CAPACITY = 4096 };
 int vb_fallback_coverage_get(unsigned slot, uint32_t* pc, uint64_t* hits);
 uint64_t vb_fallback_coverage_overflow(void);
 
+/* Explicit game-owned simulation extension. Disabled consumers compile the
+ * original branch expression directly; no host/CPU-specific implementation. */
+enum { VB_BRANCH_LT, VB_BRANCH_LE, VB_BRANCH_GT, VB_BRANCH_GE };
+enum { VB_BRANCH_RULE_CAPACITY = 128, VB_BRANCH_RULE_SLOTS = 256 };
+typedef struct {
+    uint32_t pc, word, reg, comparison;
+    int32_t bound, last_value;
+    uint64_t hits, changed;
+} VbBranchRule;
+extern unsigned vb_branch_rule_count;
+extern int vb_branch_rules_enabled;
+int vb_branch_rule_add(uint32_t pc, uint16_t word, unsigned reg, unsigned comparison, int32_t bound);
+void vb_branch_rules_reset(void);
+void vb_branch_rules_enable(int enabled);
+int vb_branch_rule_get(unsigned index, VbBranchRule* result);
+int vb_branch_predicate_lookup(const CPUState* cpu, uint32_t pc, uint16_t word, int original);
+#ifdef VB_BRANCH_OVERRIDES
+#define VB_BRANCH_PREDICATE(cpu,pc,word,original) (vb_branch_rules_enabled && vb_branch_rule_count ? vb_branch_predicate_lookup(cpu,pc,word,original) : (original))
+#else
+#define VB_BRANCH_PREDICATE(cpu,pc,word,original) (original)
+#endif
+
 /* Virtual Boy has a 16-bit external bus in every region. Preserve load/store
  * pipeline state across native calls, interpreter handoffs and device yields.
  * Reference: Beetle v810_oploop.inc LD/ST/IN/OUT handlers and lastop updates. */

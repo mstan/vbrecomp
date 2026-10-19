@@ -15,8 +15,15 @@ op(0x20,0x2b,imm=0x40)  # JAL native callee
 op(0x24,0x11,2,10)      # ADD 2,r10
 op(0x26,0x1a)           # HALT
 op(0x60,0x06,4)         # tail JMP to RAM in r4
+op(0x100,0x28,0,11,500)
+op(0x104,0x28,0,1,384)
+op(0x108,0x03,1,11)
+struct.pack_into('<H',rom,0x10a,0x8c06) # BLT +6 (500 < 384 is false)
+op(0x10c,0x10,0,10);op(0x10e,0x1a)
+op(0x110,0x10,1,10);op(0x112,0x1a)
 img=RomImage.from_bytes(bytes(rom))
 fns=[FunctionRange("main",0x07000020,0x07000028),FunctionRange("callee",0x07000060,0x07000062)]
+fns.append(FunctionRange('branch_bounds',0x07000100,0x07000114))
 for name,source in [("full",emit_full_c(img,fns,"bridge")),("dispatch",emit_dispatch_c(fns,"bridge",rom=img))]:
     (out/f"bridge_{name}.c").write_text(source,encoding="utf-8")
 (out/"bridge.h").write_text(emit_header(fns,"bridge"),encoding="utf-8")

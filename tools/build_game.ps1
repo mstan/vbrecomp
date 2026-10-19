@@ -82,6 +82,12 @@ try {
     foreach ($target in $metadata.extra_targets) {
         Invoke-VbBuildTool (Join-Path $Toolchain 'cmake.exe') @('--build',$buildPath,'--target',$target,'--parallel',"$Jobs")
     }
-    Copy-Item -LiteralPath (Join-Path $Toolchain 'SDL2.dll') -Destination (Join-Path $buildPath 'vbrecomp/runtime/SDL2.dll') -Force
+    $sdlSource = Join-Path $Toolchain 'SDL2.dll'
+    $sdlDestination = Join-Path $buildPath 'vbrecomp/runtime/SDL2.dll'
+    if (!(Test-Path -LiteralPath $sdlDestination) -or
+        (Get-FileHash -LiteralPath $sdlSource -Algorithm SHA256).Hash -ne
+        (Get-FileHash -LiteralPath $sdlDestination -Algorithm SHA256).Hash) {
+        Copy-Item -LiteralPath $sdlSource -Destination $sdlDestination -Force
+    }
     Invoke-VbBuildTool (Join-Path $Toolchain 'ctest.exe') @('--test-dir',$buildPath,'--output-on-failure')
 } finally { $env:PATH = $savedPath }
