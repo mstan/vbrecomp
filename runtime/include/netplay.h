@@ -37,6 +37,7 @@ int vb_netplay_state_can_open(void);
 int vb_netplay_state_request(const char* path,int save,int ui_slot);
 int vb_netplay_state_busy(void);
 int vb_netplay_state_result(void); /* 0 pending, 1 complete, -1 refused */
+int vb_netplay_inspect_ready(void); /* settled all-seat hold; readonly captures need no debugger pause */
 const char* vb_netplay_state_message(void);
 #ifdef __cplusplus
 }

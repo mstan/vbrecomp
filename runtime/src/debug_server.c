@@ -1590,8 +1590,8 @@ static void dispatch_line(char* line) {
         char path[2048] = {0};
         if(vb_netplay_enabled() && !strcmp(cmd,"load_state")) {
             send_response("{\"ok\":false,\"error\":\"Network loads require a synchronized host operation\"}");
-        } else if (!s_paused || !extract_str(line,"\"path\"",path,sizeof(path))) {
-            send_response("{\"ok\":false,\"error\":\"Pause and supply a snapshot path\"}");
+        } else if ((!s_paused && !vb_netplay_inspect_ready()) || !extract_str(line,"\"path\"",path,sizeof(path))) {
+            send_response("{\"ok\":false,\"error\":\"Pause locally or settle every network peer at a hold; supply a snapshot path\"}");
         } else {
             int ok = strcmp(cmd,"save_state")==0 ? vb_state_save_file(path) : vb_state_load_file(path);
             char result[512];

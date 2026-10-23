@@ -265,6 +265,7 @@ static int vb_runtime_ui_set(void* opaque, const RecompRuntimeUiItem* item, int 
         if(!enabled)vb_rewind_shutdown();
         vb_state_ui_sync();vb_host_config.rewind=enabled;vb_host_config.rewind_depth=depth;
     } else if (std::strcmp(item->key, "history.interval") == 0) {
+        if(vb_netplay_enabled())return 0;
         s_history_interval=(unsigned)std::max(1,std::min(value,60));
         vb_host_config.rewind_interval=(int)s_history_interval;
     } else return 0;
@@ -851,11 +852,15 @@ int main(int argc, char** argv) {
                     RECOMP_RUNTIME_UI_BOOL, 0, 1, 1, nullptr, 0, nullptr});
             }
         }
-        ui_mod_items.push_back({"history.browser","System","Save states (F7)","Browse twelve thumbnail slots.",RECOMP_RUNTIME_UI_ACTION,0,0,0,nullptr,0,nullptr});
-        ui_mod_items.push_back({"history.rewind","System","Rewind (F8)","Browse local history and select a point to resume.",RECOMP_RUNTIME_UI_ACTION,0,0,0,nullptr,0,nullptr});
-        ui_mod_items.push_back({"history.enabled","Rewind","Enable rewind","Keep local execution snapshots while playing.",RECOMP_RUNTIME_UI_BOOL,0,1,1,nullptr,0,nullptr});
-        ui_mod_items.push_back({"history.depth","Rewind","Snapshots","History slots, subject to a 512 MiB limit.",RECOMP_RUNTIME_UI_INT,8,64,8,nullptr,0,nullptr});
-        ui_mod_items.push_back({"history.interval","Rewind","Frames per snapshot","Larger intervals retain more seconds of history.",RECOMP_RUNTIME_UI_INT,1,60,1,nullptr,0,nullptr});
+        if(!vb_netplay_enabled()) {
+            ui_mod_items.push_back({"history.browser","System","Save states (F7)","Browse twelve thumbnail slots.",RECOMP_RUNTIME_UI_ACTION,0,0,0,nullptr,0,nullptr});
+            ui_mod_items.push_back({"history.rewind","System","Rewind (F8)","Browse local history and select a point to resume.",RECOMP_RUNTIME_UI_ACTION,0,0,0,nullptr,0,nullptr});
+            ui_mod_items.push_back({"history.enabled","Rewind","Enable rewind","Keep local execution snapshots while playing.",RECOMP_RUNTIME_UI_BOOL,0,1,1,nullptr,0,nullptr});
+            ui_mod_items.push_back({"history.depth","Rewind","Snapshots","History slots, subject to a 512 MiB limit.",RECOMP_RUNTIME_UI_INT,8,64,8,nullptr,0,nullptr});
+            ui_mod_items.push_back({"history.interval","Rewind","Frames per snapshot","Larger intervals retain more seconds of history.",RECOMP_RUNTIME_UI_INT,1,60,1,nullptr,0,nullptr});
+        } else if(vb_netplay_view_seat()==vb_netplay_authority_seat()) {
+            ui_mod_items.push_back({"history.browser","System","Online save states (F7)","Host controls slots between races; every racer loads together.",RECOMP_RUNTIME_UI_ACTION,0,0,0,nullptr,0,nullptr});
+        }
         if(vb_netplay_from_lobby())ui_mod_items.push_back({"session.lobby","System","Return to lobby (F10)","Leave this race and reopen the shared room.",RECOMP_RUNTIME_UI_ACTION,0,0,0,nullptr,0,nullptr});
         runtime_ui_config.extra_items = ui_mod_items.data();
         runtime_ui_config.extra_item_count = ui_mod_items.size();

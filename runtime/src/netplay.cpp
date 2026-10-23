@@ -58,13 +58,64 @@ std::array<int,4> racer_port{0,1,2,3};
 int auto_role=0;
 int auto_capacity=0,auto_host_seat=-1;
 std::string auto_endpoint,auto_name="Player";
+bool auto_online=false;
+std::string auto_path="ice",auto_server;
 #if VB_RUNTIME_HAVE_NETPLAY && defined(RECOMP_LAUNCHER)
 std::array<int,4> lobby_port{0,1,2,3};
 std::string lobby_version,profile_directory;
 RecompLauncherCNetplayCallbacks lobby_callbacks{};
 const RecompLauncherCNetplayCallbacks* shared_callbacks;
+std::array<RNetIceAdoptSeat,RNET_MAX_SLOTS> pending_ice{};
+int pending_ice_count;
+RNetIceAgent* pending_ice_guest;
+uint32_t pending_ice_session;
+int pending_ice_players,pending_ice_slot;
+std::array<int,4> pending_ice_ports{};
+void discard_pending_ice() {
+    for(int i=0;i<pending_ice_count;++i)rnet_host_ice_destroy_agent(pending_ice[i].agent);
+    pending_ice={};pending_ice_count=0;
+    if(pending_ice_guest)rnet_host_ice_destroy_agent(pending_ice_guest);
+    pending_ice_guest=nullptr;
+    pending_ice_session=0;pending_ice_players=0;pending_ice_slot=-1;pending_ice_ports={};
+}
+bool pending_ice_matches(const RecompLauncherCNetplayLaunch* launch) {
+    if(!launch || launch->player_count<2 || launch->player_count>4 || !launch->transport_ice_hub || pending_ice_session!=launch->session_id
+       || pending_ice_players!=launch->player_count || pending_ice_slot!=launch->local_slot)return false;
+    for(int i=0;i<launch->player_count;++i)
+        if(pending_ice_ports[i]!=(launch->slot_port_valid?launch->slot_port[i]:i))return false;
+    return launch->local_slot==0?pending_ice_count==launch->player_count-1:pending_ice_guest!=nullptr;
+}
+bool take_launch_ice(const RecompLauncherCNetplayLaunch* launch) {
+    if(pending_ice_matches(launch))return true;
+    discard_pending_ice();
+    const int seat_count=launch->player_count,local=launch->local_slot;
+    pending_ice_session=launch->session_id;pending_ice_players=seat_count;pending_ice_slot=local;
+    for(int i=0;i<seat_count;++i)pending_ice_ports[i]=launch->slot_port_valid?launch->slot_port[i]:i;
+    if(local==0) {
+        RNetLobbyIceSeat seats[RNET_MAX_SLOTS]{};
+        const int count=rnet_lobby_ice_take_hub(seats,RNET_MAX_SLOTS);
+        if(count<0 || count>RNET_MAX_SLOTS){discard_pending_ice();return false;}
+        pending_ice_count=count;bool valid=count==seat_count-1;unsigned mapped_mask=0;
+        for(int i=0;i<count;++i) {
+            int mapped=-1;for(int s=1;s<pending_ice_players;++s)if(pending_ice_ports[s]==seats[i].lobby_slot)mapped=s;
+            pending_ice[i]={mapped,seats[i].agent};
+            if(mapped<1 || !seats[i].agent || (mapped_mask&(1u<<mapped)))valid=false;
+            else mapped_mask|=1u<<mapped;
+        }
+        if(valid)return true;
+    } else {
+        pending_ice_guest=rnet_lobby_ice_take_guest_agent();if(pending_ice_guest)return true;
+    }
+    discard_pending_ice();return false;
+}
 int no_spectators(void*){return 0;}
 int yes_rollback(void*){return 1;}
+int connect_online(void* context) {
+    if(!rnet_host_ice_available()) {
+        recomp_netplay_host_set_runtime_error("This build supports LAN and Direct IP. Online rooms require ICE support.");return -1;
+    }
+    return shared_callbacks->connect(context);
+}
 void fill_caps(void*,const RecompLauncherCSettings*,RNetLobbyMatchCaps* caps){caps->rollback=1;}
 int profile_path(void*,const char* leaf,char* out,size_t capacity) {
     const auto path=(std::filesystem::u8path(profile_directory)/std::filesystem::u8path(leaf)).u8string();
@@ -81,8 +132,11 @@ int store_name(void*,const char* name) {
 }
 int fill_launch(void* context,RecompLauncherCNetplayLaunch* out) {
     if(!shared_callbacks->fill_launch(context,out))return 0;
-    if(out->is_spectator || out->host_spectates || out->player_count<2 || out->player_count>int(vb_game_host_netplay_players()) || !out->rollback) {
+    if(out->is_spectator || out->host_spectates || out->player_count<2 || out->player_count>4 || out->player_count>int(vb_game_host_netplay_players()) || !out->rollback) {
         recomp_netplay_host_set_runtime_error("This VS mode requires two to four seated racers and rollback.");return 0;
+    }
+    if(out->transport_ice_hub && !take_launch_ice(out)) {
+        recomp_netplay_host_set_runtime_error("Waiting-room ICE agents are incomplete or have invalid seats.");return 0;
     }
     return 1;
 }
@@ -191,6 +245,15 @@ int vb_netplay_option(int argc,char** argv,int* index) {
         native_setup=true;enabled=true;return 1;
     }
 #endif
+#if defined(VBRECOMP_DEBUG_TOOLS)
+    if(option=="--net-online-host"){auto_role=1;auto_endpoint=value;auto_online=true;}
+    else if(option=="--net-online-join"){auto_role=2;auto_endpoint=value;auto_online=true;}
+    else if(option=="--net-online-path") {
+        auto_path=value;if(auto_path!="ice"){error="Current online rooms use ICE; LAN and Direct IP use UDP";return -1;}
+    }
+    else if(option=="--net-online-url")auto_server=value;
+    else
+#endif
     if(option=="--net-room-host"){auto_role=1;auto_endpoint=value;}
     else if(option=="--net-room-join"){auto_role=2;auto_endpoint=value;}
     else if(option=="--net-name")auto_name=value;
@@ -227,11 +290,38 @@ int vb_netplay_auto_launch(const char* config_path) {
     if(!game.netplay){error="This title has no shared lobby adapter";return 0;}
     const auto* callbacks=game.netplay;callbacks->set_player_name(callbacks->ctx,auto_name.c_str());
     char endpoint[64],bind[64];
-    if(auto_endpoint.size()>=sizeof(endpoint)){error="Room endpoint is too long";return 0;}
-    std::snprintf(endpoint,sizeof(endpoint),"%s",auto_endpoint.c_str());
+    if(!auto_online && auto_endpoint.size()>=sizeof(endpoint)){error="Room endpoint is too long";return 0;}
+    std::snprintf(endpoint,sizeof(endpoint),"%s",auto_online?bind_address.c_str():auto_endpoint.c_str());
     std::snprintf(bind,sizeof(bind),"%s",bind_address.c_str());
     RecompLauncherCSettings settings{};
-    if(!from_lobby && auto_role==1) {
+    if(auto_online && !from_lobby) {
+        if(!auto_server.empty())callbacks->set_lobby_url(callbacks->ctx,auto_server.c_str());
+        if(callbacks->connect(callbacks->ctx)){error="Cannot connect to shared online lobby";return 0;}
+        const uint32_t waiting=now_ms(nullptr);
+        while(!rnet_lobby_ready()) {
+            callbacks->pump(callbacks->ctx);
+            const char* problem=callbacks->last_error(callbacks->ctx);
+            if(problem && *problem){error=problem;return 0;}
+            if(uint32_t(now_ms(nullptr)-waiting)>30000){error="Shared online lobby did not become ready";return 0;}
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        if(auto_role==1) {
+            if(auto_path=="ice" && !rnet_host_ice_available()){error="This build has no ICE support";return 0;}
+            rnet_lobby_set_relay_host_pref(1);rnet_lobby_set_relay_via_ice(1);
+            if(callbacks->create(callbacks->ctx,"Virtual Boy private qualification",endpoint,"vb-qualification-only",&settings,0,
+                                 auto_capacity?auto_capacity:players)){error="Cannot create private online room";return 0;}
+        } else {
+            std::string id;
+            while(id.empty()) {
+                callbacks->pump(callbacks->ctx);std::ifstream file(std::filesystem::u8path(auto_endpoint));std::getline(file,id);
+                if(uint32_t(now_ms(nullptr)-waiting)>50000){error="Private online fixture ID timed out";return 0;}
+                if(id.empty())std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+            if(id.size()>=RNET_LOBBY_ID_LEN || callbacks->join(callbacks->ctx,id.c_str(),"vb-qualification-only",bind)) {
+                error="Cannot join private online room";return 0;
+            }
+        }
+    } else if(!from_lobby && auto_role==1) {
         if(callbacks->create(callbacks->ctx,"Zero Racers VS",endpoint,"",&settings,1,auto_capacity?auto_capacity:players)) {
             error="Cannot create shared LAN room";return 0;
         }
@@ -239,12 +329,18 @@ int vb_netplay_auto_launch(const char* config_path) {
         const std::string id="lr4:"+auto_endpoint;
         if(callbacks->join(callbacks->ctx,id.c_str(),"",bind)){error="Cannot join shared LAN room";return 0;}
     }
-    const uint32_t opened=now_ms(nullptr);uint32_t last_ready=opened-200;
-    bool start_sent=false,moved_host=auto_host_seat<0;
+    const uint32_t opened=now_ms(nullptr);uint32_t last_ready=opened-200,last_diagnostic=opened-2000,last_start=opened-500;
+    bool start_sent=false,moved_host=auto_host_seat<0,published=false;
     for(;;) {
         callbacks->pump(callbacks->ctx);
         const char* problem=callbacks->last_error?callbacks->last_error(callbacks->ctx):nullptr;
-        if(problem && *problem){error=problem;return 0;}
+        if(problem && *problem) {
+            if(auto_online && auto_role==1 && !std::strcmp(problem,"relay_unavailable")) {
+                // A guest's completed link and its server path report can
+                // arrive in either order. The server owns the start gate.
+                callbacks->clear_last_error(callbacks->ctx);start_sent=false;
+            } else {error=problem;return 0;}
+        }
         if(callbacks->launch_pending(callbacks->ctx)) {
             RecompLauncherCNetplayLaunch launch{};
             if(!callbacks->fill_launch(callbacks->ctx,&launch)){error="Shared room supplied an invalid launch";return 0;}
@@ -255,7 +351,37 @@ int vb_netplay_auto_launch(const char* config_path) {
             return 1;
         }
         const uint32_t now=now_ms(nullptr);
-        if(now-opened>30000){error="Shared LAN room timed out";return 0;}
+        if(auto_online && now-last_diagnostic>=2000) {
+            RNetHostIceStatus status{};rnet_lobby_host_ice_status(&status);
+            const auto* caps=rnet_lobby_match_caps();
+            std::fprintf(stderr,"vb_net: online waiting role=%d members=%d local_ready=%d all_ready=%d caps_ice=%d ice_role=%d completed=%d/%d\n",
+                         auto_role,callbacks->member_count(callbacks->ctx),callbacks->local_ready(callbacks->ctx),callbacks->all_ready(callbacks->ctx),
+                         caps?caps->relay_via_ice:0,status.role,status.completed,status.peer_count);
+            for(int i=0;i<rnet_lobby_member_count();++i) {
+                RNetLobbyMember member{};if(rnet_lobby_member_get(i,&member))
+                    std::fprintf(stderr,"vb_net: online member seat=%d ready=%d path=%s fresh=%d host=%d\n",member.slot,member.ready,member.path,member.path_fresh,
+                                 !std::strcmp(member.player_id,rnet_lobby_host_player_id()));
+            }
+            std::fflush(stderr);last_diagnostic=now;
+        }
+        if(now-opened>30000){error="Shared room timed out";return 0;}
+        if(auto_online && auto_role==1 && !published && callbacks->in_lobby(callbacks->ctx)) {
+            const auto* info=rnet_lobby_join_info();
+            if(info && info->lobby_id[0]) {
+                auto path=std::filesystem::u8path(auto_endpoint),temporary=path;temporary+=".tmp";
+                std::ofstream file(temporary,std::ios::trunc);file<<info->lobby_id<<'\n';file.close();
+                if(!file){error="Cannot publish private fixture room ID";return 0;}
+#ifdef _WIN32
+                if(!MoveFileExW(temporary.c_str(),path.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)) {
+                    error="Cannot publish private fixture room ID";return 0;
+                }
+#else
+                std::error_code ec;std::filesystem::rename(temporary,path,ec);
+                if(ec){error="Cannot publish private fixture room ID";return 0;}
+#endif
+                published=true;
+            }
+        }
         if(callbacks->in_lobby(callbacks->ctx) && !callbacks->local_ready(callbacks->ctx) && now-last_ready>=200) {
             callbacks->set_ready(callbacks->ctx,1);last_ready=now;
         }
@@ -265,13 +391,19 @@ int vb_netplay_auto_launch(const char* config_path) {
                 RecompLauncherCNetplayMember member{};
                 if(callbacks->member_get(callbacks->ctx,i,&member) && member.is_host)host_seat=member.slot;
             }
-            if(host_seat<0 || callbacks->move_member(callbacks->ctx,host_seat,auto_host_seat)) {
+            if(host_seat<0 || (host_seat!=auto_host_seat && callbacks->move_member(callbacks->ctx,host_seat,auto_host_seat))) {
                 error="Shared room refused the test host move";return 0;
             }
             moved_host=true;
         }
-        if(auto_role==1 && !start_sent && callbacks->member_count(callbacks->ctx)==players && callbacks->all_ready(callbacks->ctx)) {
-            if(callbacks->request_start(callbacks->ctx,&settings)){error="Shared room refused start";return 0;}start_sent=true;
+        if(auto_role==1 && !start_sent && now-last_start>=500 && callbacks->member_count(callbacks->ctx)==players && callbacks->all_ready(callbacks->ctx)) {
+            if(auto_online && auto_path=="ice") {
+                RNetHostIceStatus status{};
+                if(!rnet_lobby_host_ice_status(&status) || status.completed!=players-1 || status.peer_count!=players-1) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(2));continue;
+                }
+            }
+            if(callbacks->request_start(callbacks->ctx,&settings)){error="Shared room refused start";return 0;}start_sent=true;last_start=now;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
@@ -296,6 +428,14 @@ void vb_netplay_configure_launcher(RecompLauncherCGameInfo* game) {
         lobby_callbacks.fill_launch=fill_launch;lobby_callbacks.host_can_spectate=no_spectators;
         lobby_callbacks.allow_spectators_get=nullptr;lobby_callbacks.allow_spectators_set=nullptr;
         lobby_callbacks.automatch_available=no_spectators;lobby_callbacks.rollback_get=yes_rollback;lobby_callbacks.rollback_set=nullptr;
+        lobby_callbacks.connect=connect_online;
+        // Current online rooms use host ICE; LAN/Direct IP use local UDP.
+        // Keep the room controls consistent with the server's actual path.
+        lobby_callbacks.force_input_relay_get=nullptr;lobby_callbacks.force_input_relay_set=nullptr;
+        lobby_callbacks.force_turn_get=nullptr;lobby_callbacks.force_turn_set=nullptr;
+        lobby_callbacks.relay_host_get=nullptr;lobby_callbacks.relay_host_set=nullptr;
+        lobby_callbacks.relay_via_ice_get=nullptr;lobby_callbacks.relay_via_ice_set=nullptr;
+        rnet_lobby_set_relay_host_pref(1);rnet_lobby_set_relay_via_ice(1);
     }
     game->netplay_supported=1;game->netplay=&lobby_callbacks;
 #endif
@@ -310,6 +450,7 @@ void vb_netplay_resume_launcher(RecompLauncherCGameInfo* game) {
 int vb_netplay_apply_launch(const RecompLauncherCNetplayLaunch* launch) {
 #if VB_RUNTIME_HAVE_NETPLAY && defined(RECOMP_LAUNCHER)
     if(!launch || !launch->enabled) {
+        discard_pending_ice();
         enabled=from_lobby=native_setup=relay_transport=ice_transport=false;
         sampled_buttons=0;input_override=false;racer_port={0,1,2,3};error.clear();return 1;
     }
@@ -327,6 +468,10 @@ int vb_netplay_apply_launch(const RecompLauncherCNetplayLaunch* launch) {
     delay=launch->input_delay;prediction=launch->input_prediction>=2?launch->input_prediction:4+delay;
     session_id=launch->session_id;bind_address=launch->bind_hostport;peer_address=launch->peer_hostport;
     relay_transport=launch->force_input_relay!=0;ice_transport=launch->transport_ice_hub!=0;
+    // Consume waiting-room agents before the launcher clears its launch.
+    // Keep ownership through ROM/window startup; session adoption is all-or-none.
+    if(ice_transport && !take_launch_ice(launch)){error="Waiting-room ICE agents are incomplete or have invalid seats";return 0;}
+    if(!ice_transport)discard_pending_ice();
     enabled=from_lobby=native_setup=true;return 1;
 #else
     return !launch;
@@ -367,23 +512,19 @@ int vb_netplay_start(CPUState* c,uint32_t* pc,uint64_t* cycles) {
 #if defined(RECOMP_LAUNCHER)
     if(ice_transport) {
         if(slot==0) {
-            RNetLobbyIceSeat seats[RNET_MAX_SLOTS];RNetIceAdoptSeat adopted[RNET_MAX_SLOTS];
-            const int count=rnet_lobby_ice_take_hub(seats,RNET_MAX_SLOTS);bool valid=count==players-1;
-            for(int i=0;i<count;++i) {
-                int mapped=-1;for(int s=1;s<players;++s)if(lobby_port[s]==seats[i].lobby_slot)mapped=s;
-                adopted[i]={mapped,seats[i].agent};if(mapped<0)valid=false;
-            }
-            if(valid)status=rnet_session_start_ice_hub_adopt(connection,adopted,count);
-            if(status)for(int i=0;i<count;++i)rnet_host_ice_destroy_agent(seats[i].agent);
+            if(pending_ice_count==players-1)status=rnet_session_start_ice_hub_adopt(connection,pending_ice.data(),pending_ice_count);
+            if(!status){pending_ice={};pending_ice_count=0;}
         } else {
-            auto* agent=rnet_lobby_ice_take_guest_agent();
-            if(agent){status=rnet_session_adopt_ice_agent(connection,agent);if(status)rnet_host_ice_destroy_agent(agent);}
+            if(pending_ice_guest)status=rnet_session_adopt_ice_agent(connection,pending_ice_guest);
+            if(!status)pending_ice_guest=nullptr;
         }
+        if(status)discard_pending_ice();
     } else
 #endif
     status=slot==0 && players>2 && !relay_transport?rnet_session_start_lan_hub(connection,bind_address.c_str()):
         rnet_session_start_lan(connection,bind_address.c_str(),peer_address.c_str());
     if(status){error="Cannot bind network transport";return 0;}
+    std::fprintf(stderr,"vb_net: transport=%s session=%u players=%d slot=%d\n",ice_transport?"ice":relay_transport?"relay":"udp",session_id,players,slot);
     sampled_buttons=0;input_override=false;
     started_ms=now_ms(nullptr);settled=driver_started=return_requested=false;
     state_txn={};state_serial=0;state_completed=0;state_message.clear();return 1;
@@ -427,6 +568,9 @@ int vb_netplay_poll() {
 }
 void vb_netplay_stop() {
 #if VB_RUNTIME_HAVE_NETPLAY
+#if defined(RECOMP_LAUNCHER)
+    discard_pending_ice();
+#endif
     if(driver) {
         std::fprintf(stderr,"vb_net: final tick=%u confirmed=%u episodes=%u resim=%llu desync=%u\n",
             rnet_rb_driver_sim_tick(driver),rnet_rb_driver_confirmed_through(driver),rnet_rb_driver_episode_count(driver),
@@ -493,6 +637,13 @@ int vb_netplay_state_result() {
     return state_completed;
 #else
     return -1;
+#endif
+}
+int vb_netplay_inspect_ready() {
+#if VB_RUNTIME_HAVE_NETPLAY
+    return enabled && driver_started && state_txn.stage==StateStage::Idle && rnet_rb_driver_hold_settled(driver);
+#else
+    return 0;
 #endif
 }
 const char* vb_netplay_state_message() {
