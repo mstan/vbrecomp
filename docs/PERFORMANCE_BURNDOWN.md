@@ -1,8 +1,13 @@
 # Accuracy-preserving performance investigation
 
 Owner request: 2026-10-22. Central issue: `beads-cai4`, under
-`beads-vb.1` / `beads-vb`. Work is solo. Baseline engine: `1dac760`.
+`beads-vb.1` / `beads-vb`. Work is solo. Initial engine: `1dac760`.
 Branch: `codex/accuracy-perf-20261022`. Final integration requires owner approval.
+
+The final review is based on public engine `8e8d3c6`, game `817e140`, and
+its UI pin `c5f05e7`. Unpublished Wario work remains in its original workspace.
+Only the bounded per-eye column-brightness correctness dependency from the
+initial workspace is carried here. No game-specific Wario changes are imported.
 
 ## Implementation and coverage inventory
 
@@ -12,7 +17,7 @@ Branch: `codex/accuracy-perf-20261022`. Final integration requires owner approva
 | Scheduler | Guest deadlines, MMIO synchronization, HALT event stepping, IRQ delivery. | Canonical CPU/device fields and VIP phase ring available over TCP. Preserve deadlines and guest timing. |
 | VIP drawing | 28 eight-row blocks, worlds descending 31..0, BG/H-bias/affine/object paths; two drawing/display framebuffer slots, each with both eyes. | Existing synthetic source/viewport raster tests; independent full-memory and both-eye comparisons. No cross-block world/CHR stability assumption is valid without checking writes. |
 | Decoding | BG aligned eight-pixel path already exists. Affine map lookup is per pixel. Objects reuse a packed character row across eyes; object descriptors are scanned per row. Palette values are already cached. | Character, map, OAM and world data remain writable via canonical and aliased bus addresses. Any persistent decode cache needs exact invalidation. |
-| Presentation | Stock 2bpp-to-ARGB expansion, per-eye CT brightness groups, gamma and optional red LED lookup. Recolor/custom renderer and adaptive replay are separate optional paths. | Stock expansion calls `vb_red_lut_map` once per pixel. Candidate: resolve its four possible outputs per group per call, with no retained state. |
+| Presentation | Stock 2bpp-to-ARGB expansion, per-eye CT brightness groups, gamma and optional red LED lookup. Recolor/custom renderer and adaptive replay are separate optional paths. | Stock expansion calls `vb_red_lut_map` once per pixel. Proposed lookup hoist was removed from the final candidate. |
 | Copies/allocations | Drawing uses static row/source buffers. Adaptive replay copies 128 KiB DRAM + 32 KiB CHR + palettes/OAM suppression per block when tracking is enabled. Custom presentation copies stock output. | Measure with actual enabled features; turning these off is not an optimization. No allocation in stock VIP drawing/expansion loops. Broader allocation attribution remains to measure. |
 | Audio | Six-channel VSU, band-limited stereo output, emulated time and host delivery. | PCM capture and canonical device fields in existing cosim harness. Mute unattended output while retaining synthesis. |
 | Persistence/lifecycle | Initially native SRAM only; mod-runtime `save_state` stored settings. This branch adds current-build execution snapshots, local rbengine history, reset and deterministic frame replay. | See `LOCAL_STATE.md`. No recomp-net, network rollback session, shared-controller play or link emulation. Netplay was explicitly deferred. Old snapshot compatibility is irrelevant. |
@@ -20,8 +25,9 @@ Branch: `codex/accuracy-perf-20261022`. Final integration requires owner approva
 
 Proving ground: existing Zero Racers `tests/race-driving-route.json`, including
 menus, driving, steering and pause. Existing ROM/generated corpus is at
-`F:/Projects/virtualboyrecomp/_wt-zero-racers`; do not regenerate or alter it
-unless a generator change requires it. Mario's Tennis is the regression title.
+`F:/Projects/virtualboyrecomp/_wt-zero-racers` and remains preserved. After
+rebasing onto the current public engine, both corpora were regenerated with
+that unchanged generator into G: scratch. Mario's Tennis is the regression title.
 
 ## Task burndown
 
@@ -33,9 +39,9 @@ unless a generator change requires it. Mario's Tennis is the regression title.
 | Profile CPU/dispatch, scheduler, VIP modes, both eyes, copies, allocations, audio and host presentation | Done with attribution limits | Perturbed main-thread PC samples plus source audit; DLL/internal allocator attribution and physical GPU/audio delivery remain unverified. |
 | Add local rbengine lifecycle | Automated qualification complete | `beads-8m99`; standalone snapshot-ring module only. `beads-7plg` tracks companion game presentation spans. |
 | Test bounded candidates | Done | Ledger below; no speculative decode/display-list rewrite. |
-| Balanced A/A and A/B CPU measurements | Complete | Fixed two-physical-core affinity, full-route warmups, A/A then A/B/B/A, depth 0 and 32, identical work. Interrupted attempts retained separately. |
-| Automated qualification | Passed | Independent Zero Racers and Mario routes, both eyes, full state/PCM; stock/color lifecycle, mid-frame restore, direct writes, reset, atomic rejection, rewind, native persistence, CTest and recompiler tests. |
-| Combined normal-window, normal-audio owner playtest | Human approval pending | Prepared from the qualified game host. No final integration or original-worktree changes. |
+| Balanced A/A and A/B CPU measurements | Passed | Final depth32 CPU reduction 37.15%, A/A 0.35%, both pair directions agree; same source/features except serializer. Earlier series retained separately. |
+| Automated qualification | Passed | Independent Zero Racers and Mario routes, both eyes, full state/PCM; stock/color/portable lifecycle, actual build-configuration rejection, native persistence, CTest and recompiler tests. |
+| Combined normal-window, normal-audio, one-eye playtest | Ready for human review | Qualified executable and isolated profile staged. No final integration or original-worktree changes. |
 
 ## Candidate ledger
 
@@ -44,8 +50,8 @@ unless a generator change requires it. Mario's Tennis is the regression title.
 | Prior VIP row/source batching (`abc12ab`, separate existing worktree) | Rejected historically | Prior whole-runtime pair: -2.36% FPS, 0.59% process CPU reduction, foreign compilers present. Do not promote or silently fold into this investigation. |
 | Draw-local affine map lookup reuse, persistent CHR/BG/object decode or display-list caches | Unverified / not selected | Reviewed existing aligned-row/object reuse and live writable maps. Profile did not justify added retained state/invalidation machinery. No general-game win claimed. |
 | Immutable adaptive replay snapshots | Unverified / not selected | Large repeated snapshots exist only with tracking; no feature toggles or assumed SNES transfer. Existing implementation retained. |
-| Stock presentation palette resolution | Accuracy qualified; standalone low-noise performance unverified | Call-local 96 x 4 table, sampled afresh per eye/call. No dirty flags, cross-eye cache or guest timing change. Both pairs reduce CPU, but A/A 4.59% exceeds the predeclared 3% quiet-control gate. Retained in the review candidate; not promoted as a proven general gain. |
-| Single-allocation snapshot payload + private history CRC elimination | Accepted for combined candidate playtest | Exact counted payload replaces vector growth and a second complete copy. Private immutable ring entries skip redundant file CRC; external files require CRC and reject private flags. Combined depth-32 CPU reduction 53.31%, A/A 0.91%, both directions agree. Individual contributions within this snapshot change are not separated. |
+| Stock presentation palette resolution | Removed from final candidate | Initial A/A 4.59% exceeded the predeclared 3% gate. Longer follow-up was interrupted by a foreign benchmark; no accepted standalone speed claim. |
+| Single-allocation snapshot payload + private history CRC elimination | Accepted for owner review | Final depth32 CPU reduction 37.15%, A/A 0.35%, pair reductions 37.21%/37.09%. Exact counted payload replaces vector growth and a second full copy. Private immutable entries omit redundant CRC; external input retains it. Read-only capture excludes the host audio cursor and needs no SDL audio lock. Individual contributions were not separated. |
 | Smaller caches and palette/OAM deduplication | Not selected | SNES rejection is methodological context only; no Virtual Boy benchmark outcome claimed. |
 
 ## Measurement rules
@@ -78,7 +84,8 @@ scratch; the old snapshot payload grew a vector, allocated a second blob and
 copied it. Small feature-manifest allocations remain. No broad heap-allocation
 reduction, world-decoding speedup, or V810 dispatch improvement is claimed.
 
-`measure-fixed-headroom/results.json` records the complete predeclared series:
+`measure-fixed-headroom/results.json` records the older pre-rebase combined
+palette-plus-serializer candidate, not the final review head. Its complete series:
 warm A/B, A1/A2 control, then A3/B1/B2/A4 for each depth. Windows 9800X3D,
 GCC 15.2 Release, fixed affinity `0x3c00` (two physical cores), stereo stock
 renderer, mods off, audio synthesis on. Software SDL dummy video/audio avoid
@@ -108,8 +115,9 @@ Frozen candidate:
 Both arms include the same local lifecycle functionality. Subsequent file-error
 handling, explicit 512-slot bounds, custom-source build-identity registration
 and discovery documentation do not change the timed depth0/depth32 path.
-Final debug/UI game host SHA256:
-`83cf72cf740e7c5e28e2c07d308458f41cc6e1d1f551abcbb52279214120c011`.
+Do not reuse that 53.31% result for the final head: palette hoisting was removed
+and current upstream corpus coverage changed. Final debug/UI game host SHA256:
+`116bb55548ba3dc5a621e6ee1dea2d0203e01c413fb0bd90d3c1d4a64602cc01`.
 Its UI, custom color renderer and normal audio driver are covered by separate
 correctness/playtest checks, not these production CPU numbers.
 
@@ -123,19 +131,43 @@ for eligible starts and records post-run spikes. No run is repeated until
 favorable, no workload difference is accepted, and profiling is never mixed
 with throughput measurement.
 
+`measure-palette-final` tried longer fixed samples, but a foreign
+`SuperMarioWorldSNESRecomp --benchmark-audio 4000` overlapped its A/A control.
+The series stopped and was preserved; no favorable-run retry or accepted result.
+The palette hoist was consequently omitted from the review candidate.
+
+The final `review-measure-history` comparison uses current fully AOT Zero
+Racers code (888,519,839 native instructions, zero interpreted/fallback),
+32-frame history in both arms, and one fresh 4,000-frame route per sample.
+Only the earlier serializer differs in the baseline. The upstream coverage
+improvement is not attributed to this optimization. Acceptance requires A/A
+<=3% and both pair reductions greater than twice the measured noise.
+
+Final result: baseline mean CPU 13.1640625s, candidate 8.2734375s, reduction
+37.1513%; A/A variation 0.3474%; paired reductions 37.2121% and 37.0930%.
+All eight runs completed, including the predetermined warmups and control.
+One post-run CPU headroom spike is retained; no foreign benchmark overlapped.
+Affinity was `0x3c00`. Each run performed 1,591,296,002 cycles, 3,999 stereo
+presentations and 3,508,807 synthesized audio frames. Final WRAM SHA256 was
+`505a56de87d4e63b89291480a1694934423540563234ffa6075abef680f5082d`.
+Final baseline executable SHA256:
+`51792c30bc57fcb3a1db9807ee10c7b309cc62f68f41cb2a30d969fc7f05796f`;
+candidate: `d31e53943287e1d33df2b2c2c295144cc92f069b7ac0385ce70c3dfde31d50f2`.
+This is the cost reduction of two implementations of enabled local history,
+not a general speedup over the original engine with rewind disabled.
+
 ## Automated qualification evidence
 
 | Evidence directory/log | Result and scope |
 | --- | --- |
-| `reference-final-driving` | PASS 39 checkpoints / 4,000 frames / 273 byte audits; independent Beetle CPU, full memory/device state, both eye images, presented output and stereo PCM. |
-| `reference-current-mario` | PASS 15 checkpoints / 1,000 frames / 105 byte audits; same ten planes and current generated code. |
-| `reference-final-mario`, `reference-source/stale-mario` | Retained failed run with obsolete consumer-generated code. Rebuilt using the unchanged current recompiler; no core fix or original corpus replacement. |
-| `lifecycle-midframe-stock`, `lifecycle-midframe-color` | PASS 33 checks each; current game-host lifecycle, both eyes and source/provenance bytes, active color mod separately; mid-frame dispatch, replay PCM, all four framebuffer buffers, aliased CHR, reset, repeated presentation, rewind, feature/build/content/CRC rejection, atomic save failure. |
-| `native-save` | PASS seven checks: exact load/save, old execution SRAM restore, newer native progress backed up, invalid native input rejected unchanged. Only isolated agent-owned files. |
-| `final-ctest.log` | PASS 6/6: ROM patches, input, controller, interpreter bridge, VIP sources/viewport/brightness, mod runtime. |
-| `final-recompiler-tests.log` | PASS 84; 5 optional oracle tests skipped explicitly (89 total). |
-| `final-cli.log`, `final-route-adapter.log` | Malformed finite workloads rejected; route conversion checks pass. |
-| `msvc-build.log`, `msvc-smoke.log`, `lifecycle-msvc` | Separate MSVC x64, SDL-free portable interpreter host builds/runs; PASS 33 lifecycle checks. This is not a non-Windows or cross-build compatibility claim. |
+| `review-reference-driving` | PASS 39 checkpoints / 4,000 frames / 273 byte audits; independent Beetle CPU, full memory/device state, both eye images, presented output and stereo PCM. |
+| `review-reference-mario` | PASS 15 checkpoints / 1,000 frames / 105 byte audits; same ten planes and current generated code. |
+| `review-lifecycle-stock`, `review-lifecycle-color` | PASS 36 checks each; current game-host lifecycle, both eyes and source/provenance bytes, active color mod separately; mid-frame dispatch, coalesced debugger PC edit/replay, replay PCM, all four framebuffer buffers, aliased CHR, reset, repeated presentation, rewind, feature/build/content/CRC rejection, atomic save failure. |
+| `review-native-save` | PASS seven checks: exact load/save, old execution SRAM restore, newer native progress backed up, invalid native input rejected unchanged. Only isolated agent-owned files. |
+| `review-ctest.log` | PASS 7/7, including native/interpreter bridge, interpreter stock, VIP sources/viewport/brightness and mod runtime. |
+| `review-recompiler-tests.log` | PASS 82; 5 optional oracle tests skipped explicitly (87 total). |
+| `review-cli.log`, `final-route-adapter.log` | Malformed finite workloads rejected, including conflicting frame limits; route conversion checks pass. |
+| `review-lifecycle-msvc`, `review-build-identity` | PASS 36 lifecycle checks in MSVC x64 SDL-free interpreter host; PASS 6 actual Release/Debug layout/content/feature identity, distinct build IDs, atomic mutual rejection and own-file acceptance checks. No non-Windows or cross-build compatibility claim. |
 
 Native SRAM and old disposable execution snapshots have separate contracts.
 All automated launches were headless or used dummy/zero-volume output. The
@@ -143,10 +175,13 @@ owner handoff uses a normal window, real audio driver and volume100 with the
 combined local-history changes. Human controls/audio/feel and final integration
 remain pending; network rollback, netplay and link cable behavior are absent.
 
-Handoff: `playtest/Playtest.ps1` inside the evidence root. Stereo, color mod on,
+Handoff: `final-review/Playtest.ps1` inside the evidence root. One eye, color mod on,
 32-frame local history, isolated SRAM/config/snapshot paths. The real Windows
 audio driver is restored; software SDL presentation avoids driver shader-cache
 output on C:. TEMP/TMP stay under the handoff directory. The executable is the
 same qualified game host named above. Human checking should cover ordinary
 controls and steering, music/SFX, F5/F8 during a turn, Backspace rewind/release,
-both eyes, repeated loads and a reset/close/relaunch. No native owner save is used.
+repeated loads and close/relaunch. Both eyes were checked independently by
+automation; the owner display deliberately shows one eye. No native owner save
+is used. Non-Windows builds remain unverified; no mandatory host-specific
+backend, assembly or SIMD was introduced.

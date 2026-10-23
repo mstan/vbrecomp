@@ -6,7 +6,10 @@ provide shared-controller play, or emulate a Virtual Boy link cable. The owner
 explicitly deferred netplay on 2026-10-22. Local replay is not network testing.
 
 Snapshots are disposable and specific to the engine source, generated code,
-compiler/options, ABI and cartridge content. No old-state migration is intended.
+compiler/options, actual build configuration, ABI and cartridge content.
+`tools/qualify_build_identity.py` checks actual Release/Debug files against each
+other, including atomic rejection and acceptance of each build's own files.
+No old-state migration is intended.
 Native SRAM remains a separate persistence contract. Before a clean exit after
 restoring, resetting or replaying execution history, an existing native save is
 copied to a unique `.pre-state-<timestamp>.bak` beside it. Failure to preserve
@@ -78,7 +81,8 @@ existing controller route without guest-success flags. It snapshots at frame
 2600, compares main execution and replay through frame4000, and checks actual
 CPU/device/memory/both-eye/presented bytes and stereo PCM. It exercises direct
 WRAM/SRAM, aliased character RAM and both eyes in both framebuffer slots;
-an instruction-stepped mid-frame restore/replay; repeated
+an instruction-stepped mid-frame restore/replay; coalesced debugger PC edits
+followed immediately by replay; repeated
 presentations; malformed files, wrong build/content and valid-CRC invalid CPU
 state; rewind branching; and reset with SRAM retained. The independent Beetle
 route remains the hardware reference. Passing local replay does not establish
