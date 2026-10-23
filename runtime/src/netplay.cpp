@@ -116,6 +116,26 @@ int connect_online(void* context) {
     }
     return shared_callbacks->connect(context);
 }
+const char* ice_wait_message="Waiting for all racers to connect.";
+int request_start(void* context,const RecompLauncherCSettings* settings) {
+    const auto* caps=rnet_lobby_match_caps();
+    if(rnet_lobby_in_lobby() && rnet_lobby_is_host() && caps && caps->relay_via_ice) {
+        int guests=0;
+        for(int i=0;i<rnet_lobby_member_count();++i) {
+            RNetLobbyMember member{};
+            if(rnet_lobby_member_get(i,&member) && !member.is_spectator && !rnet_lobby_member_is_host(&member))++guests;
+        }
+        RNetHostIceStatus status{};
+        if(!guests || !rnet_lobby_host_ice_status(&status) || status.role!=1
+           || status.peer_count!=guests || status.completed!=guests) {
+            // Readiness alone does not prove every host/guest ICE pair. Keep
+            // the real launcher on this same gate as automated room launches.
+            recomp_netplay_host_set_runtime_error(ice_wait_message);return -1;
+        }
+    }
+    recomp_netplay_host_set_runtime_error("");
+    return shared_callbacks->request_start(context,settings);
+}
 void fill_caps(void*,const RecompLauncherCSettings*,RNetLobbyMatchCaps* caps){caps->rollback=1;}
 int profile_path(void*,const char* leaf,char* out,size_t capacity) {
     const auto path=(std::filesystem::u8path(profile_directory)/std::filesystem::u8path(leaf)).u8string();
@@ -397,19 +417,14 @@ int vb_netplay_auto_launch(const char* config_path) {
             moved_host=true;
         }
         if(auto_role==1 && !start_sent && now-last_start>=500 && callbacks->member_count(callbacks->ctx)==players && callbacks->all_ready(callbacks->ctx)) {
-            if(auto_online && auto_path=="ice") {
-                RNetHostIceStatus status{};
-                if(!rnet_lobby_host_ice_status(&status) || status.completed!=players-1 || status.peer_count!=players-1) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(2));continue;
-                }
-            }
             last_start=now;
             if(callbacks->request_start(callbacks->ctx,&settings)) {
                 const char* problem=callbacks->last_error(callbacks->ctx);
                 // The server's all-ready notice can precede the returning
                 // peers' refreshed game-image readiness. Keep the real launch
                 // gate authoritative; retry only its transient readiness veto.
-                if(auto_online && problem && (!std::strcmp(problem,"peer_not_ready") || !std::strcmp(problem,"local_not_ready"))) {
+                if(auto_online && problem && (!std::strcmp(problem,"peer_not_ready") || !std::strcmp(problem,"local_not_ready")
+                    || !std::strcmp(problem,ice_wait_message))) {
                     callbacks->clear_last_error(callbacks->ctx);continue;
                 }
                 error="Shared room refused start";return 0;
@@ -440,6 +455,7 @@ void vb_netplay_configure_launcher(RecompLauncherCGameInfo* game) {
         lobby_callbacks.allow_spectators_get=nullptr;lobby_callbacks.allow_spectators_set=nullptr;
         lobby_callbacks.automatch_available=no_spectators;lobby_callbacks.rollback_get=yes_rollback;lobby_callbacks.rollback_set=nullptr;
         lobby_callbacks.connect=connect_online;
+        lobby_callbacks.request_start=request_start;
         // Current online rooms use host ICE; LAN/Direct IP use local UDP.
         // Keep the room controls consistent with the server's actual path.
         lobby_callbacks.force_input_relay_get=nullptr;lobby_callbacks.force_input_relay_set=nullptr;
