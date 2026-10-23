@@ -88,10 +88,15 @@ def main():
     p.add_argument('--rom', type=Path, required=True)
     p.add_argument('--route', type=Path, required=True)
     p.add_argument('--out', type=Path, required=True)
+    p.add_argument('--workloads-per-sample', type=int, choices=range(1, 9), default=1,
+                   help='Sum this many identical fresh-process workloads per sample')
+    p.add_argument('--rewind-depths', type=int, choices=(0, 32), nargs='+', default=[0, 32])
     args = p.parse_args(); args.out.mkdir(parents=True, exist_ok=True)
     lock_path = Path(r'G:\Temp\Codex\benchmark-window.lock')
     report = {'scope': 'Windows process CPU; both eyes; SDL dummy video/audio; GPU/physical audio excluded',
               'plan': 'Per feature set: full-route warmup A,B; A,A noise control; A,B,B,A balanced pairs. Fixed two-core affinity. No retries within a series.',
+              'workloads_per_sample': args.workloads_per_sample,
+              'aggregation': 'Each sample sums CPU, measured seconds and work counts across identical fresh-process reset workloads; each child must match the same useful-work identity.',
               'headroom_policy': 'Start each run only with CPU <=60%, free RAM >=4GiB, queue G<=2/F<=8. Wait up to ten minutes for headroom, without repeating work. Record post-run load spikes; abort detected benchmark overlap. Assess CPU results using A/A noise and both pair directions.',
               'features': {'debug_tools': False, 'cpuhook': False, 'stereo': True, 'mods': False,
                            'audio_synthesis': True, 'audio_output': 'dummy', 'video_output': 'dummy'},
@@ -121,7 +126,7 @@ def main():
             kernel = ctypes.WinDLL('kernel32', use_last_error=True)
             kernel.SetProcessAffinityMask.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
             expected = None
-            for depth in (0, 32):
+            for depth in args.rewind_depths:
                 for label in ('warm-A', 'warm-B', 'A1', 'A2', 'A3', 'B1', 'B2', 'A4'):
                     deadline = time.monotonic() + 600
                     while True:
@@ -144,30 +149,41 @@ def main():
                     environment = {k: v for k, v in os.environ.items() if not k.startswith('VBRECOMP_')}
                     environment.update(SDL_AUDIODRIVER='dummy', SDL_VIDEODRIVER='dummy')
                     row = {'label': label, 'arm': arm, 'rewind_frames': depth, 'command': command,
-                           'census_before': before, 'status': 'running'}
+                           'census_before': before, 'status': 'running', 'workloads': []}
                     report['runs'].append(row); save()
                     started = time.monotonic()
-                    with (directory / 'stdout.txt').open('wb') as out, (directory / 'stderr.txt').open('wb') as err:
-                        child = subprocess.Popen(command, cwd=directory, env=environment, stdout=out, stderr=err,
-                                                 creationflags=subprocess.CREATE_NO_WINDOW)
-                        if not kernel.SetProcessAffinityMask(int(child._handle), mask):
-                            child.terminate();child.wait(timeout=10);raise ctypes.WinError(ctypes.get_last_error())
-                        try: code = child.wait(timeout=300)
-                        except subprocess.TimeoutExpired:
-                            child.terminate(); child.wait(timeout=10); row['status'] = 'timeout'; save(); raise
+                    for repetition in range(args.workloads_per_sample):
+                        stdout = directory / f'stdout-{repetition + 1}.txt'
+                        stderr = directory / f'stderr-{repetition + 1}.txt'
+                        with stdout.open('wb') as out, stderr.open('wb') as err:
+                            child = subprocess.Popen(command, cwd=directory, env=environment, stdout=out, stderr=err,
+                                                     creationflags=subprocess.CREATE_NO_WINDOW)
+                            if not kernel.SetProcessAffinityMask(int(child._handle), mask):
+                                child.terminate();child.wait(timeout=10);raise ctypes.WinError(ctypes.get_last_error())
+                            try: code = child.wait(timeout=300)
+                            except subprocess.TimeoutExpired:
+                                child.terminate(); child.wait(timeout=10); row['status'] = 'timeout'; save(); raise
+                        lines = stdout.read_text().splitlines()
+                        payloads = [json.loads(line.split(' ', 1)[1]) for line in lines if line.startswith('VBRECOMP_BENCHMARK ')]
+                        if code or len(payloads) != 1:
+                            row['status'] = 'invalid'; save(); raise RuntimeError('Failed finite workload')
+                        metric = payloads[0]
+                        work = {k: metric[k] for k in useful_keys}
+                        if expected is None: expected = work
+                        if work != expected or metric['process_cpu_seconds'] <= 0:
+                            row['status'] = 'invalid-work'; save(); raise RuntimeError('Useful work or CPU clock mismatch')
+                        row['workloads'].append({'exit': code, 'metric': metric}); save()
                     row['parent_wall_seconds'] = time.monotonic() - started
                     row['census_after'], heavy = census()
-                    row['exit'] = code
-                    lines = (directory / 'stdout.txt').read_text().splitlines()
-                    payloads = [json.loads(line.split(' ', 1)[1]) for line in lines if line.startswith('VBRECOMP_BENCHMARK ')]
                     row['post_run_headroom_warnings'] = heavy
-                    if code or len(payloads) != 1 or any('CommandLine' in item for item in heavy):
+                    if any('CommandLine' in item for item in heavy):
                         row['status'] = 'invalid'; save(); raise RuntimeError('Failed or externally contested measurement')
-                    metric = payloads[0]; row['metric'] = metric
-                    work = {k: metric[k] for k in useful_keys}
-                    if expected is None: expected = work
-                    if work != expected or metric['process_cpu_seconds'] <= 0:
-                        row['status'] = 'invalid-work'; save(); raise RuntimeError('Useful work or CPU clock mismatch')
+                    metric = dict(row['workloads'][0]['metric'])
+                    for key in ('process_cpu_seconds', 'seconds', 'frames', 'cycles', 'native_instructions',
+                                'interpreted_instructions', 'fallback_instructions', 'presents', 'synthesized_audio_frames'):
+                        metric[key] = sum(child['metric'][key] for child in row['workloads'])
+                    metric['fps'] = metric['frames'] / metric['seconds']
+                    row['metric'] = metric
                     row['status'] = 'complete'; save()
                     print(f'rewind={depth} {label}: CPU {metric["process_cpu_seconds"]:.6f}s, {metric["fps"]:.3f} FPS', flush=True)
                 rows = {r['label']: r['metric'] for r in report['runs'] if r['rewind_frames'] == depth}
