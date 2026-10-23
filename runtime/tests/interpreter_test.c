@@ -112,6 +112,18 @@ int main(int argc,char** argv) {
             assert(c.halted && c.pc==0xdead0002);
         }
         puts("Native/RAM-interpreter return and instruction-yield bridge passed");
+        for(int mode=0;mode<=2;++mode) {
+            const uint32_t values[]={0,1,2,3,0xffffffffu,0x10,0x20};
+            for(unsigned i=0;i<sizeof(values)/sizeof(values[0]);++i) {
+                c=setup();FILE* f=fopen(argv[1],"rb");assert(f);assert(fread(ram,1,sizeof(ram),f)==sizeof(ram));fclose(f);
+                c.pc=0x07000120;c.gpr[6]=values[i];c.sysreg[24]=2;
+                memset(&vb_execution,0,sizeof(vb_execution));vb_execution.mode=mode;
+                vb_dispatch(&c,c.pc);
+                assert(c.halted && c.gpr[10]==(values[i]&2) && c.sysreg[24]==(values[i]&2));
+                if(mode!=2)assert(vb_execution.native_instructions && !vb_execution.fallback);
+            }
+        }
+        puts("CHCW enable latch/readback: native, hybrid and interpreter passed");
         for(int enabled=0;enabled<2;++enabled) for(int mode=0;mode<=2;mode+=2) {
             c=setup();FILE* f=fopen(argv[1],"rb");assert(f);assert(fread(ram,1,sizeof(ram),f)==sizeof(ram));fclose(f);
             vb_branch_rules_reset();

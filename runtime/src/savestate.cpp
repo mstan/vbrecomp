@@ -118,6 +118,7 @@ bool valid() {
         || cpu->halted > 1 || cpu->yielded > 1 || cpu->bstr_src_valid > 1
         || cpu->pipeline_class < -1 || cpu->pipeline_class > 4 || cpu->bus_tail_cycles > 64
         || cpu->psw_int_level > 15 || cpu->cycles < *frame_cycles
+        || (cpu->sysreg[VB_SR_CHCW]&~2u)
         || cpu->cycles - *frame_cycles >= 397824u
         || *frame_cycles != (uint64_t)cpu->frame * 397824u) return false;
     const uint8_t* flags=&cpu->psw_z;

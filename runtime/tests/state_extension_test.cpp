@@ -57,6 +57,9 @@ int main(int argc,char** argv) {
     invalid=complete;invalid[112]=1;put32(invalid.data()+offset+4,100);crc(invalid);
     assert(!vb_state_restore(invalid.data(),invalid.size()));
     assert(capture()==before && loaded==1);
+    invalid=complete;put32(invalid.data()+112+offsetof(CPUState,sysreg)+24*sizeof(uint32_t),4);crc(invalid);
+    assert(!vb_state_restore(invalid.data(),invalid.size()));
+    assert(capture()==before && loaded==1);
     assert(vb_rewind_enable(4));assert(vb_rewind_record(10));
     session.tick=20;session.values[0]=77;assert(vb_rewind_record(20));
     assert(vb_rewind_to(10));assert(session.tick==17 && session.values[0]==10 && loaded==2);
