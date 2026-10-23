@@ -11,11 +11,12 @@ struct Session {uint32_t actors,tick,values[4];};
 Session session{};
 uint64_t presentation=123;
 unsigned loaded;
+unsigned old_sram_value;
 int validate(const void* data,size_t size,void*) {
     if(size!=sizeof(Session))return 0;
     Session copy;std::memcpy(&copy,data,size);return copy.actors<=4;
 }
-void did_load(void*){++loaded;}
+void did_load(void*){++loaded;assert(vb_state_previous_sram());old_sram_value=vb_state_previous_sram()[999];}
 std::vector<uint8_t> capture(int view=1) {
     uint8_t* data=nullptr;size_t size=0;assert(vb_state_capture(&data,&size,view));
     std::vector<uint8_t> result(data,data+size);std::free(data);return result;
@@ -79,5 +80,8 @@ int main(int argc,char** argv) {
     vb_rollback_history_drop_after(network,100);assert(!vb_rollback_history_has(network,110));
     assert(vb_rewind_to(50) && session.tick==40 && vb_rollback_history_has(network,100));
     vb_rollback_history_destroy(network);
+    vb_cart_ram_data()[999]=77;
+    assert(!vb_state_previous_sram());assert(vb_state_restore(reset.data(),reset.size()));
+    assert(old_sram_value==77 && !vb_state_previous_sram() && vb_cart_ram_data()[999]==0);
     vb_state_shutdown();vb_memory_shutdown();
 }

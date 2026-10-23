@@ -15,6 +15,7 @@
 #include <new>
 #include <memory>
 #include <filesystem>
+#include <array>
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #ifndef NOMINMAX
@@ -33,6 +34,8 @@ uint64_t* frame_cycles;
 void (*lock_audio)(void*);
 void (*unlock_audio)(void*);
 void* audio_context;
+unsigned audio_guard_depth;
+const uint8_t* previous_sram;
 uint64_t generation;
 uint8_t content[32];
 RbeSnapRing* rewind_ring;
@@ -128,8 +131,10 @@ bool valid() {
         && vb_memory_state_valid() && vb_irq_state_valid();
 }
 struct AudioGuard {
-    AudioGuard() { if(lock_audio) lock_audio(audio_context); }
-    ~AudioGuard() { if(unlock_audio) unlock_audio(audio_context); }
+    // All callers are on the guest thread. A game may cold-reset at a field
+    // boundary inside deterministic replay; audio exclusion must nest there.
+    AudioGuard() { if(audio_guard_depth++==0 && lock_audio) lock_audio(audio_context); }
+    ~AudioGuard() { if(--audio_guard_depth==0 && unlock_audio) unlock_audio(audio_context); }
 };
 }
 extern "C" {
@@ -166,6 +171,7 @@ void vb_state_bind(CPUState* c, uint32_t* pc, uint64_t* cycles,
 }
 const char* vb_state_error(void) { return error; }
 uint64_t vb_state_generation(void) { return generation; }
+const uint8_t* vb_state_previous_sram(void){return previous_sram;}
 const char* vb_state_build_id(void) { return VB_STATE_BUILD_ID; }
 const uint8_t* vb_state_content_id(void) { return content; }
 /* Private memory snapshots are owned immutable blobs, never file input. Their
@@ -216,6 +222,8 @@ static int restore_impl(const uint8_t* data, size_t size, bool trusted, bool kee
     uint8_t* backup=nullptr;size_t backup_size=0;
     if(!capture_impl(&backup,&backup_size,1,true))return 0;
     AudioGuard guard;
+    std::array<uint8_t,65536> old_sram;
+    std::memcpy(old_sram.data(),vb_cart_ram_data(),old_sram.size());
     Stream load{nullptr,data,header_size};visit(load,true);
     if(!valid()) {
         Stream undo{nullptr,backup,header_size};visit(undo,true);std::free(backup);
@@ -223,9 +231,11 @@ static int restore_impl(const uint8_t* data, size_t size, bool trusted, bool kee
     }
     std::free(backup);vb_vsu_state_loaded();vb_vip_state_loaded();++generation;
     if(!keep_history)rbe_snap_ring_clear(rewind_ring);
+    previous_sram=old_sram.data();
     for(unsigned i=0;i<simulation_extension_count;++i) {
         const auto& e=simulation_extensions[i];if(e.loaded)e.loaded(e.context);
     }
+    previous_sram=nullptr;
     error="";return 1;
 }
 int vb_state_restore(const uint8_t* data, size_t size) {

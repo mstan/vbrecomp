@@ -29,3 +29,9 @@ bool vb_host_save_sram();
 /* Session sandbox: disable native-save loading/publishing for this process.
  * At startup this leaves the user's persistent progress entirely untouched. */
 void vb_host_sandbox_sram();
+/* Reversible local multiplayer mode. Preserve the live single-player native
+ * save before entering; restore it on a cold return to the title. A loaded
+ * multiplayer snapshot supplies the pre-restore SRAM instead of its own
+ * candidate bytes. Permanent --no-save/network sandboxes remain permanent. */
+bool vb_host_begin_multiplayer_sram(const unsigned char* previous=nullptr,bool fresh=false);
+bool vb_host_end_multiplayer_sram(bool restore_baseline);

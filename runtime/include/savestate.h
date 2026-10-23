@@ -56,6 +56,11 @@ int vb_state_replay_frames(unsigned frames);
 void vb_state_shutdown(void);
 uint32_t vb_state_digest(void);
 uint64_t vb_state_generation(void);
+/* Only during a successful simulation loaded callback: immutable native
+ * SRAM from before the restore. Lets a host preserve persistent progress
+ * across a mode transition without publishing the candidate's SRAM. NULL
+ * outside that callback window; never exposed for rejected candidates. */
+const uint8_t* vb_state_previous_sram(void);
 const char* vb_state_error(void);
 const char* vb_state_build_id(void);
 const uint8_t* vb_state_content_id(void);

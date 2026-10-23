@@ -11,6 +11,7 @@
 #include <iomanip>
 #include <vector>
 #include <cstring>
+#include <array>
 #if VB_RUNTIME_HAVE_SDL
 #include <SDL.h>
 #endif
@@ -44,6 +45,8 @@ namespace fs = std::filesystem;
 fs::path config_path, mods_path;
 fs::path sram_path;
 bool sram_disabled=false;
+bool multiplayer_sram=false,multiplayer_sram_published=false;
+std::array<unsigned char,65536> single_player_sram;
 std::string last_rom, error;
 bool no_launcher = false, force_launcher = false;
 struct Action { std::string kind, value; };
@@ -289,7 +292,7 @@ bool vb_host_commit_mods() {
 }
 
 bool vb_host_load_sram() {
-    if(sram_disabled) return true;
+    if(sram_disabled || multiplayer_sram) return true;
     std::error_code ec;
     if(!fs::exists(sram_path,ec)) { if(ec) { error=ec.message();return false; } return true; }
     if(fs::file_size(sram_path,ec)!=65536 || ec) { error="Cartridge save must be exactly 65536 bytes: "+sram_path.u8string();return false; }
@@ -299,8 +302,7 @@ bool vb_host_load_sram() {
     return true;
 }
 void vb_host_sandbox_sram() { sram_disabled=true; }
-bool vb_host_save_sram() {
-    if(sram_disabled) return true;
+static bool publish_sram(const unsigned char* bytes) {
     std::error_code ec;fs::create_directories(sram_path.parent_path(),ec);
     if(ec) { error=ec.message();return false; }
     const bool has_save=fs::exists(sram_path,ec);
@@ -316,7 +318,7 @@ bool vb_host_save_sram() {
     }
     auto temporary=fs::u8path(sram_path.u8string()+".tmp");
     std::ofstream file(temporary,std::ios::binary|std::ios::trunc);
-    file.write((const char*)vb_cart_ram_data(),65536);file.close();
+    file.write((const char*)bytes,65536);file.close();
     if(!file) { error="Cannot write cartridge save: "+temporary.u8string();return false; }
 #ifdef _WIN32
     if(!MoveFileExW(temporary.c_str(),sram_path.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)) {
@@ -327,4 +329,35 @@ bool vb_host_save_sram() {
     if(ec) { error=ec.message();return false; }
 #endif
     return true;
+}
+bool vb_host_save_sram() {
+    if(sram_disabled)return true;
+    if(multiplayer_sram) {
+        if(multiplayer_sram_published)return true;
+        multiplayer_sram_published=publish_sram(single_player_sram.data());return multiplayer_sram_published;
+    }
+    return publish_sram(vb_cart_ram_data());
+}
+bool vb_host_begin_multiplayer_sram(const unsigned char* previous,bool fresh) {
+    if(!sram_disabled) {
+        if(!multiplayer_sram) {
+            std::memcpy(single_player_sram.data(),previous?previous:vb_cart_ram_data(),single_player_sram.size());
+            multiplayer_sram=true;multiplayer_sram_published=false;
+        }
+        if(!multiplayer_sram_published) {
+            multiplayer_sram_published=publish_sram(single_player_sram.data());
+            if(!multiplayer_sram_published)return false;
+        }
+    }
+    if(fresh)std::memset(vb_cart_ram_data(),0,65536);
+    return true;
+}
+bool vb_host_end_multiplayer_sram(bool restore_baseline) {
+    if(sram_disabled || !multiplayer_sram)return true;
+    if(!multiplayer_sram_published) {
+        multiplayer_sram_published=publish_sram(single_player_sram.data());
+        if(!multiplayer_sram_published)return false;
+    }
+    if(restore_baseline)std::memcpy(vb_cart_ram_data(),single_player_sram.data(),single_player_sram.size());
+    multiplayer_sram=false;multiplayer_sram_published=false;return true;
 }
