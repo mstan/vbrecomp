@@ -131,7 +131,8 @@ int vb_host_prepare(const char* executable, const char*& rom, bool headless) {
     if (config_path.empty()) config_path = base / "vbrecomp.cfg";
     config_path = fs::absolute(config_path);
     if (sram_path.empty()) {
-        if (headless) sram_disabled=true;
+        // An unidentified host has no safe per-cartridge default save name.
+        if (headless || !VB_GAME_ID[0]) sram_disabled=true;
         sram_path=config_path.parent_path()/"saves"/(std::string(VB_GAME_ID)+".sav");
     }
     sram_path=fs::absolute(sram_path);
