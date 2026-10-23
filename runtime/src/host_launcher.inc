@@ -27,6 +27,7 @@ static int choose_launcher(const fs::path& base,bool resume) {
         game.mods = vb_mod_runtime_launcher_provider_c();
         const std::string config_text = config_path.u8string();
         game.config_path = config_text.c_str();
+        game.settings_bindings = 1;
         vb_netplay_configure_launcher(&game);
         if(resume)vb_netplay_resume_launcher(&game);
         RecompLauncherCSettings defaults = settings;
