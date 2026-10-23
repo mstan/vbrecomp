@@ -2,6 +2,8 @@
 #include "mod_runtime.h"
 #include "renderer.h"
 #include "memory.h"
+#include "savestate.h"
+#include <chrono>
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
@@ -56,6 +58,9 @@ void load_config() {
         else if (key == "source") vb_host_config.player_source = std::clamp(value, 0, 2);
         else if (key == "deadzone") vb_host_config.deadzone = std::clamp(value, 0, 100);
         else if (key == "skip_launcher") vb_host_config.skip_launcher = value != 0;
+        else if (key == "rewind") vb_host_config.rewind = value != 0;
+        else if (key == "rewind_depth") vb_host_config.rewind_depth = std::clamp(value, 2, 64);
+        else if (key == "rewind_interval") vb_host_config.rewind_interval = std::clamp(value, 1, 60);
         for (int i = 0; i < 14; ++i) {
             if (key == "key" + std::to_string(i)) vb_host_config.keys[i] = std::clamp(value, 0, 511);
             if (key == "pad" + std::to_string(i)) vb_host_config.pads[i] = std::clamp(value, 0, 65535);
@@ -73,9 +78,9 @@ int vb_host_argument(int& i, int argc, char** argv) {
         arg != "--enable-mod" && arg != "--disable-mod" && arg != "--set-mod-option" && arg != "--save") return 0;
     if (i + 1 == argc) { error = "Missing value for " + arg; return -1; }
     const std::string value = argv[++i];
-    if (arg == "--mods-dir") mods_path = value;
-    else if (arg == "--config") config_path = value;
-    else if (arg == "--save") sram_path = value;
+    if (arg == "--mods-dir") mods_path = fs::u8path(value);
+    else if (arg == "--config") config_path = fs::u8path(value);
+    else if (arg == "--save") sram_path = fs::u8path(value);
     else actions.push_back({arg, value});
     return 1;
 }
@@ -85,7 +90,7 @@ void vb_host_save(void*) {
     if (config_path.empty()) return;
     std::error_code ec;
     fs::create_directories(config_path.parent_path(), ec);
-    const auto temporary = fs::path(config_path.string() + ".tmp");
+    const auto temporary = fs::u8path(config_path.u8string() + ".tmp");
     std::ofstream file(temporary, std::ios::trunc);
     if (!file) { error = "Cannot save settings."; return; }
     file << "rom " << std::quoted(last_rom) << '\n'
@@ -97,6 +102,9 @@ void vb_host_save(void*) {
          << "source " << vb_host_config.player_source << '\n'
          << "deadzone " << vb_host_config.deadzone << '\n'
          << "skip_launcher " << vb_host_config.skip_launcher << '\n'
+         << "rewind " << vb_host_config.rewind << '\n'
+         << "rewind_depth " << vb_host_config.rewind_depth << '\n'
+         << "rewind_interval " << vb_host_config.rewind_interval << '\n'
          << "gamepad " << std::quoted(vb_host_config.gamepad_guid) << '\n';
     for (int i = 0; i < 14; ++i)
         file << "key" << i << ' ' << vb_host_config.keys[i] << '\n'
@@ -116,9 +124,9 @@ const std::string& vb_host_error() { return error; }
 
 int vb_host_prepare(const char* executable, const char*& rom, bool headless) {
     vb_mod_register_reset_callback(vb_renderer_reset);
-    fs::path base = fs::absolute(executable).parent_path();
+    fs::path base = fs::absolute(fs::u8path(executable)).parent_path();
 #if VB_RUNTIME_HAVE_SDL
-    if (char* path = SDL_GetBasePath()) { base = path; SDL_free(path); }
+    if (char* path = SDL_GetBasePath()) { base = fs::u8path(path); SDL_free(path); }
 #endif
     if (config_path.empty()) config_path = base / "vbrecomp.cfg";
     config_path = fs::absolute(config_path);
@@ -134,7 +142,7 @@ int vb_host_prepare(const char* executable, const char*& rom, bool headless) {
     if (!has_game && !actions.empty()) {
         error = "This executable has no game identity for mod packages."; return -1;
     }
-    if (has_game && !vb_mod_runtime_initialize_c(mods_path.string().c_str(), VB_GAME_ID, VB_GAME_SHA256)) {
+    if (has_game && !vb_mod_runtime_initialize_c(mods_path.u8string().c_str(), VB_GAME_ID, VB_GAME_SHA256)) {
         error = vb_mod_runtime_last_error_c(); return -1;
     }
     for (const auto& action : actions) {
@@ -181,7 +189,7 @@ int vb_host_prepare(const char* executable, const char*& rom, bool headless) {
         game.expected_crc = VB_GAME_CRC32;
         game.has_expected_crc = VB_GAME_CRC32 != 0;
         game.mods = vb_mod_runtime_launcher_provider_c();
-        const std::string config_text = config_path.string();
+        const std::string config_text = config_path.u8string();
         game.config_path = config_text.c_str();
         RecompLauncherCSettings defaults = settings;
         const VbHostConfig default_values;
@@ -197,7 +205,7 @@ int vb_host_prepare(const char* executable, const char*& rom, bool headless) {
         game.default_settings = &defaults;
         char selected[4096] = {};
         const int result = recomp_launcher_run_window(VB_GAME_TITLE, &settings, &game,
-            (base / "assets").string().c_str(), last_rom.c_str(), selected, sizeof(selected));
+            (base / "assets").u8string().c_str(), last_rom.c_str(), selected, sizeof(selected));
         if (result == RECOMP_LAUNCHER_RESULT_QUIT) return 0;
         if (result != RECOMP_LAUNCHER_RESULT_LAUNCH) { error = "The launcher could not start."; return -1; }
         last_rom = selected;
@@ -237,23 +245,34 @@ bool vb_host_load_sram() {
     if(sram_disabled) return true;
     std::error_code ec;
     if(!fs::exists(sram_path,ec)) { if(ec) { error=ec.message();return false; } return true; }
-    if(fs::file_size(sram_path,ec)!=65536 || ec) { error="Cartridge save must be exactly 65536 bytes: "+sram_path.string();return false; }
+    if(fs::file_size(sram_path,ec)!=65536 || ec) { error="Cartridge save must be exactly 65536 bytes: "+sram_path.u8string();return false; }
     std::ifstream file(sram_path,std::ios::binary);
     file.read((char*)vb_cart_ram_data(),65536);
-    if(!file) { error="Cannot read cartridge save: "+sram_path.string();return false; }
+    if(!file) { error="Cannot read cartridge save: "+sram_path.u8string();return false; }
     return true;
 }
 bool vb_host_save_sram() {
     if(sram_disabled) return true;
     std::error_code ec;fs::create_directories(sram_path.parent_path(),ec);
     if(ec) { error=ec.message();return false; }
-    auto temporary=fs::path(sram_path.string()+".tmp");
+    const bool has_save=fs::exists(sram_path,ec);
+    if(ec) { error="Cannot inspect native save before replacement: "+ec.message();return false; }
+    if(vb_state_generation() && has_save) {
+        // Loading execution history may legitimately restore older SRAM in
+        // memory. Preserve the existing persistent progress before replacing it.
+        const auto stamp=std::chrono::system_clock::now().time_since_epoch().count();
+        auto backup=fs::u8path(sram_path.u8string()+".pre-state-"+std::to_string(stamp)+".bak");
+        if(!fs::copy_file(sram_path,backup,fs::copy_options::none,ec)) {
+            error="Cannot preserve native save before state restore: "+ec.message();return false;
+        }
+    }
+    auto temporary=fs::u8path(sram_path.u8string()+".tmp");
     std::ofstream file(temporary,std::ios::binary|std::ios::trunc);
     file.write((const char*)vb_cart_ram_data(),65536);file.close();
-    if(!file) { error="Cannot write cartridge save: "+temporary.string();return false; }
+    if(!file) { error="Cannot write cartridge save: "+temporary.u8string();return false; }
 #ifdef _WIN32
     if(!MoveFileExW(temporary.c_str(),sram_path.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)) {
-        error="Cannot publish cartridge save: "+sram_path.string();return false;
+        error="Cannot publish cartridge save: "+sram_path.u8string();return false;
     }
 #else
     fs::rename(temporary,sram_path,ec);

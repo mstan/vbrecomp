@@ -1,6 +1,7 @@
 /* Read-only presentation replay of VIP drawing inputs. Raster addressing and
  * clipping follow vip.c / Beetle vip_draw.inc. Guest drawing remains in vip.c. */
 #include "viewport.h"
+#include "savestate.h"
 #include "vip.h"
 #include <string.h>
 
@@ -18,6 +19,10 @@ static VbViewportArrange arrange_scene;
 static void* policy_context;
 static unsigned extra_size;
 static VbViewportCaptureExtra capture_extra;
+
+void vb_viewport_state_visit(VbStateVisit visit, void* context) {
+    if (tracking) visit(context, blocks, sizeof(blocks));
+}
 
 static int sx(unsigned v, unsigned bits) {
     unsigned mask = (1u << bits) - 1, sign = 1u << (bits - 1);

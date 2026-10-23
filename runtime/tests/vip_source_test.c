@@ -48,6 +48,47 @@ static void unwrapped_layout(const VbViewportScene* scene,int kind,int width,
     for(int i=0;i<1024;++i)layout->object_shift[i]=unwrap_origin;
 }
 static uint8_t extra_marker = 73;
+static void brightness_tests(void) {
+    static uint32_t pixels[384 * 224];
+    memset(s_vip_mem,0,sizeof(s_vip_mem));
+    s_display_fb=0;
+    s_brta=16;s_brtb=32;s_brtc=0;s_rest=0;s_brt_repeat=7;
+    build_color_lut();recalc_brt_cache();
+    int32_t saved[4];memcpy(saved,s_brt_cache,sizeof(saved));
+    memset(s_vip_mem,0x55,384*64);
+    memset(s_vip_mem+0x10000,0x55,384*64);
+    s_vip_mem[0x3ddff]=1; /* Left first four columns: two pulses. */
+    s_vip_mem[0x3dfff]=2; /* Right first four columns: three pulses. */
+    vb_vip_render_framebuffer(0,pixels);
+    assert(pixels[0]==0xff870000u && pixels[3]==0xff870000u);
+    assert(pixels[4]==0xff610000u && pixels[223*384]==0xff870000u);
+    vb_vip_render_framebuffer(1,pixels);
+    assert(pixels[0]==0xffa20000u && pixels[3]==0xffa20000u);
+    assert(pixels[4]==0xff610000u);
+    assert(s_brt_repeat==7 && !memcmp(saved,s_brt_cache,sizeof(saved)));
+    extern int vb_test_red_warm;
+    vb_test_red_warm=1;
+    for(int slot=0;slot<2;++slot)for(int eye=0;eye<2;++eye) {
+        s_display_fb=slot;
+        unsigned base=(slot?0x8000u:0)+(eye?0x10000u:0);
+        for(unsigned x=0;x<384;++x)for(unsigned y=0;y<56;++y)
+            s_vip_mem[base+x*64+y]=(uint8_t)(x*29+y*17+slot*61+eye*7);
+        for(unsigned g=0;g<96;++g) {
+            unsigned ct=0x3dffeu-g*2-(eye?0:0x200u);
+            s_vip_mem[ct+1]=(uint8_t)(g+slot+eye);
+        }
+        uint32_t column[96][4];vb_vip_column_argb(eye,column);
+        vb_vip_render_framebuffer(eye,pixels);
+        for(unsigned y=0;y<224;++y)for(unsigned x=0;x<384;++x) {
+            unsigned level=(s_vip_mem[base+x*64+y/4]>>((y%4)*2))&3;
+            unsigned r=(column[x/4][level]>>16)&255;
+            assert(pixels[y*384+x]==(0xff000000u|(r<<16)|(((r*r)/(255u*10u))<<8)));
+        }
+        assert(s_brt_repeat==7 && !memcmp(saved,s_brt_cache,sizeof(saved)));
+    }
+    vb_test_red_warm=0;
+    puts("PASS: per-eye column brightness and side-effect-free presentation");
+}
 static void snapshot_extra(uint8_t* bytes, unsigned count) { memset(bytes,extra_marker,count); }
 static int extend_background(int x,int y,int* source_x,int* source_y,void* context) {
     (void)context;*source_x=(x%8+8)%8;*source_y=y;return 1;
@@ -228,5 +269,6 @@ int main(void) {
     assert(s_source_fb[0][0][17*384+10].tile_hash==202);
     puts("PASS: native rasterizer and CPU source ownership, both eyes, packed stores and display lifetime");
     viewport_tests();
+    brightness_tests();
     return 0;
 }

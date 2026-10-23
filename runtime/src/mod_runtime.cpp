@@ -2163,7 +2163,7 @@ extern "C" int vb_mod_runtime_initialize_c(
     const char* root, const char* game_id, const char* rom_sha256) {
     std::string error;
     return VBRecomp::mod_runtime_initialize(
-        root ? fs::path(root) : fs::path("mods"),
+        root ? fs::u8path(root) : fs::path("mods"),
         game_id ? game_id : "",
         rom_sha256 ? rom_sha256 : "", &error) ? 1 : 0;
 }
@@ -2171,7 +2171,7 @@ extern "C" int vb_mod_runtime_initialize_c(
 extern "C" int vb_mod_runtime_commit_c(const char* rom_path) {
     std::string error;
     return VBRecomp::mod_runtime_commit(
-        rom_path ? fs::path(rom_path) : fs::path(), &error) ? 1 : 0;
+        rom_path ? fs::u8path(rom_path) : fs::path(), &error) ? 1 : 0;
 }
 
 extern "C" void vb_mod_runtime_activate_plugins_c(void) {

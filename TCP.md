@@ -33,7 +33,14 @@ python tools/debug_client.py breakpoint pc=-1
 | `execution_stats` | Runtime only: mode, native entries/instructions, interpreted/fallback counts, first/last fallback PC, stopped state. |
 | `set_input`, `clear_input` | `pad` or `mask` uses pressed hardware bits. A=4, Start=4096; a TCP override remains active in a window until `clear_input`; `pad_state` also includes connected bit 2. |
 | `read_ram` | `addr`, `len=1..65536`. Hex bytes. Runtime rejects unmapped ranges. Oracle exposes VIP RAM, WRAM, SRAM, ROM; inspect `filled` for unsupported regions. |
-| `write_ram` | Paused WRAM/SRAM byte write: `addr`, `val=0..255`. |
+| `write_ram` | Paused VIP RAM/WRAM/SRAM byte write: `addr`, `val=0..255`. VIP writes use the normal bus, including aliases and register effects. |
+| `save_state`, `load_state` | Runtime, paused: `path`; current-build snapshots with file integrity and transactional validation. |
+| `state_digest` | Runtime: canonical simulation CRC and restore generation. Presentation history is excluded. |
+| `reset` | Runtime, paused: restore startup execution state, preserving live cartridge SRAM. |
+| `replay_frames` | Runtime, paused: `frames=1..10000`; synchronous deterministic local replay through the shared scheduler, discarding abandoned playback. |
+| `rewind_enable`, `rewind` | Runtime, paused: history depth `value=2..512`, or absolute target frame in `value`. Requires a resident history entry. |
+| `state_ui` | Runtime: host menu mode (0 closed, 1 slots, 2 rewind), selected slot/frame, preview count and last action result. |
+| `host_input` | Windowed development host only: inject an SDL event, `device=0` keyboard scancode or `device=1` controller button, `value`, `pressed=0|1`, `repeat=0|1`. Tests use isolated dummy devices; this is not OS keyboard or physical-driver coverage. |
 | `screenshot` | `path`, `eye=0|1`, native framebuffer by default. Runtime supports presentation/UI capture through existing capture options. |
 | `viewport_state` | Runtime: active provider, current width/height and maximum width. Optional `window_width`, `window_height` supply per-eye output dimensions for headless adaptive tests; SDL updates these from its live window. |
 | `source_dump` | Runtime: `path`, `eye=0|1`; `VBSRC001` source records at native extent. `presented=1` returns the current viewport's attribution; read width/height from the header. |
@@ -58,6 +65,9 @@ supports frame control and inspection; instruction stepping/breakpoints belong
 to the recomp runtime. No guest state is copied between the two.
 
 See [PARITY.md](docs/PARITY.md) for the validation workflow.
+
+See [LOCAL_STATE.md](docs/LOCAL_STATE.md) for lifecycle controls and snapshot
+coverage. These local operations do not implement or qualify netplay.
 
 For a registered [viewport provider](docs/VIEWPORT.md), `screenshot presented=1`
 captures the composed, variable-width output. `viewport_raw=1` replays captured

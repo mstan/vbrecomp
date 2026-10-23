@@ -9,6 +9,7 @@
  * vb_stub_abort(). No silent zero-reads, no silent dropped writes.
  */
 #include "memory.h"
+#include "savestate.h"
 #include "rom_patch.h"
 
 #include <stdio.h>
@@ -404,3 +405,21 @@ void vb_write16(uint32_t addr,uint16_t value) { bus_begin(addr,1);raw_write16(ad
 
 uint32_t vb_read32(uint32_t addr) { bus_begin(addr,0);uint32_t result=raw_read32(addr);bus_end(addr);return result; }
 void vb_write32(uint32_t addr,uint32_t value) { bus_begin(addr,1);raw_write32(addr,value);bus_end(addr); }
+
+/* Execution state only: host pointers and diagnostic history stay local. */
+void vb_memory_state_visit(VbStateVisit visit, void* context) {
+    visit(context, &s_cart_ram, sizeof(s_cart_ram));
+    visit(context, &s_wram, sizeof(s_wram));
+    visit(context, &s_misc_wcr, sizeof(s_misc_wcr));
+    visit(context, &s_timer_cycle, sizeof(s_timer_cycle));
+    visit(context, &s_vip_cycle, sizeof(s_vip_cycle));
+    visit(context, &s_vsu_cycle, sizeof(s_vsu_cycle));
+    visit(context, &s_input_cycle, sizeof(s_input_cycle));
+}
+int vb_memory_state_valid(void) {
+    if(!s_bus_cpu)return 0;
+    const uint64_t clocks[]={s_timer_cycle,s_vip_cycle,s_vsu_cycle,s_input_cycle};
+    for(unsigned i=0;i<4;++i)
+        if(clocks[i]>s_bus_cpu->cycles || s_bus_cpu->cycles-clocks[i]>397888u)return 0;
+    return 1;
+}

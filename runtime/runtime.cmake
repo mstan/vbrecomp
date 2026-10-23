@@ -12,6 +12,9 @@
 #   )
 
 set(VB_RUNTIME_DIR "${CMAKE_CURRENT_LIST_DIR}")
+include("${VB_RUNTIME_DIR}/state.cmake")
+set_source_files_properties("${VB_RUNTIME_DIR}/src/savestate.cpp" PROPERTIES
+    COMPILE_DEFINITIONS "VB_STATE_BUILD_ID=\"$<TARGET_PROPERTY:VB_STATE_ID>:$<CONFIG>\"")
 
 function(vb_add_runtime_target TARGET)
     set(options NO_GAME_LINKED)
@@ -35,6 +38,9 @@ function(vb_add_runtime_target TARGET)
         ${VB_RUNTIME_DIR}/src/vb_sha256.c
         ${VB_RUNTIME_DIR}/src/vb_crc32.c
         ${VB_RUNTIME_DIR}/src/memory.c
+        ${VB_RUNTIME_DIR}/src/machine.c
+        ${VB_RUNTIME_DIR}/src/savestate.cpp
+        ${VB_RUNTIME_DIR}/src/state_ui.cpp
         ${VB_RUNTIME_DIR}/src/rom_patch.c
         ${VB_RUNTIME_DIR}/src/v810_interpreter.c
         ${VB_RUNTIME_DIR}/src/v810_extended.c
@@ -151,6 +157,17 @@ function(vb_add_runtime_target TARGET)
     endif()
 
     add_executable(${TARGET} ${_runtime_sources})
+    target_link_libraries(${TARGET} PRIVATE vb_snapshot_ring)
+    set(_state_identity "${VB_STATE_FRAMEWORK_ID}")
+    foreach(_generated IN LISTS _body_sources _dispatch _header VB_GENERATED_SOURCES)
+        if(EXISTS "${_generated}")
+            file(SHA256 "${_generated}" _hash)
+            set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_generated}")
+            string(APPEND _state_identity ";${_hash}")
+        endif()
+    endforeach()
+    string(SHA256 _state_identity "${_state_identity}")
+    set_property(TARGET ${TARGET} PROPERTY VB_STATE_ID "${_state_identity}")
 
     target_include_directories(${TARGET} PRIVATE
         ${VB_RUNTIME_DIR}/include
@@ -187,7 +204,7 @@ function(vb_add_runtime_target TARGET)
     # stack on a freeze (StackWalk64 / SymFromAddr). Game-controller support is
     # cross-platform via SDL_GameController (see main.cpp), so no XInput link.
     if(WIN32)
-        target_link_libraries(${TARGET} PRIVATE ws2_32 dbghelp)
+        target_link_libraries(${TARGET} PRIVATE ws2_32 dbghelp shell32)
         # When building with MinGW (the project's primary toolchain),
         # statically link the gcc/stdc++/winpthread runtimes so the
         # release zip ships just vb-runtime.exe + SDL2.dll without

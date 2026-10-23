@@ -82,6 +82,15 @@ Pass `--rom <cartridge>` to execute entirely through the interpreter; the TCP
 server supports runtime development without generated game code. Game hosts
 link generated dispatch and use hybrid execution by default.
 
+Initialize shared dependencies with `git submodule update --init --recursive`.
+Local execution snapshots use rbengine's standalone snapshot ring. F7 opens
+the twelve-slot thumbnail browser; F8 opens the rewind filmstrip. F5/F6 quick
+save/load `--state-file PATH`. Interactive rewind defaults to 32 snapshots
+every six frames and can be configured in Settings.
+Snapshots are specific to the current build. See [local state](docs/LOCAL_STATE.md)
+for state coverage, native-save protection and deterministic replay. Netplay is
+not implemented.
+
 ## Build with a game
 
 See the consuming per-game repo's README, e.g.

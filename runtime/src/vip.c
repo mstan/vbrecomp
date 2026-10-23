@@ -1,3 +1,4 @@
+#include "savestate.h"
 /* vip.c — Virtual Image Processor.
  *
  * The VIP exposes its character RAM, BG cell maps, OBJ tables, world
@@ -80,7 +81,7 @@ static uint8_t s_jplt_cache[4][4];
  * "on-time" fraction of MaxTime=128, scaled to 0..255. Used by the
  * screenshot path to convert 2bpp pixels → grayscale ARGB. */
 static int32_t s_brt_cache[4];
-static uint8_t s_brt_repeat;   /* per-frame "Repeat" — set from CT data */
+static uint8_t s_brt_repeat;   /* live column-machine Repeat from CT data */
 
 /* Beetle's MakeColorLUT (vip.c:108-144) applies a 1/2.2 gamma curve
  * when mapping the BrightnessCache scalar (0..255) into the host
@@ -114,12 +115,12 @@ static void recalc_jplt_cache(int which) {
 /* Port of Beetle RecalcBrightnessCache (vip.c:172-223). Computes
  * the time-integral of each brightness phase across the BRT cycle,
  * scaled to 0..255. */
-static void recalc_brt_cache(void) {
+static void calculate_brt_cache(uint8_t repeat, int32_t cache[4]) {
     int32_t cumulative = (int32_t)s_brta + 1 + (int32_t)s_brtb + 1
                        + (int32_t)s_brtc + 1 + (int32_t)s_rest + 1 + 1;
     const int32_t max_time = 128;
     int32_t b[4] = { 0, 0, 0, 0 };
-    for (int i = 0; i < s_brt_repeat + 1; ++i) {
+    for (int i = 0; i < repeat + 1; ++i) {
         if (i * cumulative >= max_time) break;
         int32_t b1 = i * cumulative + (int32_t)s_brta;
         if (b1 > max_time) b1 = max_time;
@@ -141,9 +142,39 @@ static void recalc_brt_cache(void) {
         b[2] += b2;
         b[3] += b3;
     }
-    s_brt_cache[0] = 0;
+    cache[0] = 0;
     for (int i = 1; i < 4; ++i)
-        s_brt_cache[i] = 255 * b[i] / max_time;
+        cache[i] = 255 * b[i] / max_time;
+}
+
+static void recalc_brt_cache(void) {
+    calculate_brt_cache(s_brt_repeat, s_brt_cache);
+}
+
+/* The presentation snapshot samples each eye's CT groups independently.
+ * The live cache contains only the last scanned column's Repeat, which is
+ * insufficient for cartridges with varying column brightness (Wario Land).
+ * Keep presentation reads separate from the emulated scan machine state. */
+static void framebuffer_column_colors(int eye, uint8_t colors[96][4]) {
+    for (unsigned group = 0; group < 96; ++group) {
+        unsigned ct = 0x3dffeu - group * 2 - (eye ? 0u : 0x200u);
+        int32_t brightness[4];
+        calculate_brt_cache(s_vip_mem[ct + 1], brightness);
+        for (unsigned level = 0; level < 4; ++level) {
+            int value = brightness[level];
+            if (value < 0) value = 0;
+            if (value > 255) value = 255;
+            colors[group][level] = s_color_lut[value];
+        }
+    }
+}
+
+void vb_vip_column_argb(int eye, uint32_t colors[96][4]) {
+    uint8_t red[96][4];
+    framebuffer_column_colors(eye, red);
+    for (unsigned group = 0; group < 96; ++group)
+        for (unsigned level = 0; level < 4; ++level)
+            colors[group][level] = 0xff000000u | ((uint32_t)red[group][level] << 16);
 }
 
 /* Column-machine state (Beetle equivalents in parentheses). */
@@ -1436,6 +1467,8 @@ static void vip_resolve_overrides(void) {
  * natural (x, y) order and unpack on the fly. */
 void vb_vip_render_framebuffer(int eye, uint32_t* argb_out) {
     if (!argb_out) return;
+    uint8_t colors[96][4];
+    framebuffer_column_colors(eye, colors);
     uint32_t base;
     if (eye == 0) {
         base = s_display_fb ? 0x8000u  : 0x0000u;   /* L */
@@ -1451,13 +1484,10 @@ void vb_vip_render_framebuffer(int eye, uint32_t* argb_out) {
         for (int x = 0; x < 384; x++) {
             uint8_t b = fb[x * 64 + byte_off];
             uint32_t v = (b >> bit_shift) & 3u;
-            int32_t bv = s_brt_cache[v];
-            if (bv < 0) bv = 0;
-            if (bv > 255) bv = 255;
             /* Beetle MakeColorLUT (vip.c:108-144) applies a 1/2.2
              * gamma curve before emitting the host pixel. Skipping it
              * gives BrightnessCache[3]=199 → R=0xC7 instead of 0xE3. */
-            uint32_t r = s_color_lut[bv];
+            uint32_t r = colors[x >> 2][v];
             /* Virtual Boy LEDs are red-only; G=B=0 to match what the
              * real hardware emits (and what the Beetle oracle outputs
              * via libretro's XRGB8888 framebuffer).
@@ -1483,6 +1513,8 @@ void vb_vip_render_framebuffer(int eye, uint32_t* argb_out) {
  * byte-identical / oracle-safe. */
 void vb_vip_render_framebuffer_recolored(int eye, uint32_t* argb_out) {
     if (!argb_out) return;
+    uint8_t colors[96][4];
+    framebuffer_column_colors(eye, colors);
     uint32_t base = (eye == 0) ? (s_display_fb ? 0x8000u  : 0x0000u)
                                : (s_display_fb ? 0x18000u : 0x10000u);
     const uint8_t*  fb   = &s_vip_mem[base];
@@ -1539,10 +1571,7 @@ void vb_vip_render_framebuffer_recolored(int eye, uint32_t* argb_out) {
                                        (int)v, &out)) {
                 argb_out[y * 384 + x] = out;
             } else {
-                int32_t bv = s_brt_cache[v];
-                if (bv < 0) bv = 0;
-                if (bv > 255) bv = 255;
-                argb_out[y * 384 + x] = vb_red_lut_map((int)s_color_lut[bv]);
+                argb_out[y * 384 + x] = vb_red_lut_map(colors[x >> 2][v]);
             }
         }
     }
@@ -1709,3 +1738,69 @@ unsigned vb_vip_snapshot(uint32_t* out) {
     return n;
 }
 #endif
+
+/* Execution state only: host pointers and diagnostic history stay local. */
+void vb_vip_state_visit(VbStateVisit visit, void* context) {
+    visit(context, &s_vip_mem, sizeof(s_vip_mem));
+    visit(context, &s_intpnd, sizeof(s_intpnd));
+    visit(context, &s_intenb, sizeof(s_intenb));
+    visit(context, &s_dpctrl, sizeof(s_dpctrl));
+    visit(context, &s_xpctrl, sizeof(s_xpctrl));
+    visit(context, &s_sbcmp, sizeof(s_sbcmp));
+    visit(context, &s_frmcyc, sizeof(s_frmcyc));
+    visit(context, &s_bkcol, sizeof(s_bkcol));
+    visit(context, &s_brta, sizeof(s_brta));
+    visit(context, &s_brtb, sizeof(s_brtb));
+    visit(context, &s_brtc, sizeof(s_brtc));
+    visit(context, &s_rest, sizeof(s_rest));
+    visit(context, &s_spt, sizeof(s_spt));
+    visit(context, &s_gplt, sizeof(s_gplt));
+    visit(context, &s_jplt, sizeof(s_jplt));
+    visit(context, &s_gplt_cache, sizeof(s_gplt_cache));
+    visit(context, &s_jplt_cache, sizeof(s_jplt_cache));
+    visit(context, &s_brt_cache, sizeof(s_brt_cache));
+    visit(context, &s_brt_repeat, sizeof(s_brt_repeat));
+    visit(context, &s_column, sizeof(s_column));
+    visit(context, &s_column_counter, sizeof(s_column_counter));
+    visit(context, &s_display_region, sizeof(s_display_region));
+    visit(context, &s_display_active, sizeof(s_display_active));
+    visit(context, &s_display_fb, sizeof(s_display_fb));
+    visit(context, &s_game_frame_counter, sizeof(s_game_frame_counter));
+    visit(context, &s_drawing_counter, sizeof(s_drawing_counter));
+    visit(context, &s_drawing_active, sizeof(s_drawing_active));
+    visit(context, &s_drawing_fb, sizeof(s_drawing_fb));
+    visit(context, &s_drawing_block, sizeof(s_drawing_block));
+    visit(context, &s_sb_latch, sizeof(s_sb_latch));
+    visit(context, &s_sbout_inactive_time, sizeof(s_sbout_inactive_time));
+    visit(context, &s_update_span, sizeof(s_update_span));
+    visit(context, &s_vip_cycles, sizeof(s_vip_cycles));
+    visit(context, &s_vip_frame_seq, sizeof(s_vip_frame_seq));
+}
+void vb_vip_presentation_visit(VbStateVisit visit, void* context) {
+    if (s_attr_on) visit(context, s_attr_fb, sizeof(s_attr_fb));
+    if (vb_renderer_tracks_texels()) visit(context, s_source_fb, sizeof(s_source_fb));
+    visit(context, s_obj_suppress, sizeof(s_obj_suppress));
+}
+int vb_vip_state_valid(void) {
+    if (s_column < 0 || s_column >= 384 || s_column_counter < 1 || s_column_counter > 259
+        || s_display_region < 0 || s_display_region > 3
+        || (unsigned)s_display_fb > 1 || (unsigned)s_drawing_fb > 1
+        || (unsigned)s_display_active > 1 || (unsigned)s_drawing_active > 1
+        || s_drawing_block < 0 || s_drawing_block > 28
+        || s_drawing_counter < 0 || s_drawing_counter > 4480
+        || (s_drawing_counter && s_drawing_block >= 28)) return 0;
+    for (unsigned i=0;i<4;++i) {
+        if (s_spt[i]>1023) return 0;
+        for (unsigned v=0;v<4;++v)
+            if (s_gplt_cache[i][v]>3 || s_jplt_cache[i][v]>3) return 0;
+    }
+    return 1;
+}
+void vb_vip_state_loaded(void) {
+    /* Discard observation history from the abandoned future, retaining all
+     * emulated scan state and captured presentation inputs. */
+    s_wring_head=s_wring_count=s_aring_head=s_aring_count=0;
+    s_wring_last_seq=s_aring_last_mask=0xffffffffu;s_prev_active_mask=0;
+    vb_vip_phase_reset();vb_wram_hash_reset();
+    memset(s_source_hashed,0,sizeof(s_source_hashed));
+}

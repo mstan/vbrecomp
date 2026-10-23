@@ -1,3 +1,4 @@
+#include "savestate.h"
 /* timer.c — 20-bit programmable down-counter.
  *
  * Behavioural oracle: Beetle VB
@@ -192,3 +193,18 @@ unsigned vb_timer_snapshot(uint32_t* out) {
     return n;
 }
 #endif
+
+/* Execution state only: host pointers and diagnostic history stay local. */
+void vb_timer_state_visit(VbStateVisit visit, void* context) {
+    visit(context, &s_tcr, sizeof(s_tcr));
+    visit(context, &s_reload, sizeof(s_reload));
+    visit(context, &s_counter, sizeof(s_counter));
+    visit(context, &s_divider, sizeof(s_divider));
+    visit(context, &s_zstat, sizeof(s_zstat));
+    visit(context, &s_zstat_shadow, sizeof(s_zstat_shadow));
+    visit(context, &s_reload_pending, sizeof(s_reload_pending));
+}
+int vb_timer_state_valid(void) {
+    return s_divider > 0 && s_divider <= 2000 && s_zstat <= 1
+        && s_zstat_shadow <= 1 && s_reload_pending <= 1;
+}

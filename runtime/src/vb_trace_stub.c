@@ -22,6 +22,7 @@
 void vb_debug_server_set_host_capture(VbDebugHostCapture capture, void* context) {
     (void)capture; (void)context;
 }
+void vb_debug_server_set_host_input(VbDebugHostInput input,void* context) {(void)input;(void)context;}
 
 /* ---- write-trace ring (wtrace.h) ---- */
 void   vb_wtrace_init(void) {}

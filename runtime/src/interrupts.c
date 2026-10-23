@@ -1,3 +1,4 @@
+#include "savestate.h"
 /* interrupts.c — VBIRQ controller + V810 exception entry.
  *
  * Cross-checked against:
@@ -192,4 +193,14 @@ void vb_cpu_reset(CPUState* cpu) {
     cpu->write8 = w8;
     cpu->write16 = w16;
     cpu->write32 = w32;
+}
+
+/* Execution state only: host pointers and diagnostic history stay local. */
+void vb_irq_state_visit(VbStateVisit visit, void* context) {
+    visit(context, &s_pending, sizeof(s_pending));
+    visit(context, &s_in_service, sizeof(s_in_service));
+}
+int vb_irq_state_valid(void) {
+    const uint32_t mask=(1u<<VBIRQ_SOURCE_COUNT)-1u;
+    return !(s_pending&~mask) && !(s_in_service&~mask);
 }

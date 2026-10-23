@@ -26,7 +26,11 @@ UNREACHABLE(vb_recolor_active)
 UNREACHABLE(vb_recolor_init)
 UNREACHABLE(vb_recolor_select_scene)
 UNREACHABLE(vb_recolor_world_pixel)
-uint32_t vb_red_lut_map(int value) { return 0xff000000u | ((uint32_t)value << 16); }
+int vb_test_red_warm;
+uint32_t vb_red_lut_map(int value) {
+    unsigned r=(unsigned)value;
+    return 0xff000000u | (r<<16) | (vb_test_red_warm ? ((r*r)/(255u*10u))<<8 : 0);
+}
 UNREACHABLE(vb_vip_phase_record)
 UNREACHABLE(vb_vip_phase_reset)
 UNREACHABLE(vb_wram_hash_record)

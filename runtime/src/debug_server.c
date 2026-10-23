@@ -11,6 +11,8 @@
  * time; non-blocking accept polled from the main loop.
  */
 #include "debug_server.h"
+#include "savestate.h"
+#include "state_ui.h"
 #include "v810_interpreter.h"
 
 #include <stdarg.h>
@@ -343,6 +345,11 @@ static void handle_timer_state(long long id) {
 }
 
 static VbDebugHostCapture s_host_capture;
+static VbDebugHostInput s_host_input;
+static void* s_host_input_context;
+void vb_debug_server_set_host_input(VbDebugHostInput input,void* context) {
+    s_host_input=input;s_host_input_context=context;
+}
 static void source_put16(uint8_t* p, uint16_t v) { p[0]=(uint8_t)v; p[1]=(uint8_t)(v>>8); }
 static void source_put32(uint8_t* p, uint32_t v) { source_put16(p,(uint16_t)v); source_put16(p+2,(uint16_t)(v>>16)); }
 static void handle_source_dump(const char* line) {
@@ -1078,7 +1085,7 @@ static void handle_wram_hash(long long id, const char* line) {
 static void handle_memory_map(long long id) {
     char buf[512];
     snprintf(buf, sizeof(buf),
-        "{\"ok\":true,\"cmd\":\"memory_map\",\"id\":%lld,\"rom_size\":%u,"
+        "{\"ok\":true,\"cmd\":\"memory_map\",\"load_state\",\"save_state\",\"state_digest\",\"reset\",\"replay_frames\",\"rewind_enable\",\"rewind\",\"id\":%lld,\"rom_size\":%u,"
         "\"regions\":["
             "{\"name\":\"VIP\",\"base\":\"0x00000000\",\"size\":\"0x01000000\"},"
             "{\"name\":\"VSU\",\"base\":\"0x01000000\",\"size\":\"0x01000000\"},"
@@ -1371,6 +1378,19 @@ static void dispatch_line(char* line) {
 
     if (strcmp(cmd, "device_state") == 0) { char body[16384]; vb_device_response(body,sizeof(body)); send_response(body); }
     else if (strcmp(cmd, "capabilities") == 0) { send_response("{\"ok\":true,\"protocol\":2,\"commands\":[\"device_state\",\"audio_pcm\",\"audio_shadow_state\",\"breakpoint\",\"capabilities\",\"capture_dump\",\"clear_input\",\"continue\",\"cpuhook\",\"execution_stats\",\"fallback_coverage\",\"branch_rules\",\"set_gpr\",\"pc_set\",\"fntrace_dump\",\"fntrace_reset\",\"fntrace_stats\",\"frame\",\"get_frame\",\"get_registers\",\"history\",\"irq_force\",\"irq_state\",\"memory_map\",\"overrides_state\",\"pad_state\",\"pause\",\"ping\",\"press\",\"psw_set\",\"psw_state\",\"quit\",\"read_ram\",\"recolor_reload\",\"recolor_state\",\"recolor_trace\",\"run_frames\",\"screenshot\",\"set_input\",\"source_dump\",\"step\",\"timer_state\",\"viewport_state\",\"vip_phase\",\"vip_state\",\"watchdog\",\"world_map\",\"world_trace\",\"wram_anchors\",\"wram_hash\",\"write_ram\",\"wtrace_dump\",\"wtrace_reset\",\"wtrace_stats\"],\"max_read_bytes\":65536,\"instruction_control\":true,\"trace_version\":2}"); }
+    else if (strcmp(cmd,"state_ui") == 0) {
+        char body[256];snprintf(body,sizeof(body),"{\"ok\":true,\"mode\":%d,\"slot\":%d,\"result\":%d,\"count\":%u,\"selected_frame\":%u,\"snapshots\":%u}",
+            vb_state_ui_mode(),vb_state_ui_slot(),vb_state_ui_result(),vb_state_ui_history_count(),vb_state_ui_selected_frame(),vb_rewind_count());send_response(body);
+    }
+    else if (strcmp(cmd,"host_input") == 0) {
+        long long device=-1,value=-1,pressed=1,repeat=0;
+        extract_int(line,"\"device\"",&device);extract_int(line,"\"value\"",&value);
+        extract_int(line,"\"pressed\"",&pressed);extract_int(line,"\"repeat\"",&repeat);
+        if(!s_host_input || device<0 || device>1 || value<0 || value>(device?20:511) || pressed<0 || pressed>1 || repeat<0 || repeat>1
+           || !s_host_input((int)device,(int)value,(int)pressed,(int)repeat,s_host_input_context))
+            send_response("{\"ok\":false,\"error\":\"invalid or unavailable SDL host input\"}");
+        else send_response("{\"ok\":true}");
+    }
     else if (strcmp(cmd, "ping") == 0)         handle_ping(id);
     else if (strcmp(cmd, "step") == 0) {
         long long count=1;extract_int(line,"\"count\"",&count);
@@ -1454,8 +1474,8 @@ static void dispatch_line(char* line) {
         long long addr=-1, value=-1;
         extract_int(line,"\"addr\"",&addr); extract_int(line,"\"val\"",&value);
         unsigned region=((uint32_t)addr>>24)&7;
-        if (!vb_debug_server_is_paused() || addr<0 || addr>UINT32_MAX || value<0 || value>255 || (region!=5 && region!=6)) {
-            send_response("{\"ok\":false,\"error\":\"write_ram needs paused CPU, WRAM/SRAM address and byte val\"}");
+        if (!vb_debug_server_is_paused() || addr<0 || addr>UINT32_MAX || value<0 || value>255 || (region!=0 && region!=5 && region!=6)) {
+            send_response("{\"ok\":false,\"error\":\"write_ram needs paused CPU, VIP/WRAM/SRAM address and byte val\"}");
         } else {
             vb_write8((uint32_t)addr,(uint8_t)value);
             char result[128];snprintf(result,sizeof(result),"{\"ok\":true,\"id\":%lld}",id);send_response(result);
@@ -1525,6 +1545,41 @@ static void dispatch_line(char* line) {
             snprintf(result, sizeof(result), "{\"ok\":true,\"id\":%lld,\"target\":%u}", id, s_step_target);
             send_response(result);
         }
+    }
+    else if (strcmp(cmd, "save_state") == 0 || strcmp(cmd, "load_state") == 0) {
+        char path[2048] = {0};
+        if (!s_paused || !extract_str(line,"\"path\"",path,sizeof(path))) {
+            send_response("{\"ok\":false,\"error\":\"Pause and supply a snapshot path\"}");
+        } else {
+            int ok = strcmp(cmd,"save_state")==0 ? vb_state_save_file(path) : vb_state_load_file(path);
+            char result[512];
+            snprintf(result,sizeof(result),"{\"ok\":%s,\"frame\":%u,\"error\":\"%s\"}",
+                ok?"true":"false",s_cpu->frame,vb_state_error());
+            send_response(result);
+        }
+    }
+    else if (strcmp(cmd,"state_digest")==0) {
+        char result[160];snprintf(result,sizeof(result),"{\"ok\":true,\"digest\":%u,\"generation\":%llu}",
+            vb_state_digest(),(unsigned long long)vb_state_generation());send_response(result);
+    }
+    else if (strcmp(cmd,"reset")==0) {
+        int ok=s_paused && vb_state_reset();
+        send_response(ok?"{\"ok\":true,\"frame\":0}":"{\"ok\":false,\"error\":\"Pause before reset\"}");
+    }
+    else if (strcmp(cmd,"replay_frames")==0) {
+        long long count=0;extract_int(line,"\"frames\"",&count);
+        int ok=s_paused && count>0 && count<=10000 && vb_state_replay_frames((unsigned)count);
+        char result[192];snprintf(result,sizeof(result),"{\"ok\":%s,\"frame\":%u,\"error\":\"%s\"}",
+            ok?"true":"false",s_cpu->frame,vb_state_error());send_response(result);
+    }
+    else if (strcmp(cmd,"rewind_enable")==0 || strcmp(cmd,"rewind")==0) {
+        long long tick=0;extract_int(line,"\"value\"",&tick);
+        int ok=s_paused && tick>=0 && tick<=UINT32_MAX;
+        if(ok) ok=strcmp(cmd,"rewind_enable")==0
+            ? (vb_rewind_enable((unsigned)tick) && vb_rewind_record(s_cpu->frame))
+            : vb_rewind_to((uint32_t)tick);
+        char result[160];snprintf(result,sizeof(result),"{\"ok\":%s,\"frame\":%u,\"snapshots\":%u}",
+            ok?"true":"false",s_cpu->frame,vb_rewind_count());send_response(result);
     }
     else if (strcmp(cmd, "pause") == 0)        handle_pause(id, 1);
     else if (strcmp(cmd, "continue") == 0)     handle_pause(id, 0);

@@ -4,6 +4,8 @@
  * © Jrickey, MIT OR Apache-2.0. VSU float re-render original to this project.
  */
 #include "vsu_shadow.h"
+#include "savestate.h"
+#include <math.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -28,6 +30,31 @@ static uint64_t         s_degrade_count;
 static float            s_last_r;
 static float            s_last_ratio;
 static float            s_last_gain = 1.0f;
+
+void vb_vsu_shadow_state_visit(VbStateVisit visit, void* context) {
+    visit(context,&s_verifier,sizeof(s_verifier));
+    visit(context,&s_verifier_inited,sizeof(s_verifier_inited));
+    visit(context,&s_was_substituting,sizeof(s_was_substituting));
+    visit(context,&s_samples_seen,sizeof(s_samples_seen));
+    visit(context,&s_engage_count,sizeof(s_engage_count));
+    visit(context,&s_degrade_count,sizeof(s_degrade_count));
+    visit(context,&s_last_r,sizeof(s_last_r));
+    visit(context,&s_last_ratio,sizeof(s_last_ratio));
+    visit(context,&s_last_gain,sizeof(s_last_gain));
+}
+int vb_vsu_shadow_state_valid(void) {
+    const void* flags[]={&s_verifier_inited,&s_was_substituting,&s_verifier.calibrated,
+                         &s_verifier.proven,&s_verifier.fail_structural};
+    for(unsigned i=0;i<sizeof(flags)/sizeof(flags[0]);++i)
+        if(*(const unsigned char*)flags[i]>1)return 0;
+    for(unsigned i=0;i<SHADOW_WINDOW;++i)for(unsigned lr=0;lr<2;++lr)
+        if(!isfinite(s_verifier.check.ex[i][lr]) || !isfinite(s_verifier.check.ey[i][lr]))return 0;
+    for(unsigned lr=0;lr<2;++lr)
+        if(!isfinite(s_verifier.check.lp_x[lr]) || !isfinite(s_verifier.check.lp_y[lr]))return 0;
+    return s_verifier.check.count<SHADOW_WINDOW && s_verifier.check.phase<SHADOW_DECIM
+        && s_verifier.ratio_n<=6 && s_verifier.prove_need<=16
+        && isfinite(s_verifier.gain) && isfinite(s_last_gain);
+}
 
 static void shadow_push_event(int kind, float r, float ratio, float gain,
                               const char* reason) {

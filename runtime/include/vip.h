@@ -77,11 +77,9 @@ void     vb_vip_write32(uint32_t addr, uint32_t v);
  *
  *   eye = 0 → left, eye = 1 → right.
  *
- * The 2bpp framebuffer pixels are mapped through the BRT brightness
- * cache (Beetle vip.c:172-223 RecalcBrightnessCache) to 0..255 grey,
- * then expanded to white-on-black ARGB. This matches Beetle's default
- * (white) color setting; the red-LED color of the real hardware can
- * be layered as a P5 cosmetic flag. */
+ * The 2bpp framebuffer pixels use BRTA/BRTB/BRTC/REST with the selected
+ * eye's four-column CT repeat groups, then the LED gamma mapping to
+ * red-on-black ARGB. Presentation does not change live scan state. */
 void vb_vip_render_framebuffer(int eye, uint32_t* argb_out);
 
 /* Opt-in present-time full-screen recolor (experiment): same as
@@ -96,6 +94,9 @@ void vb_vip_render_framebuffer_recolored(int eye, uint32_t* argb_out);
 int32_t vb_vip_brightness(int v);
 /* Same current LED/gamma mapping used by the native framebuffer presenter. */
 uint32_t vb_vip_level_argb(unsigned level);
+/* Presentation palettes for the selected eye's 96 four-column CT groups.
+ * Does not mutate the live brightness/scan cache. */
+void vb_vip_column_argb(int eye, uint32_t colors[96][4]);
 
 /* Debug introspection (TCP vip_state command). */
 const uint8_t* vb_vip_shadow(void);
