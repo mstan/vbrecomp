@@ -54,6 +54,10 @@ int vb_mod_runtime_initialize_c(const char* root,
                                   const char* rom_sha256);
 int vb_mod_runtime_commit_c(const char* rom_path);
 void vb_mod_runtime_activate_plugins_c(void);
+/* Fixed at a successful commit. Hashes enabled features/options and exact
+ * package/resource contents, excluding host paths and timestamps. Failed
+ * staged plans keep the previous identity. No polling during a match. */
+void vb_mod_runtime_identity_c(uint8_t out[32]);
 const struct RecompLauncherCModProvider*
 vb_mod_runtime_launcher_provider_c(void);
 const char* vb_mod_runtime_last_error_c(void);

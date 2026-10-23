@@ -6,6 +6,7 @@
 #include "viewport.h"
 #include "vb_crc32.h"
 #include "vb_sha256.h"
+#include "mod_runtime.h"
 #include "retcomm_rbengine/snap_ring.h"
 #include <cstring>
 #include <cstdio>
@@ -95,6 +96,7 @@ void build_hash(uint8_t out[32]) {
 }
 void feature_hash(uint8_t out[32]) {
     std::vector<uint8_t> manifest;
+    uint8_t mods[32];vb_mod_runtime_identity_c(mods);manifest.insert(manifest.end(),mods,mods+32);
     const char* ids[]={vb_renderer_id(),vb_viewport_id()};
     for(const char* id:ids) {
         const size_t n=std::strlen(id)+1;
