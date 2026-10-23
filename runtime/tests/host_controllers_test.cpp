@@ -11,6 +11,10 @@ int main() {
         const int index=SDL_JoystickAttachVirtual(SDL_JOYSTICK_TYPE_GAMECONTROLLER,6,15,0);
         assert(index>=0 && SDL_IsGameController(index));virtuals[i]=SDL_JoystickOpen(index);assert(virtuals[i]);
     }
+    // Keep real devices connected to the owner's machine out of this fixture.
+    // Identical virtual GUIDs still exercise independent instance assignment.
+    char guid[40]{};SDL_JoystickGetGUIDString(SDL_JoystickGetGUID(virtuals[0]),guid,sizeof(guid));
+    for(unsigned i=0;i<4;++i)vb_host_player(i).gamepad_guid=guid;
     VbHostControllers controllers;controllers.refresh();
     // A keyboard player cannot consume the controller needed by player two.
     assert(!controllers.pads[0]);
@@ -24,7 +28,10 @@ int main() {
     assert(ids.size()==4);SDL_JoystickUpdate();SDL_GameControllerUpdate();
     for(unsigned i=0;i<4;++i)assert(bool(controllers.read(i)&VB_PAD_RT)==(i==2));
     const auto removed=SDL_JoystickInstanceID(virtuals[1]);
-    SDL_JoystickClose(virtuals[1]);virtuals[1]=nullptr;assert(SDL_JoystickDetachVirtual(1)==0);
+    SDL_JoystickClose(virtuals[1]);virtuals[1]=nullptr;
+    int removed_index=-1;
+    for(int i=0;i<SDL_NumJoysticks();++i)if(SDL_JoystickGetDeviceInstanceID(i)==removed)removed_index=i;
+    assert(removed_index>=0 && SDL_JoystickDetachVirtual(removed_index)==0);
     controllers.removed(removed);assert(!controllers.pads[1] && controllers.read(1)==0);
     assert(controllers.pads[0] && controllers.pads[2] && controllers.pads[3]);
     const int replacement=SDL_JoystickAttachVirtual(SDL_JOYSTICK_TYPE_GAMECONTROLLER,6,15,0);assert(replacement>=0);
