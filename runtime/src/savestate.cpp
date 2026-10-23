@@ -39,11 +39,25 @@ RbeSnapRing* rewind_ring;
 struct Extension { char id[96]; void* bytes; size_t size; };
 Extension extensions[16];
 unsigned extension_count;
+struct SimulationExtension {
+    Extension span;
+    VbStateValidate validate;
+    VbStateLoaded loaded;
+    void* context;
+};
+SimulationExtension simulation_extensions[16];
+unsigned simulation_extension_count;
 uint8_t* reset_blob;
 size_t reset_size;
 const char* error = "";
 constexpr size_t header_size = 112, max_size = 64u * 1024u * 1024u;
-struct Stream { uint8_t* out; const uint8_t* in; size_t offset; };
+struct Stream {
+    uint8_t* out;
+    const uint8_t* in;
+    size_t offset;
+    const uint8_t* inspect = nullptr;
+    bool valid = true;
+};
 void field(void* ctx, void* bytes, size_t size) {
     auto& s = *static_cast<Stream*>(ctx);
     if (s.out) {
@@ -59,6 +73,11 @@ void visit(Stream& s, bool presentation) {
     vb_timer_state_visit(field, &s); vb_input_state_visit(field, &s);
     vb_vip_state_visit(field, &s); vb_vsu_state_visit(field, &s);
     vb_vsu_shadow_state_visit(field, &s);
+    for(unsigned i=0;i<simulation_extension_count;++i) {
+        const auto& e=simulation_extensions[i];
+        if(s.inspect && !e.validate(s.inspect+s.offset,e.span.size,e.context))s.valid=false;
+        field(&s,e.span.bytes,e.span.size);
+    }
     if (presentation) {
         vb_vip_presentation_visit(field, &s); vb_viewport_state_visit(field, &s);
         for(unsigned i=0;i<extension_count;++i)field(&s,extensions[i].bytes,extensions[i].size);
@@ -84,6 +103,14 @@ void feature_hash(uint8_t out[32]) {
         uint8_t n[8];put32(n,(uint32_t)e.size);put32(n+4,(uint32_t)((uint64_t)e.size>>32));
         manifest.insert(manifest.end(),n,n+8);
     }
+    for(unsigned i=0;i<simulation_extension_count;++i) {
+        const auto& e=simulation_extensions[i].span;
+        constexpr char kind[]="simulation";
+        manifest.insert(manifest.end(),kind,kind+sizeof(kind));
+        manifest.insert(manifest.end(),e.id,e.id+std::strlen(e.id)+1);
+        uint8_t n[8];put32(n,(uint32_t)e.size);put32(n+4,(uint32_t)((uint64_t)e.size>>32));
+        manifest.insert(manifest.end(),n,n+8);
+    }
     vb_sha256_compute(manifest.data(),manifest.size(),out);
 }
 bool valid() {
@@ -105,11 +132,27 @@ struct AudioGuard {
 };
 }
 extern "C" {
+static bool extension_id_available(const char* id) {
+    if(!id || !*id || std::strlen(id)>=96)return false;
+    for(unsigned i=0;i<extension_count;++i)if(!std::strcmp(id,extensions[i].id))return false;
+    for(unsigned i=0;i<simulation_extension_count;++i)
+        if(!std::strcmp(id,simulation_extensions[i].span.id))return false;
+    return true;
+}
 int vb_state_register_presentation(const char* id, void* bytes, size_t size) {
-    if(cpu || !id || !*id || std::strlen(id)>=96 || !bytes || !size
+    if(cpu || !extension_id_available(id) || !bytes || !size
        || size>1024u*1024u || extension_count>=16)return 0;
-    for(unsigned i=0;i<extension_count;++i)if(!std::strcmp(id,extensions[i].id))return 0;
     auto& e=extensions[extension_count++];std::strcpy(e.id,id);e.bytes=bytes;e.size=size;return 1;
+}
+int vb_state_register_simulation(const char* id, void* bytes, size_t size,
+                                 VbStateValidate validate, VbStateLoaded loaded,
+                                 void* context) {
+    if(cpu || !extension_id_available(id) || !bytes || !size || !validate
+       || size>1024u*1024u || simulation_extension_count>=16
+       || !validate(bytes,size,context))return 0;
+    auto& e=simulation_extensions[simulation_extension_count++];
+    std::strcpy(e.span.id,id);e.span.bytes=bytes;e.span.size=size;
+    e.validate=validate;e.loaded=loaded;e.context=context;return 1;
 }
 void vb_state_bind(CPUState* c, uint32_t* pc, uint64_t* cycles,
                    void (*lock)(void*), void (*unlock)(void*), void* audio) {
@@ -165,6 +208,8 @@ static int restore_impl(const uint8_t* data, size_t size, bool trusted, bool kee
     }
     Stream count{nullptr,nullptr,header_size};visit(count,true);
     if(count.offset!=size) {error="Snapshot layout does not match active features";return 0;}
+    Stream inspect{nullptr,nullptr,header_size,data};visit(inspect,true);
+    if(!inspect.valid) {error="Snapshot contains invalid game simulation state";return 0;}
     // Keep the original state until every range validator accepts the loaded
     // scalars. No guest instruction, device tick or output callback runs here.
     uint8_t* backup=nullptr;size_t backup_size=0;
@@ -177,6 +222,9 @@ static int restore_impl(const uint8_t* data, size_t size, bool trusted, bool kee
     }
     std::free(backup);vb_vsu_state_loaded();vb_vip_state_loaded();++generation;
     if(!keep_history)rbe_snap_ring_clear(rewind_ring);
+    for(unsigned i=0;i<simulation_extension_count;++i) {
+        const auto& e=simulation_extensions[i];if(e.loaded)e.loaded(e.context);
+    }
     error="";return 1;
 }
 int vb_state_restore(const uint8_t* data, size_t size) {

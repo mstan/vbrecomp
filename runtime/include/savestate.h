@@ -13,6 +13,17 @@ typedef void (*VbStateVisit)(void* context, void* bytes, size_t size);
  * the host binds. Version the ID when its layout/meaning changes. Immutable
  * configuration, assets and host pointers do not belong in this span. */
 int vb_state_register_presentation(const char* id, void* bytes, size_t size);
+/* Game-owned canonical simulation state. Included in files, rewind and the
+ * simulation digest. Register before bind; bytes must remain at a stable
+ * address and contain no pointers. validate checks a candidate without
+ * mutating live state. loaded invalidates/rebuilds host presentation caches
+ * after a successful whole-machine restore; it must not throw or change
+ * canonical state. Immutable assets and local device/view settings stay out. */
+typedef int (*VbStateValidate)(const void* candidate, size_t size, void* context);
+typedef void (*VbStateLoaded)(void* context);
+int vb_state_register_simulation(const char* id, void* bytes, size_t size,
+                                 VbStateValidate validate, VbStateLoaded loaded,
+                                 void* context);
 void vb_memory_state_visit(VbStateVisit visit, void* context);
 void vb_vip_state_visit(VbStateVisit visit, void* context);
 void vb_vip_presentation_visit(VbStateVisit visit, void* context);

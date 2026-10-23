@@ -101,4 +101,35 @@ if(BUILD_TESTING)
     add_test(NAME vb-mod-runtime COMMAND "${Python3_EXECUTABLE}"
         "${CMAKE_CURRENT_SOURCE_DIR}/runtime/tests/run_mod_test.py"
         "$<TARGET_FILE:vb-mod-runtime-test>" "${CMAKE_CURRENT_BINARY_DIR}")
+
+    # Exercise canonical extensions through the real memory/devices/serializer.
+    # Reuse the runtime's source inventory without its desktop/main/debug host.
+    get_target_property(_state_runtime_sources vb-runtime SOURCES)
+    set(_state_core_sources)
+    foreach(_source IN LISTS _state_runtime_sources)
+        string(FIND "${_source}" "${CMAKE_CURRENT_SOURCE_DIR}/runtime/src/" _core_prefix)
+        get_filename_component(_name "${_source}" NAME)
+        if(_core_prefix EQUAL 0 AND NOT _name MATCHES "^(main\\.cpp|host\\.cpp|debug_server\\.c|wtrace\\.c|fntrace\\.c|cpuhook\\.c|vb_trace_stub\\.c)$")
+            list(APPEND _state_core_sources "${_source}")
+        endif()
+    endforeach()
+    add_executable(vb-state-extension-test runtime/tests/state_extension_test.cpp
+        ${_state_core_sources} runtime/src/vb_trace_stub.c runtime/src/no_game_linked.c)
+    target_include_directories(vb-state-extension-test PRIVATE runtime/include lib/retcomm-rbengine/include)
+    target_sources(vb-state-extension-test PRIVATE lib/retcomm-rbengine/src/snap/rbe_snap_ring.c)
+    target_compile_features(vb-state-extension-test PRIVATE cxx_std_17)
+    set_target_properties(vb-state-extension-test PROPERTIES VB_STATE_ID "canonical-extension-test")
+    target_compile_definitions(vb-state-extension-test PRIVATE VB_STATE_BUILD_ID="canonical-extension-test:$<CONFIG>")
+    if(WIN32)
+        target_link_libraries(vb-state-extension-test PRIVATE dbghelp)
+    endif()
+    if(MSVC)
+        target_compile_options(vb-state-extension-test PRIVATE /UNDEBUG)
+    else()
+        target_compile_options(vb-state-extension-test PRIVATE -UNDEBUG)
+        target_link_libraries(vb-state-extension-test PRIVATE m)
+    endif()
+    add_test(NAME vb-state-extension COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/runtime/tests/run_state_extension_test.py"
+        "$<TARGET_FILE:vb-state-extension-test>" "${CMAKE_CURRENT_BINARY_DIR}")
 endif()
