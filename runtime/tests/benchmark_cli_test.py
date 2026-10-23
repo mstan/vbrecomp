@@ -17,6 +17,7 @@ for value in ("0", "-1", "1000001", "1garbage", ""):
 rejected(["--measure-runtime", "1", "--rom", "missing.vb", "--headless"], "cannot use --headless")
 rejected(["--headless", "--measure-runtime", "1", "--rom", "missing.vb"], "cannot use --headless")
 rejected(["--benchmark", "1", "--measure-runtime", "1"], "Only one finite")
+rejected(["--benchmark", "2", "--frames", "1", "--rom", "missing.vb"], "--frames cannot be combined")
 rejected(["--benchmark", "1"], "requires --rom")
 rejected(["--benchmark", "1", "--rom", "missing.vb", "--paused"], "cannot use --paused")
 with tempfile.TemporaryDirectory() as directory:

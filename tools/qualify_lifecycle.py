@@ -67,6 +67,24 @@ def main():
             r.client.run_frames(3)
             check('mid-frame restore preserves dispatch/device timing and stereo PCM',
                   not compare_snapshots(partial_end, snapshot(3, PLANES + ['audio'])))
+            edited = (args.out / 'edit-base.state').resolve()
+            r.client.command('save_state', path=edited.as_posix())
+            r.client.command('pc_set', pc=0xfffffff0)
+            r.client.run_frames(1)
+            edited_end = snapshot(4, PLANES)
+            r.client.command('load_state', path=edited.as_posix())
+            # Force PC editing and direct replay into the same socket batch,
+            # before the normal host loop can refresh its cached dispatch PC.
+            first_id = r.client.seq + 1
+            requests = [{'id': first_id, 'cmd': 'pc_set', 'pc': 0xfffffff0},
+                        {'id': first_id + 1, 'cmd': 'replay_frames', 'frames': 1}]
+            r.client.socket.sendall(''.join(json.dumps(q) + '\n' for q in requests).encode())
+            for request in requests:
+                reply = json.loads(r.client.file.readline())
+                check('coalesced ' + request['cmd'] + ' succeeds', reply.get('ok'))
+            r.client.seq += 2
+            check('direct replay honors debugger PC edits like main execution',
+                  not compare_snapshots(edited_end, snapshot(4, PLANES)))
             r.client.command('load_state', path=initial.as_posix())
             if args.route:
                 prefix, tail, cursor = [], [], 0

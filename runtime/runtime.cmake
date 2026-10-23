@@ -14,7 +14,7 @@
 set(VB_RUNTIME_DIR "${CMAKE_CURRENT_LIST_DIR}")
 include("${VB_RUNTIME_DIR}/state.cmake")
 set_source_files_properties("${VB_RUNTIME_DIR}/src/savestate.cpp" PROPERTIES
-    COMPILE_DEFINITIONS "VB_STATE_BUILD_ID=\"$<TARGET_PROPERTY:VB_STATE_ID>\"")
+    COMPILE_DEFINITIONS "VB_STATE_BUILD_ID=\"$<TARGET_PROPERTY:VB_STATE_ID>:$<CONFIG>\"")
 
 function(vb_add_runtime_target TARGET)
     set(options NO_GAME_LINKED)

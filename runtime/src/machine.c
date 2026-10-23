@@ -4,6 +4,9 @@
 #include "stub_abort.h"
 
 int vb_machine_step(CPUState* cpu, uint32_t* dispatch_pc, uint64_t frame_end) {
+    /* The debugger may have changed architectural PC while paused. Direct
+     * replay must honor the same edit as the normal host loop. */
+    *dispatch_pc=cpu->pc;
     if (vb_irq_check_and_deliver(cpu)) *dispatch_pc=cpu->pc;
     if (cpu->halted) {
         while(cpu->cycles<frame_end) {

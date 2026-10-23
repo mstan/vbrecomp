@@ -462,6 +462,9 @@ int main(int argc, char** argv) {
         }
     }
 
+    if (benchmark_frames && frame_limit) {
+        std::fputs("--frames cannot be combined with a finite measurement.\n", stderr); return 2;
+    }
     if (benchmark_frames && (start_paused || !rom_path)) {
         std::fputs("--benchmark requires --rom and cannot use --paused.\n", stderr); return 2;
     }
