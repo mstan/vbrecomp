@@ -19,8 +19,9 @@ void vb_netplay_configure_launcher(struct RecompLauncherCGameInfo*);
 int vb_netplay_apply_launch(const struct RecompLauncherCNetplayLaunch*);
 int vb_netplay_auto_requested(void);
 int vb_netplay_auto_launch(const char* config_path);
+void vb_netplay_resume_launcher(struct RecompLauncherCGameInfo*);
 int vb_netplay_start(CPUState*,uint32_t* dispatch_pc,uint64_t* frame_cycles);
-/* Main-thread only: pump once; 1 ran a live field, 0 held, -1 refused/left. */
+/* Main-thread only: 1 live field, 0 held, -1 refused/left, -2 agreed return. */
 int vb_netplay_poll(void);
 void vb_netplay_physical_input(uint16_t);
 void vb_netplay_override_input(uint16_t,int enabled);

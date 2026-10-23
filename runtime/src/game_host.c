@@ -29,6 +29,14 @@ int vb_game_host_initialize(CPUState* cpu) {
     initialized=1;
     return !host.initialize || host.initialize(cpu,host.context);
 }
+int vb_game_host_restart(CPUState* cpu) {
+    if(!initialized || !cpu)return 0;
+    vb_game_host_seal_inputs(0);vb_game_host_physical_inputs(0);
+    return host.restart?host.restart(cpu,host.context):!host.initialize;
+}
+int vb_game_host_lobby_return(uint32_t* tick) {
+    return tick && host.lobby_return && host.lobby_return(tick,host.context);
+}
 void vb_game_host_seal_inputs(const VbGameInputs* sealed) {
     explicit_inputs=sealed!=0;
     if(sealed)inputs=*sealed;else memset(&inputs,0,sizeof(inputs));

@@ -250,6 +250,9 @@ void vb_watchdog_start(void) {
 void vb_watchdog_stop(void) {
     if (!g_running.exchange(false)) return;
     if (g_thread.joinable()) g_thread.join();
+#ifdef _WIN32
+    if(s_main_thread){CloseHandle(s_main_thread);s_main_thread=nullptr;}
+#endif
 }
 
 void vb_watchdog_status(int* phase, uint32_t* pc, uint64_t* cycles,

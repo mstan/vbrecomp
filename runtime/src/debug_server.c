@@ -119,6 +119,7 @@ int vb_debug_server_start(int port, CPUState* cpu) {
     s_cpu = cpu;
     s_paused = 0;
     s_quit = 0;
+    s_step_target=0;s_input_override=0;vb_netplay_override_input(0,0);
 
 #if defined(_WIN32)
     if (!s_winsock_inited) {

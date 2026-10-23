@@ -9,6 +9,7 @@ extern "C" {
 typedef struct VbGameInputs {
     uint16_t buttons[VB_GAME_HOST_SEATS];
     uint16_t commands[VB_GAME_HOST_SEATS];
+    uint32_t network_tick; // sealed by the driver; also supplied during replay
 } VbGameInputs;
 // Optional trusted game adapter. Core startup has verified the cartridge before
 // initialize runs, and canonical spans must be registered there, before bind.
@@ -28,11 +29,15 @@ typedef struct VbGameHost {
     int (*video_size)(int seat,int* width,int* height,void* context);
     int (*video_render)(int seat,int eye,uint32_t* out,int width,int height,void* context);
     unsigned netplay_players; // 0 unsupported; game-owned deterministic session ceiling
+    int (*restart)(CPUState*,void* context); // fresh machine, same registered spans/hooks
+    int (*lobby_return)(uint32_t* requested_tick,void* context); // canonical request; host waits for confirmation
 } VbGameHost;
 int vb_game_host_register(const VbGameHost*);
 int vb_game_host_option(int argc,char** argv,int* index);
 const char* vb_game_host_error(void);
 int vb_game_host_initialize(CPUState*);
+int vb_game_host_restart(CPUState*);
+int vb_game_host_lobby_return(uint32_t* requested_tick);
 void vb_game_host_seal_inputs(const VbGameInputs*);
 // Physical sampling is presentation-side; explicit debug/network bundles take
 // priority until cleared. No physical device reads occur during a replay tick.
