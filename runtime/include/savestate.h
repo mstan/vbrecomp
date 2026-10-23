@@ -49,6 +49,11 @@ void vb_state_bind(CPUState* cpu, uint32_t* dispatch_pc, uint64_t* frame_cycles,
  * state. Files and rewind preserve captured per-eye presentation history. */
 int vb_state_capture(uint8_t** data, size_t* size, int include_presentation);
 int vb_state_restore(const uint8_t* data, size_t size);
+/* Validate a public snapshot under audio exclusion without committing it or
+ * running loaded callbacks. Optional read-only policy observes the candidate;
+ * every execution byte is restored before return, including on rejection. */
+int vb_state_validate(const uint8_t* data, size_t size,
+                      int (*policy)(void*), void* context);
 int vb_state_save_file(const char* path);
 int vb_state_load_file(const char* path);
 int vb_state_reset(void); /* reset execution, preserving live cartridge SRAM */

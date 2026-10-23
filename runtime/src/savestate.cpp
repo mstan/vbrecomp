@@ -203,7 +203,8 @@ static int capture_impl(uint8_t** data, size_t* size, int presentation, bool tru
 int vb_state_capture(uint8_t** data, size_t* size, int presentation) {
     return capture_impl(data,size,presentation,false);
 }
-static int restore_impl(const uint8_t* data, size_t size, bool trusted, bool keep_history) {
+static int restore_impl(const uint8_t* data, size_t size, bool trusted, bool keep_history,
+                        bool inspect_only=false,int (*policy)(void*)=nullptr,void* context=nullptr) {
     uint8_t build[32];build_hash(build);
     uint8_t features[32];feature_hash(features);
     if(!cpu || !data || size<header_size || size>max_size || std::memcmp(data,"VBSTATE1",8)
@@ -225,9 +226,14 @@ static int restore_impl(const uint8_t* data, size_t size, bool trusted, bool kee
     std::array<uint8_t,65536> old_sram;
     std::memcpy(old_sram.data(),vb_cart_ram_data(),old_sram.size());
     Stream load{nullptr,data,header_size};visit(load,true);
-    if(!valid()) {
+    bool accepted=false;
+    try {accepted=valid() && (!policy || policy(context));}
+    catch(...) {
+        Stream undo{nullptr,backup,header_size};visit(undo,true);std::free(backup);throw;
+    }
+    if(!accepted || inspect_only) {
         Stream undo{nullptr,backup,header_size};visit(undo,true);std::free(backup);
-        error="Snapshot contains invalid device or scheduler state";return 0;
+        error=accepted?"":"Snapshot contains invalid device, scheduler or policy state";return accepted?1:0;
     }
     std::free(backup);vb_vsu_state_loaded();vb_vip_state_loaded();++generation;
     if(!keep_history)rbe_snap_ring_clear(rewind_ring);
@@ -240,6 +246,10 @@ static int restore_impl(const uint8_t* data, size_t size, bool trusted, bool kee
 }
 int vb_state_restore(const uint8_t* data, size_t size) {
     try { return restore_impl(data,size,false,false); }
+    catch(const std::bad_alloc&) {error="Snapshot allocation failed";return 0;}
+}
+int vb_state_validate(const uint8_t* data,size_t size,int (*policy)(void*),void* context) {
+    try {return restore_impl(data,size,false,true,true,policy,context);}
     catch(const std::bad_alloc&) {error="Snapshot allocation failed";return 0;}
 }
 int vb_state_save_file(const char* path) {

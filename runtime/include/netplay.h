@@ -30,6 +30,13 @@ int vb_netplay_in_resim(void); /* safe on the audio thread */
 int vb_netplay_debug(const char*,long long,char*,size_t);
 int vb_netplay_hold(uint32_t tick);
 void vb_netplay_release(void);
+/* Only authority may open F7, and only between races. All operations use the
+ * shared STATE channel and a settled all-seat barrier; online rewind is absent. */
+int vb_netplay_state_can_open(void);
+int vb_netplay_state_request(const char* path,int save,int ui_slot);
+int vb_netplay_state_busy(void);
+int vb_netplay_state_result(void); /* 0 pending, 1 complete, -1 refused */
+const char* vb_netplay_state_message(void);
 #ifdef __cplusplus
 }
 #endif

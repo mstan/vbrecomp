@@ -18,6 +18,16 @@
 #include <fstream>
 #include <cerrno>
 #include <thread>
+#include <vector>
+#include <algorithm>
+#include <memory>
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 #if VB_RUNTIME_HAVE_SDL
 #include <SDL.h>
 #endif
@@ -86,15 +96,14 @@ uint32_t* dispatch_pc;
 uint64_t* frame_cycles;
 bool settled=false,driver_started=false,return_requested=false;
 uint32_t started_ms;
+uint32_t fixed_profile,fixed_transcript;
 std::string identity;
 uint32_t now_ms(void*) {
     return uint32_t(std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count());
 }
 uint32_t hash(const void* data,size_t size){return vb_crc32_compute(static_cast<const uint8_t*>(data),size);}
-void sample(uint32_t,RNetInputSample* out,void*) {
-    out->size=2;out->bytes[0]=uint8_t(sampled_buttons);out->bytes[1]=uint8_t(sampled_buttons>>8);
-}
+void sample(uint32_t,RNetInputSample* out,void*);
 void session_publish(uint32_t,const RNetInputSample*,int,void*) {
     // The episode driver owns admission and publishes its sanitized rows.
     // RNetSession still requires this delay-sync callback at construction.
@@ -153,6 +162,11 @@ bool start_driver(uint32_t profile,uint32_t transcript) {
     config.replay_mode=RNET_RB_REPLAY_INLINE;config.part_names[0]="machine";config.part_names[1]="machine";config.part_names[2]="machine";
     config.snap_depth=40;config.log_prefix="vb_rb";config.env_alias="VB_RB";config.inject_flip_bits=16;
     return rnet_rb_driver_start(driver,&config,&host)!=0;
+}
+#include "netplay_state.inc"
+void sample(uint32_t,RNetInputSample* out,void*) {
+    const uint16_t buttons=state_txn.stage==StateStage::Idle?sampled_buttons:0;
+    out->size=2;out->bytes[0]=uint8_t(buttons);out->bytes[1]=uint8_t(buttons>>8);
 }
 #endif
 }
@@ -359,7 +373,8 @@ int vb_netplay_start(CPUState* c,uint32_t* pc,uint64_t* cycles) {
     status=slot==0 && players>2 && !relay_transport?rnet_session_start_lan_hub(connection,bind_address.c_str()):
         rnet_session_start_lan(connection,bind_address.c_str(),peer_address.c_str());
     if(status){error="Cannot bind network transport";return 0;}
-    started_ms=now_ms(nullptr);settled=driver_started=return_requested=false;return 1;
+    started_ms=now_ms(nullptr);settled=driver_started=return_requested=false;
+    state_txn={};state_serial=0;state_completed=0;state_message.clear();return 1;
 #else
     error="This build has no netplay support";return 0;
 #endif
@@ -374,10 +389,16 @@ int vb_netplay_poll() {
         uint32_t profile,transcript;const int status=rnet_session_profiles_status(connection,&profile,&transcript);
         if(status<0 || uint32_t(now_ms(nullptr)-started_ms)>30000){error="Network startup profile refused or timed out";return -1;}
         if(!status)return 0;
+        fixed_profile=profile;fixed_transcript=transcript;
         settled=true;driver_started=start_driver(profile,transcript);
         if(!driver_started){error="Cannot start shared rollback driver";return -1;}
         std::fprintf(stderr,"vb_net: settled profile=%u transcript=%08x slot=%d players=%d\n",profile,transcript,slot,players);
     }
+    int state_status;
+    try {state_status=state_poll();}
+    catch(const std::exception&) {return state_fail("Cannot allocate or access synchronized online state");}
+    if(state_status<0)return -1;
+    if(!state_status)return 0;
     const auto admission=rnet_rb_driver_poll_admit(driver);
     if(return_requested){error=rnet_rb_driver_refusal(driver)?rnet_rb_driver_refusal(driver):"Network match refused";return -1;}
     if(rnet_session_disconnected_peers(connection,10000)){error="A network player disconnected";return -1;}
@@ -402,7 +423,7 @@ void vb_netplay_stop() {
 }
 int vb_netplay_hold(uint32_t tick) {
 #if VB_RUNTIME_HAVE_NETPLAY
-    if(!driver_started || tick<rnet_rb_driver_sim_tick(driver))return 0;
+    if(!driver_started || state_txn.stage!=StateStage::Idle || tick<rnet_rb_driver_sim_tick(driver))return 0;
     rnet_rb_driver_set_hold(driver,tick);return 1;
 #else
     return 0;
@@ -410,20 +431,58 @@ int vb_netplay_hold(uint32_t tick) {
 }
 void vb_netplay_release() {
 #if VB_RUNTIME_HAVE_NETPLAY
-    if(driver_started)rnet_rb_driver_clear_hold(driver);
+    if(driver_started && state_txn.stage==StateStage::Idle)rnet_rb_driver_clear_hold(driver);
 #endif
 }
 int vb_netplay_debug(const char* command,long long id,char* out,size_t capacity) {
     if(std::strcmp(command,"net_status"))return 0;
 #if VB_RUNTIME_HAVE_NETPLAY
-    std::snprintf(out,capacity,"{\"ok\":true,\"id\":%lld,\"enabled\":%s,\"settled\":%s,\"slot\":%d,\"players\":%d,\"tick\":%u,\"confirmed\":%u,\"episodes\":%u,\"resim\":%llu,\"desync\":%u,\"held\":%s}",
+    std::snprintf(out,capacity,"{\"ok\":true,\"id\":%lld,\"enabled\":%s,\"settled\":%s,\"slot\":%d,\"players\":%d,\"tick\":%u,\"confirmed\":%u,\"episodes\":%u,\"resim\":%llu,\"desync\":%u,\"held\":%s,\"state_busy\":%s,\"state_result\":%d}",
         id,enabled?"true":"false",settled?"true":"false",slot,players,
         driver?rnet_rb_driver_sim_tick(driver):0,driver?rnet_rb_driver_confirmed_through(driver):0,
         driver?rnet_rb_driver_episode_count(driver):0,(unsigned long long)(driver?rnet_rb_driver_resim_ticks(driver):0),
-        driver?rnet_rb_driver_desync_count(driver):0,driver && rnet_rb_driver_hold_settled(driver)?"true":"false");
+        driver?rnet_rb_driver_desync_count(driver):0,driver && rnet_rb_driver_hold_settled(driver)?"true":"false",
+        state_txn.stage!=StateStage::Idle?"true":"false",state_completed);
 #else
     std::snprintf(out,capacity,"{\"ok\":true,\"id\":%lld,\"enabled\":false}",id);
 #endif
     return 1;
+}
+int vb_netplay_state_can_open() {
+#if VB_RUNTIME_HAVE_NETPLAY
+    return enabled && driver_started && slot==0 && vb_game_host_can_pause()
+        && state_txn.stage==StateStage::Idle && !rnet_rb_driver_episode_active(driver);
+#else
+    return 0;
+#endif
+}
+int vb_netplay_state_request(const char* path,int saving,int ui_slot) {
+#if VB_RUNTIME_HAVE_NETPLAY
+    try {return state_request(path,saving!=0,ui_slot);}
+    catch(const std::exception&) {state_completed=-1;state_message="Cannot allocate or access online snapshot";return 0;}
+#else
+    return 0;
+#endif
+}
+int vb_netplay_state_busy() {
+#if VB_RUNTIME_HAVE_NETPLAY
+    return state_txn.stage!=StateStage::Idle;
+#else
+    return 0;
+#endif
+}
+int vb_netplay_state_result() {
+#if VB_RUNTIME_HAVE_NETPLAY
+    return state_completed;
+#else
+    return -1;
+#endif
+}
+const char* vb_netplay_state_message() {
+#if VB_RUNTIME_HAVE_NETPLAY
+    return state_message.c_str();
+#else
+    return "Online snapshots are unavailable";
+#endif
 }
 }

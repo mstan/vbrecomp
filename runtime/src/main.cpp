@@ -256,6 +256,7 @@ static int vb_runtime_ui_set(void* opaque, const RecompRuntimeUiItem* item, int 
         c->volume = value < 0 ? 0 : value > 100 ? 100 : value;
         s_runtime_audio_volume = c->volume;
     } else if (std::strcmp(item->key, "history.enabled") == 0 || std::strcmp(item->key, "history.depth") == 0) {
+        if(vb_netplay_enabled())return 0;
         const bool enabled=std::strcmp(item->key,"history.enabled")==0?value!=0:vb_host_config.rewind!=0;
         const int depth=std::strcmp(item->key,"history.depth")==0?value:vb_host_config.rewind_depth;
         if(enabled && !vb_rewind_enable((unsigned)depth))return 0;
@@ -941,6 +942,7 @@ int main(int argc, char** argv) {
     size_t benchmark_segment=0;
     vb_watchdog_start();
     while (vb_debug_server_poll() == 0 && !sdl_quit) {
+        vb_state_ui_sync();
         // Debugger PC writes are applied while paused. Resume from the
         // architectural PC rather than overwriting it with the prior cache.
         dispatch_pc = cpu.pc;
@@ -1044,7 +1046,7 @@ int main(int argc, char** argv) {
             const bool focused=(SDL_GetWindowFlags(win)&SDL_WINDOW_INPUT_FOCUS)!=0;
             const uint16_t physical=focused?(uint16_t)(pad_from_keyboard()|pad_from_gamecontroller(nullptr)):0;
             uint16_t gesture=physical&(VB_PAD_SELECT|VB_PAD_RT|VB_PAD_LT);
-            if(can_pause_session() && (gesture&(VB_PAD_SELECT|VB_PAD_RT))==(VB_PAD_SELECT|VB_PAD_RT) && (previous_gesture&(VB_PAD_SELECT|VB_PAD_RT))!=(VB_PAD_SELECT|VB_PAD_RT)) {
+            if((can_pause_session() || vb_netplay_state_can_open()) && (gesture&(VB_PAD_SELECT|VB_PAD_RT))==(VB_PAD_SELECT|VB_PAD_RT) && (previous_gesture&(VB_PAD_SELECT|VB_PAD_RT))!=(VB_PAD_SELECT|VB_PAD_RT)) {
 #if defined(RECOMP_LAUNCHER)
                     recomp_runtime_ui_close(s_runtime_ui);
 #endif

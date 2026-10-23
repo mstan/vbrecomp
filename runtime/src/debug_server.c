@@ -1572,6 +1572,13 @@ static void dispatch_line(char* line) {
             send_response(result);
         }
     }
+    else if(strcmp(cmd,"net_state")==0) {
+        char path[2048]={0};long long saving=-1,slot=-1;
+        extract_int(line,"\"save\"",&saving);extract_int(line,"\"slot\"",&slot);
+        int ok=extract_str(line,"\"path\"",path,sizeof(path)) && saving>=0 && saving<=1 && slot>=0 && slot<12
+            && vb_netplay_state_request(path,(int)saving,(int)slot);
+        send_response(ok?"{\"ok\":true}":"{\"ok\":false,\"error\":\"Online state request refused\"}");
+    }
     else if(strcmp(cmd,"net_hold")==0) {
         long long tick=-1;extract_int(line,"\"tick\"",&tick);
         int ok=tick>=0 && tick<=UINT32_MAX && vb_netplay_hold((uint32_t)tick);

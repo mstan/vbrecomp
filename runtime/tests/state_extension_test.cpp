@@ -52,10 +52,17 @@ int main(int argc,char** argv) {
            && presentation==987654321 && vb_read8(0x05000000)==0);
     auto invalid=complete;put32(invalid.data()+offset,5);crc(invalid);
     const auto before=capture();
+    const auto before_generation=vb_state_generation();
+    assert(vb_state_validate(complete.data(),complete.size(),[](void*)->int{return session.tick==17;},nullptr));
+    assert(!vb_state_validate(complete.data(),complete.size(),[](void*)->int{return session.tick!=17;},nullptr));
+    assert(!vb_state_validate(invalid.data(),invalid.size(),nullptr,nullptr));
+    assert(capture()==before && loaded==1 && vb_state_generation()==before_generation);
     assert(!vb_state_restore(invalid.data(),invalid.size()));
     assert(capture()==before && loaded==1);
     // Invalid core state after a valid extension must undo both together.
     invalid=complete;invalid[112]=1;put32(invalid.data()+offset+4,100);crc(invalid);
+    assert(!vb_state_validate(invalid.data(),invalid.size(),nullptr,nullptr));
+    assert(capture()==before && loaded==1);
     assert(!vb_state_restore(invalid.data(),invalid.size()));
     assert(capture()==before && loaded==1);
     invalid=complete;put32(invalid.data()+112+offsetof(CPUState,sysreg)+24*sizeof(uint32_t),4);crc(invalid);
