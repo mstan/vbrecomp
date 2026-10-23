@@ -32,6 +32,12 @@
 #endif
 
 VbHostConfig vb_host_config;
+#ifndef VB_GAME_LOCAL_PLAYERS
+#define VB_GAME_LOCAL_PLAYERS 1
+#endif
+static_assert(VB_GAME_LOCAL_PLAYERS>=1 && VB_GAME_LOCAL_PLAYERS<=4,"Local controller ceiling");
+unsigned vb_host_player_count(){return VB_GAME_LOCAL_PLAYERS;}
+VbHostPlayer& vb_host_player(unsigned seat){return seat && seat<4?vb_host_config.extra_players[seat-1]:vb_host_config;}
 namespace {
 namespace fs = std::filesystem;
 fs::path config_path, mods_path;
@@ -48,6 +54,18 @@ void load_config() {
     while (file >> key) {
         if (key == "rom") { file >> std::quoted(last_rom); continue; }
         if (key == "gamepad") { file >> std::quoted(vb_host_config.gamepad_guid); continue; }
+        if(key.size()>3 && key[0]=='p' && key[1]>='2' && key[1]<='4' && key[2]=='.') {
+            auto& p=vb_host_player(unsigned(key[1]-'1'));const auto field=key.substr(3);
+            if(field=="gamepad"){file>>std::quoted(p.gamepad_guid);continue;}
+            int value;if(!(file>>value))break;
+            if(field=="source")p.player_source=std::clamp(value,0,2);
+            if(field=="deadzone")p.deadzone=std::clamp(value,0,100);
+            for(int i=0;i<14;++i) {
+                if(field=="key"+std::to_string(i))p.keys[i]=std::clamp(value,0,511);
+                if(field=="pad"+std::to_string(i))p.pads[i]=std::clamp(value,0,65535);
+            }
+            continue;
+        }
         int value;
         if (!(file >> value)) break;
         if (key == "scale") vb_host_config.scale = std::clamp(value, 1, 6);
@@ -109,6 +127,12 @@ void vb_host_save(void*) {
     for (int i = 0; i < 14; ++i)
         file << "key" << i << ' ' << vb_host_config.keys[i] << '\n'
              << "pad" << i << ' ' << vb_host_config.pads[i] << '\n';
+    for(unsigned seat=1;seat<vb_host_player_count();++seat) {
+        const auto& p=vb_host_player(seat);const auto prefix="p"+std::to_string(seat+1)+".";
+        file<<prefix<<"source "<<p.player_source<<'\n'<<prefix<<"deadzone "<<p.deadzone<<'\n'
+            <<prefix<<"gamepad "<<std::quoted(p.gamepad_guid)<<'\n';
+        for(int i=0;i<14;++i)file<<prefix<<"key"<<i<<' '<<p.keys[i]<<'\n'<<prefix<<"pad"<<i<<' '<<p.pads[i]<<'\n';
+    }
     file.close();
     if (!file) { error = "Cannot finish saving settings."; return; }
 #ifdef _WIN32
@@ -183,8 +207,14 @@ int vb_host_prepare(const char* executable, const char*& rom, bool headless) {
         std::strncpy(settings.player_gamepad_guid[0], vb_host_config.gamepad_guid.c_str(), 39);
         std::copy_n(vb_host_config.keys, 14, settings.player_key_bind[0]);
         std::copy_n(vb_host_config.pads, 14, settings.player_pad_bind[0]);
+        for(unsigned i=1;i<vb_host_player_count();++i) {
+            const auto& p=vb_host_player(i);settings.player_src[i]=p.player_source;settings.deadzone[i]=p.deadzone;
+            std::strncpy(settings.player_gamepad_guid[i],p.gamepad_guid.c_str(),39);
+            std::copy_n(p.keys,14,settings.player_key_bind[i]);std::copy_n(p.pads,14,settings.player_pad_bind[i]);
+        }
         RecompLauncherCGameInfo game = {};
         launcher_profile_apply("vb", &game);
+        game.num_players=int(vb_host_player_count());
         game.name = VB_GAME_TITLE;
         game.region = VB_GAME_REGION;
         game.expected_crc = VB_GAME_CRC32;
@@ -203,6 +233,11 @@ int vb_host_prepare(const char* executable, const char*& rom, bool headless) {
         defaults.player_gamepad_guid[0][0] = 0;
         std::copy_n(default_values.keys, 14, defaults.player_key_bind[0]);
         std::copy_n(default_values.pads, 14, defaults.player_pad_bind[0]);
+        for(unsigned i=1;i<vb_host_player_count();++i) {
+            const auto& p=default_values.extra_players[i-1];defaults.player_src[i]=p.player_source;
+            defaults.deadzone[i]=p.deadzone;defaults.player_gamepad_guid[i][0]=0;
+            std::copy_n(p.keys,14,defaults.player_key_bind[i]);std::copy_n(p.pads,14,defaults.player_pad_bind[i]);
+        }
         game.default_settings = &defaults;
         char selected[4096] = {};
         const int result = recomp_launcher_run_window(VB_GAME_TITLE, &settings, &game,
@@ -221,6 +256,11 @@ int vb_host_prepare(const char* executable, const char*& rom, bool headless) {
         vb_host_config.gamepad_guid = settings.player_gamepad_guid[0];
         std::copy_n(settings.player_key_bind[0], 14, vb_host_config.keys);
         std::copy_n(settings.player_pad_bind[0], 14, vb_host_config.pads);
+        for(unsigned i=1;i<vb_host_player_count();++i) {
+            auto& p=vb_host_player(i);p.player_source=std::clamp(settings.player_src[i],0,2);
+            p.deadzone=std::clamp(settings.deadzone[i],0,100);p.gamepad_guid=settings.player_gamepad_guid[i];
+            std::copy_n(settings.player_key_bind[i],14,p.keys);std::copy_n(settings.player_pad_bind[i],14,p.pads);
+        }
     }
 #else
     (void)headless;

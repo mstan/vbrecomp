@@ -79,6 +79,18 @@ void refresh_slots() {
     }
 }
 Thumb capture() {
+    int game_width=0,game_height=0;
+    if(vb_game_host_video_size(-1,&game_width,&game_height)) {
+        std::vector<uint32_t> pixels(size_t(game_width)*game_height);
+        if(!vb_game_host_video_render(-1,0,pixels.data(),game_width,game_height))
+            throw std::runtime_error("Game preview unavailable");
+        const double scale=std::min(double(TW)/game_width,double(TH)/game_height);
+        const int w=std::max(1,int(game_width*scale)),h=std::max(1,int(game_height*scale));
+        Thumb image{};image.fill(0xff000000u);
+        for(int y=0;y<h;++y)for(int x=0;x<w;++x)
+            image[(y+(TH-h)/2)*TW+x+(TW-w)/2]=pixels[(y*game_height/h)*game_width+x*game_width/w]|0xff000000u;
+        return image;
+    }
     const int width=vb_renderer_present_width();std::vector<uint32_t> pixels((size_t)width*224);
     if(vb_renderer_active())vb_renderer_present_viewport(0,width,pixels.data());
     else if(vb_recolor_active())vb_vip_render_framebuffer_recolored(0,pixels.data());

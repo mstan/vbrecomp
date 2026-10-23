@@ -420,6 +420,24 @@ static void handle_screenshot(long long id, const char* line) {
             "{\"ok\":false,\"error\":\"host capture unavailable or failed\"}");
         return;
     }
+    long long game=0,seat=-1;
+    extract_int(line,"\"game\"",&game);extract_int(line,"\"seat\"",&seat);
+    if(game) {
+        int w=0,h=0,ok=0;
+        if(seat>=-1 && seat<VB_GAME_HOST_SEATS && (eye==0 || eye==1)
+           && vb_game_host_video_size((int)seat,&w,&h)) {
+            uint32_t* pixels=(uint32_t*)malloc((size_t)w*h*sizeof(uint32_t));
+            if(pixels) {
+                ok=vb_game_host_video_render((int)seat,(int)eye,pixels,w,h)
+                    && vb_write_png_32bpp(path,w,h,pixels)==0;
+                free(pixels);
+            }
+        }
+        char result[256];snprintf(result,sizeof(result),
+            "{\"ok\":%s,\"game\":true,\"seat\":%lld,\"eye\":%lld,\"width\":%d,\"height\":%d}",
+            ok?"true":"false",seat,eye,w,h);
+        send_response(result);return;
+    }
     long long presented = 0, replay = 0, requested_width = 0;
     extract_int(line, "\"presented\"", &presented);
     extract_int(line, "\"viewport_raw\"", &replay);

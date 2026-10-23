@@ -70,6 +70,7 @@ static double process_cpu_seconds() {
 #if VB_RUNTIME_HAVE_SDL
 #  include <SDL.h>
 #  include "host_controller.h"
+#  include "host_controllers.h"
 #endif
 #if defined(RECOMP_LAUNCHER) && VB_RUNTIME_HAVE_SDL
 #  include "recomp_runtime_ui.h"
@@ -371,14 +372,15 @@ static bool vb_state_ui_event(const SDL_Event& ev) {
     return ev.type==SDL_KEYUP || ev.type==SDL_CONTROLLERBUTTONUP;
 }
 
-static uint16_t pad_from_keyboard(void) {
+static uint16_t pad_from_keyboard(unsigned seat=0) {
     /* Hardware pad masks use one bit per pressed button. */
     const Uint8* keys = SDL_GetKeyboardState(nullptr);
     uint16_t pad = 0;
     if (!keys) return pad;
-    if (vb_host_config.player_source != 1) return 0;
+    const auto& player=vb_host_player(seat);
+    if (player.player_source != 1) return 0;
     for (int i = 0; i < 14; ++i) {
-        const int key = vb_host_config.keys[i];
+        const int key = player.keys[i];
         if (key > 0 && key < SDL_NUM_SCANCODES && keys[key]) pad |= vb_host_pad_bits[i];
     }
     return pad;
@@ -390,20 +392,13 @@ static uint16_t pad_from_keyboard(void) {
  * SDL_GameController is cross-platform (XInput/DInput on Windows, IOKit
  * on macOS, evdev on Linux), so this replaces the old Windows-only
  * XInput path with one mapping that works everywhere. */
-static SDL_GameController* s_pad = nullptr;
+static VbHostControllers s_controllers;
+static auto& s_pads=s_controllers.pads;
+static SDL_GameController*& s_pad=s_pads[0];
 
 /* Open the first attached controller, if any and none is open yet. */
 static void gamepad_open_first(void) {
-    if (s_pad) return;
-    for (int i = 0; i < SDL_NumJoysticks(); ++i) {
-        if (SDL_IsGameController(i)) {
-            char guid[40] = {};
-            SDL_JoystickGetGUIDString(SDL_JoystickGetDeviceGUID(i), guid, sizeof(guid));
-            if (!vb_host_config.gamepad_guid.empty() && vb_host_config.gamepad_guid != guid) continue;
-            s_pad = SDL_GameControllerOpen(i);
-            if (s_pad) return;
-        }
-    }
+    s_controllers.refresh();
 }
 
 /* React to SDL_CONTROLLERDEVICEADDED / REMOVED so hotplug works. */
@@ -411,12 +406,7 @@ static void gamepad_handle_device_event(const SDL_Event& ev) {
     if (ev.type == SDL_CONTROLLERDEVICEADDED) {
         gamepad_open_first();
     } else if (ev.type == SDL_CONTROLLERDEVICEREMOVED) {
-        if (s_pad && ev.cdevice.which ==
-                SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(s_pad))) {
-            SDL_GameControllerClose(s_pad);
-            s_pad = nullptr;
-            gamepad_open_first();   /* fall back to another pad if present */
-        }
+        s_controllers.removed(ev.cdevice.which);
     }
 }
 
@@ -709,7 +699,7 @@ int main(int argc, char** argv) {
     Uint64            sdl_period = 0;
     Uint64            sdl_deadline = 0;
     int               tex_w = VB_RT_EYE_W;
-    const int         tex_h = stereo ? VB_RT_EYE_H * 2 : VB_RT_EYE_H;
+    int               tex_h = stereo ? VB_RT_EYE_H * 2 : VB_RT_EYE_H;
     std::vector<uint32_t> tex_storage(VB_VIEWPORT_MAX_WIDTH * VB_RT_EYE_H * 2);
     uint32_t*         tex_pixels = tex_storage.data();
     VbHostCapture host_capture{tex_pixels, tex_w, tex_h};
@@ -1044,12 +1034,12 @@ int main(int argc, char** argv) {
             const bool focused=(SDL_GetWindowFlags(win)&SDL_WINDOW_INPUT_FOCUS)!=0;
             const uint16_t physical=focused?(uint16_t)(pad_from_keyboard()|pad_from_gamecontroller(nullptr)):0;
             uint16_t gesture=physical&(VB_PAD_SELECT|VB_PAD_RT|VB_PAD_LT);
-            if((gesture&(VB_PAD_SELECT|VB_PAD_RT))==(VB_PAD_SELECT|VB_PAD_RT) && (previous_gesture&(VB_PAD_SELECT|VB_PAD_RT))!=(VB_PAD_SELECT|VB_PAD_RT)) {
+            if(vb_game_host_can_pause() && (gesture&(VB_PAD_SELECT|VB_PAD_RT))==(VB_PAD_SELECT|VB_PAD_RT) && (previous_gesture&(VB_PAD_SELECT|VB_PAD_RT))!=(VB_PAD_SELECT|VB_PAD_RT)) {
 #if defined(RECOMP_LAUNCHER)
                     recomp_runtime_ui_close(s_runtime_ui);
 #endif
                     vb_state_ui_action(VB_STATE_UI_SLOTS);
-            } else if((gesture&(VB_PAD_SELECT|VB_PAD_LT))==(VB_PAD_SELECT|VB_PAD_LT) && (previous_gesture&(VB_PAD_SELECT|VB_PAD_LT))!=(VB_PAD_SELECT|VB_PAD_LT)) {
+            } else if(vb_game_host_can_pause() && (gesture&(VB_PAD_SELECT|VB_PAD_LT))==(VB_PAD_SELECT|VB_PAD_LT) && (previous_gesture&(VB_PAD_SELECT|VB_PAD_LT))!=(VB_PAD_SELECT|VB_PAD_LT)) {
 #if defined(RECOMP_LAUNCHER)
                     recomp_runtime_ui_close(s_runtime_ui);
 #endif
@@ -1089,6 +1079,10 @@ int main(int argc, char** argv) {
 #endif
             const bool focused=(SDL_GetWindowFlags(win)&SDL_WINDOW_INPUT_FOCUS)!=0;
             vb_input_set_pad(menu_open || !focused?0:(uint16_t)((pad_from_keyboard() | controller_pad)&~menu_blocked_pad));
+            VbGameInputs physical{};
+            if(focused && !menu_open)for(unsigned seat=1;seat<vb_host_player_count();++seat)
+                physical.buttons[seat]=pad_from_keyboard(seat)|s_controllers.read(seat);
+            vb_game_host_physical_inputs(&physical);
         }
 #endif
 
@@ -1125,13 +1119,18 @@ int main(int argc, char** argv) {
             int win_w = 0, win_h = 0;
             SDL_GetRendererOutputSize(ren, &win_w, &win_h);
             vb_viewport_window(win_w, stereo ? win_h / 2 : win_h);
-            const int view_width = vb_renderer_present_width();
-            if (view_width != tex_w) {
+            int view_width=0,view_height=0;
+            const bool game_video=vb_game_host_video_size(-1,&view_width,&view_height)!=0;
+            if(!game_video) {view_width=vb_renderer_present_width();view_height=stereo?VB_RT_EYE_H*2:VB_RT_EYE_H;}
+            if (view_width != tex_w || view_height != tex_h) {
                 SDL_Texture* resized = SDL_CreateTexture(ren, SDL_PIXELFORMAT_ARGB8888,
-                    SDL_TEXTUREACCESS_STREAMING, view_width, tex_h);
+                    SDL_TEXTUREACCESS_STREAMING, view_width, view_height);
                 if (!resized) vb_stub_abort("cannot resize presentation texture", cpu.pc, view_width);
-                SDL_DestroyTexture(tex); tex = resized; tex_w = view_width;
+                SDL_DestroyTexture(tex); tex = resized; tex_w = view_width;tex_h=view_height;
+                tex_storage.resize(size_t(tex_w)*tex_h);tex_pixels=tex_storage.data();
+                host_capture.pixels=tex_pixels;
                 host_capture.width = tex_w;
+                host_capture.height=tex_h;
 #if SDL_VERSION_ATLEAST(2, 0, 12)
                 SDL_SetTextureScaleMode(tex, vb_host_config.filter ? SDL_ScaleModeLinear : SDL_ScaleModeNearest);
 #endif
@@ -1143,7 +1142,10 @@ int main(int argc, char** argv) {
             /* Opt-in full-screen recolor uses the recolored present path;
              * otherwise the faithful render. */
             const bool recolor = vb_recolor_active();
-            if (vb_renderer_active()) {
+            if(game_video) {
+                if(!vb_game_host_video_render(-1,0,tex_pixels,tex_w,tex_h))
+                    vb_stub_abort("game presentation unavailable",cpu.pc,0);
+            } else if (vb_renderer_active()) {
                 if (!vb_renderer_present_viewport(0, tex_w, tex_pixels))
                     vb_stub_abort("viewport frame unavailable", cpu.pc, tex_w);
                 if (stereo && !vb_renderer_present_viewport(1, tex_w, tex_pixels + tex_w * VB_RT_EYE_H))
@@ -1166,7 +1168,7 @@ int main(int argc, char** argv) {
              * RGBA replacements over the faithful framebuffer, per eye, using
              * the draw-list slot matching the displayed buffer. No-op when
              * VBRECOMP_OVERRIDES is unset (empty list) ⇒ unchanged output. */
-            if (vb_overrides_active()) {
+            if (!game_video && vb_overrides_active()) {
                 int slot = vb_vip_display_fb() & 1;
                 static uint32_t center[VB_RT_EYE_W * VB_RT_EYE_H];
                 for (int eye = 0; eye < (stereo ? 2 : 1); ++eye) {
@@ -1268,7 +1270,7 @@ int main(int argc, char** argv) {
 #endif
 
 #if VB_RUNTIME_HAVE_SDL
-    if (s_pad) { SDL_GameControllerClose(s_pad); s_pad = nullptr; }
+    s_controllers.close();
     if (aud) { SDL_PauseAudioDevice(aud, 1); SDL_CloseAudioDevice(aud); }
     if (tex) SDL_DestroyTexture(tex);
     if (state_tex) SDL_DestroyTexture(state_tex);

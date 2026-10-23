@@ -51,6 +51,9 @@ void vb_renderer_reset(void);
 int vb_renderer_active(void);
 const char* vb_renderer_id(void);
 void vb_renderer_present(int eye, uint32_t* argb);
+/* Compose an independently derived native view with the same active color
+ * plugin. All frame arrays remain borrowed/read-only; no VIP state is changed. */
+int vb_renderer_apply_frame(const VbRenderFrame*,uint32_t* argb);
 /* Variable-width presentation composes the viewport with the color callback.
  * Native present() remains fixed-size for existing tools and raw comparisons. */
 int vb_renderer_present_width(void);

@@ -23,6 +23,13 @@ int vb_renderer_register(const char* id, VbRenderCallback render, void* context)
 void vb_renderer_reset(void) { s_render = 0; s_context = 0; s_id[0] = 0; vb_viewport_reset(); }
 int vb_renderer_active(void) { return s_render != 0 || vb_viewport_active(); }
 const char* vb_renderer_id(void) { return s_id; }
+int vb_renderer_apply_frame(const VbRenderFrame* frame,uint32_t* out) {
+    if(!frame || !out || !frame->stock_argb || frame->width!=VB_RENDER_WIDTH
+       || frame->height!=VB_RENDER_HEIGHT || (frame->eye!=0 && frame->eye!=1))return 0;
+    if(out!=frame->stock_argb)memcpy(out,frame->stock_argb,VB_RENDER_PIXELS*sizeof(*out));
+    if(s_render)s_render(frame,out,s_context);
+    return 1;
+}
 
 void vb_renderer_present(int eye, uint32_t* argb) {
     static uint32_t stock[VB_RENDER_PIXELS];
