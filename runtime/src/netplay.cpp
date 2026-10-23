@@ -449,6 +449,7 @@ void vb_netplay_configure_launcher(RecompLauncherCGameInfo* game) {
         hooks.max_players=hooks.netplay_max_players=int(vb_game_host_netplay_players());hooks.input_player=0;
         hooks.lan_max_players=int(vb_game_host_netplay_players());
         hooks.slot_policy=RECOMP_NETPLAY_SLOTS_HOST_FIRST;hooks.fill_match_caps=fill_caps;
+        hooks.auto_ready_guests=1;hooks.rematch_set_ready=1;
         if(recomp_netplay_host_init(&hooks))return;
         shared_callbacks=recomp_netplay_host_callbacks();lobby_callbacks=*shared_callbacks;
         lobby_callbacks.fill_launch=fill_launch;lobby_callbacks.host_can_spectate=no_spectators;
