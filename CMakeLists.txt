@@ -132,4 +132,16 @@ if(BUILD_TESTING)
     add_test(NAME vb-state-extension COMMAND "${Python3_EXECUTABLE}"
         "${CMAKE_CURRENT_SOURCE_DIR}/runtime/tests/run_state_extension_test.py"
         "$<TARGET_FILE:vb-state-extension-test>" "${CMAKE_CURRENT_BINARY_DIR}")
+
+    add_executable(vb-simulation-points-test runtime/tests/simulation_points_test.c
+        runtime/src/simulation_points.c runtime/src/v810_interpreter.c runtime/src/v810_extended.c runtime/src/interrupts.c)
+    target_include_directories(vb-simulation-points-test PRIVATE runtime/include)
+    target_compile_definitions(vb-simulation-points-test PRIVATE VB_SIMULATION_POINTS=1)
+    if(MSVC)
+        target_compile_options(vb-simulation-points-test PRIVATE /UNDEBUG)
+    else()
+        target_compile_options(vb-simulation-points-test PRIVATE -UNDEBUG)
+        target_link_libraries(vb-simulation-points-test PRIVATE m)
+    endif()
+    add_test(NAME vb-simulation-points COMMAND vb-simulation-points-test)
 endif()

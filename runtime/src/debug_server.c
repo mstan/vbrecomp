@@ -13,6 +13,7 @@
 #include "debug_server.h"
 #include "savestate.h"
 #include "state_ui.h"
+#include "game_host.h"
 #include "v810_interpreter.h"
 
 #include <stdarg.h>
@@ -1337,6 +1338,10 @@ static void handle_fntrace_reset(long long id) {
 }
 
 static void handle_unknown(const char* cmd, long long id) {
+    char game_response[8192];
+    if(vb_game_host_debug(cmd,id,game_response,sizeof(game_response))) {
+        send_response(game_response);return;
+    }
     char buf[256];
     snprintf(buf, sizeof(buf),
              "{\"ok\":false,\"id\":%lld,\"error\":\"unknown command\","
@@ -1581,6 +1586,19 @@ static void dispatch_line(char* line) {
         char result[160];snprintf(result,sizeof(result),"{\"ok\":%s,\"frame\":%u,\"snapshots\":%u}",
             ok?"true":"false",s_cpu->frame,vb_rewind_count());send_response(result);
     }
+    else if(strcmp(cmd,"game_inputs")==0) {
+        VbGameInputs bundle={0};unsigned slot;int valid=s_paused;
+        for(slot=0;slot<VB_GAME_HOST_SEATS;++slot) {
+            char key[32];long long pad=0,command=0;
+            snprintf(key,sizeof(key),"\"pad%u\"",slot);extract_int(line,key,&pad);
+            snprintf(key,sizeof(key),"\"command%u\"",slot);extract_int(line,key,&command);
+            if(pad<0 || pad>65535 || command<0 || command>65535)valid=0;
+            bundle.buttons[slot]=(uint16_t)pad;bundle.commands[slot]=(uint16_t)command;
+        }
+        if(valid)vb_game_host_seal_inputs(&bundle);
+        send_response(valid?"{\"ok\":true}":"{\"ok\":false,\"error\":\"Pause and supply unsigned 16-bit game inputs\"}");
+    }
+    else if(strcmp(cmd,"clear_game_inputs")==0){vb_game_host_seal_inputs(NULL);send_response("{\"ok\":true}");}
     else if (strcmp(cmd, "pause") == 0)        handle_pause(id, 1);
     else if (strcmp(cmd, "continue") == 0)     handle_pause(id, 0);
     else if (strcmp(cmd, "quit") == 0)         handle_quit(id);

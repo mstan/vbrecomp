@@ -39,6 +39,8 @@ function(vb_add_runtime_target TARGET)
         ${VB_RUNTIME_DIR}/src/vb_crc32.c
         ${VB_RUNTIME_DIR}/src/memory.c
         ${VB_RUNTIME_DIR}/src/machine.c
+        ${VB_RUNTIME_DIR}/src/simulation_points.c
+        ${VB_RUNTIME_DIR}/src/game_host.c
         ${VB_RUNTIME_DIR}/src/savestate.cpp
         ${VB_RUNTIME_DIR}/src/state_ui.cpp
         ${VB_RUNTIME_DIR}/src/rom_patch.c

@@ -6,6 +6,7 @@
 #include "renderer.h"
 #include "recolor.h"
 #include "vip.h"
+#include "game_host.h"
 #include <algorithm>
 #include <array>
 #include <cstdio>
@@ -170,6 +171,7 @@ void vb_state_ui_select_slot(int n){if(mode==1&&n>=0&&n<SLOTS){slot=n;result=0;s
 int vb_state_ui_action(int action) {
     try {
     if(action==VB_STATE_UI_SLOTS || action==VB_STATE_UI_REWIND) {
+        if(!vb_game_host_can_pause())return 1;
         int next=action==VB_STATE_UI_SLOTS?1:2;
         if(mode==next){close();return 1;}
         mode=next;result=0;status.clear();vb_state_ui_sync();

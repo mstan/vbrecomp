@@ -54,6 +54,7 @@ static double process_cpu_seconds() {
 #include "memory.h"
 #include "machine.h"
 #include "savestate.h"
+#include "game_host.h"
 #include "state_ui.h"
 #include "vb_sha256.h"
 #include "rom_patch.h"
@@ -503,6 +504,9 @@ int main(int argc, char** argv) {
         const int host_arg = vb_host_argument(i, argc, argv);
         if (host_arg < 0) { std::puts(vb_host_error().c_str()); return 2; }
         if (host_arg > 0) continue;
+        const int game_arg=vb_game_host_option(argc,argv,&i);
+        if(game_arg<0){std::fprintf(stderr,"vb-runtime: %s\n",vb_game_host_error());return 2;}
+        if(game_arg>0)continue;
         std::string a = argv[i];
         if ((a == "--help" || a == "-h")) {
             print_help(argv[0]);
@@ -903,6 +907,9 @@ int main(int argc, char** argv) {
     uint64_t present_count = 0;
     /* Always-on hang watchdog (separate thread). Started here, from the main
      * thread, so it can capture this thread's stack on a freeze. */
+    if(!vb_game_host_initialize(&cpu)) {
+        std::fprintf(stderr,"vb-runtime: %s\n",vb_game_host_error());return 2;
+    }
     vb_state_bind(&cpu, &dispatch_pc, &last_frame_cycles,
 #if VB_RUNTIME_HAVE_SDL
         [](void* p) { if (p) SDL_LockAudioDevice((SDL_AudioDeviceID)(uintptr_t)p); },
@@ -957,6 +964,7 @@ int main(int argc, char** argv) {
             last_frame_cycles += VB_CYCLES_PER_FRAME;
             vb_devices_end_frame(cpu.cycles);
             cpu.frame++;
+            vb_game_host_end_field(&cpu);
             vb_ring_frame_record(&cpu);
         }
         if(frame_limit && cpu.frame>=frame_limit) {
@@ -1001,11 +1009,13 @@ int main(int argc, char** argv) {
                 }
                 if (ev.type == SDL_KEYDOWN) {
                     if (ev.key.keysym.sym == SDLK_F5 && !ev.key.repeat) {
+                        if(!vb_game_host_can_pause())continue;
                         if(!vb_state_save_file(state_file.c_str()))
                             SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR,"Save snapshot",vb_state_error(),win);
                         continue;
                     }
                     if (ev.key.keysym.sym == SDLK_F6 && !ev.key.repeat) {
+                        if(!vb_game_host_can_pause())continue;
                         if(!vb_state_load_file(state_file.c_str()))
                             SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR,"Load snapshot",vb_state_error(),win);
                         continue;
@@ -1031,7 +1041,8 @@ int main(int argc, char** argv) {
                     }
                 }
             }
-            const uint16_t physical=(uint16_t)(pad_from_keyboard()|pad_from_gamecontroller(nullptr));
+            const bool focused=(SDL_GetWindowFlags(win)&SDL_WINDOW_INPUT_FOCUS)!=0;
+            const uint16_t physical=focused?(uint16_t)(pad_from_keyboard()|pad_from_gamecontroller(nullptr)):0;
             uint16_t gesture=physical&(VB_PAD_SELECT|VB_PAD_RT|VB_PAD_LT);
             if((gesture&(VB_PAD_SELECT|VB_PAD_RT))==(VB_PAD_SELECT|VB_PAD_RT) && (previous_gesture&(VB_PAD_SELECT|VB_PAD_RT))!=(VB_PAD_SELECT|VB_PAD_RT)) {
 #if defined(RECOMP_LAUNCHER)
@@ -1076,7 +1087,8 @@ int main(int argc, char** argv) {
 #if defined(RECOMP_LAUNCHER)
             menu_open=menu_open || (s_runtime_ui && recomp_runtime_ui_is_open(s_runtime_ui));
 #endif
-            if(!menu_open)vb_input_set_pad((uint16_t)((pad_from_keyboard() | controller_pad)&~menu_blocked_pad));
+            const bool focused=(SDL_GetWindowFlags(win)&SDL_WINDOW_INPUT_FOCUS)!=0;
+            vb_input_set_pad(menu_open || !focused?0:(uint16_t)((pad_from_keyboard() | controller_pad)&~menu_blocked_pad));
         }
 #endif
 
@@ -1087,10 +1099,10 @@ int main(int argc, char** argv) {
 
         bool simulation_paused = vb_debug_server_is_paused() != 0;
 #if VB_RUNTIME_HAVE_SDL
-        simulation_paused=simulation_paused || (!headless && vb_state_ui_mode());
+        simulation_paused=simulation_paused || (vb_game_host_can_pause() && !headless && vb_state_ui_mode());
 #endif
 #if defined(RECOMP_LAUNCHER) && VB_RUNTIME_HAVE_SDL
-        simulation_paused = simulation_paused || (s_runtime_ui && recomp_runtime_ui_is_open(s_runtime_ui));
+        simulation_paused = simulation_paused || (vb_game_host_can_pause() && s_runtime_ui && recomp_runtime_ui_is_open(s_runtime_ui));
 #endif
         if (!simulation_paused) {
         vb_watchdog_beat(VB_WD_DISPATCH, dispatch_pc, cpu.cycles, present_count);

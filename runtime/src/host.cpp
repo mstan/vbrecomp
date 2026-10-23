@@ -252,6 +252,7 @@ bool vb_host_load_sram() {
     if(!file) { error="Cannot read cartridge save: "+sram_path.u8string();return false; }
     return true;
 }
+void vb_host_sandbox_sram() { sram_disabled=true; }
 bool vb_host_save_sram() {
     if(sram_disabled) return true;
     std::error_code ec;fs::create_directories(sram_path.parent_path(),ec);

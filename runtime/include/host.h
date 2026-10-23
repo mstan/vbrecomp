@@ -19,3 +19,6 @@ const std::string& vb_host_error();
 bool vb_host_commit_mods();
 bool vb_host_load_sram();
 bool vb_host_save_sram();
+/* Session sandbox: disable native-save loading/publishing for this process.
+ * At startup this leaves the user's persistent progress entirely untouched. */
+void vb_host_sandbox_sram();

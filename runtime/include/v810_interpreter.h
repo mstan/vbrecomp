@@ -1,6 +1,9 @@
 #ifndef VB_V810_INTERPRETER_H
 #define VB_V810_INTERPRETER_H
 #include "cpu_state.h"
+#ifdef VB_SIMULATION_POINTS
+#include "simulation_points.h"
+#endif
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -72,7 +75,12 @@ void vb_interpreter_fallback(CPUState* cpu);
 void vb_interpreter_extended(CPUState* cpu, uint16_t first, uint16_t second);
 int vb_execution_debug_check(CPUState* cpu);
 static inline int vb_execution_before(CPUState* cpu) {
-    return (vb_execution.stepping || vb_execution.breakpoint_enabled) && vb_execution_debug_check(cpu);
+    if((vb_execution.stepping || vb_execution.breakpoint_enabled) && vb_execution_debug_check(cpu))return 1;
+#ifdef VB_SIMULATION_POINTS
+    return vb_simulation_before(cpu);
+#else
+    return 0;
+#endif
 }
 #ifdef __cplusplus
 }
