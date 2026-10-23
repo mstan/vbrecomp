@@ -403,7 +403,18 @@ int vb_netplay_auto_launch(const char* config_path) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(2));continue;
                 }
             }
-            if(callbacks->request_start(callbacks->ctx,&settings)){error="Shared room refused start";return 0;}start_sent=true;last_start=now;
+            last_start=now;
+            if(callbacks->request_start(callbacks->ctx,&settings)) {
+                const char* problem=callbacks->last_error(callbacks->ctx);
+                // The server's all-ready notice can precede the returning
+                // peers' refreshed game-image readiness. Keep the real launch
+                // gate authoritative; retry only its transient readiness veto.
+                if(auto_online && problem && (!std::strcmp(problem,"peer_not_ready") || !std::strcmp(problem,"local_not_ready"))) {
+                    callbacks->clear_last_error(callbacks->ctx);continue;
+                }
+                error="Shared room refused start";return 0;
+            }
+            start_sent=true;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
