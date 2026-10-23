@@ -1,3 +1,6 @@
 [submodule "lib/retcomm-rbengine"]
 	path = lib/retcomm-rbengine
 	url = https://github.com/RetroPortingToolKit/rbengine.git
+[submodule "lib/recomp-net"]
+	path = lib/recomp-net
+	url = https://github.com/TechnicallyComputers/recomp-net.git

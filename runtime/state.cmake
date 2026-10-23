@@ -17,6 +17,18 @@ file(GLOB _vb_identity_files CONFIGURE_DEPENDS
     "${VB_RUNTIME_DIR}/include/*.h" "${VB_RUNTIME_DIR}/include/blip/*.h")
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${_vb_identity_files})
 set(_vb_identity "${CMAKE_SYSTEM_NAME};${CMAKE_SYSTEM_PROCESSOR};${CMAKE_SIZEOF_VOID_P};${CMAKE_C_COMPILER_ID};${CMAKE_C_COMPILER_VERSION};${CMAKE_C_FLAGS};${CMAKE_C_FLAGS_RELEASE};${CMAKE_CXX_COMPILER_ID};${CMAKE_CXX_COMPILER_VERSION};${CMAKE_CXX_FLAGS};${CMAKE_CXX_FLAGS_RELEASE};${CMAKE_BUILD_TYPE};${VBRECOMP_CPUHOOK};${VBRECOMP_DEBUG_TOOLS}")
+string(APPEND _vb_identity ";netplay=${VBRECOMP_NETPLAY};ice=${RNET_ENABLE_ICE}")
+if(VBRECOMP_NETPLAY)
+    file(GLOB_RECURSE _vb_net_identity_files CONFIGURE_DEPENDS
+        "${RECOMP_NET_ROOT}/src/*.c" "${RECOMP_NET_ROOT}/src/*.h" "${RECOMP_NET_ROOT}/include/*.h")
+    list(APPEND _vb_identity_files ${_vb_net_identity_files} "${RECOMP_NET_ROOT}/CMakeLists.txt")
+    if(EXISTS "${RECOMP_UI_ROOT}/src/recomp_netplay_host.h")
+        file(GLOB _vb_lobby_identity_files CONFIGURE_DEPENDS
+            "${RECOMP_UI_ROOT}/src/netplay/*.c" "${RECOMP_UI_ROOT}/src/netplay/*.inc")
+        list(APPEND _vb_identity_files ${_vb_lobby_identity_files}
+            "${RECOMP_UI_ROOT}/src/recomp_netplay_host.h" "${RECOMP_UI_ROOT}/src/recomp_launcher.h")
+    endif()
+endif()
 foreach(_file IN LISTS _vb_identity_files)
     file(SHA256 "${_file}" _hash)
     string(APPEND _vb_identity ";${_hash}")

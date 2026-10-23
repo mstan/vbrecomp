@@ -14,6 +14,7 @@
 #include "savestate.h"
 #include "state_ui.h"
 #include "game_host.h"
+#include "netplay.h"
 #include "v810_interpreter.h"
 
 #include <stdarg.h>
@@ -837,11 +838,11 @@ static void handle_set_input(long long id, const char* line) {
     }
     if(pad<0 || pad>65535) { send_response("{\"ok\":false,\"error\":\"invalid input mask\"}");return; }
     s_input_override=1;
-    vb_input_set_pad((uint16_t)pad);
+    if(vb_netplay_enabled())vb_netplay_override_input((uint16_t)pad,1);else vb_input_set_pad((uint16_t)pad);
     char buf[128];
     snprintf(buf, sizeof(buf),
              "{\"ok\":true,\"cmd\":\"set_input\",\"id\":%lld,\"pad\":\"0x%04X\"}",
-             id, vb_input_get_pad());
+             id, (unsigned)pad);
     send_response(buf);
 }
 
@@ -1357,7 +1358,7 @@ static void handle_fntrace_reset(long long id) {
 
 static void handle_unknown(const char* cmd, long long id) {
     char game_response[8192];
-    if(vb_game_host_debug(cmd,id,game_response,sizeof(game_response))) {
+    if(vb_netplay_debug(cmd,id,game_response,sizeof(game_response)) || vb_game_host_debug(cmd,id,game_response,sizeof(game_response))) {
         send_response(game_response);return;
     }
     char buf[256];
@@ -1525,8 +1526,10 @@ static void dispatch_line(char* line) {
     else if (strcmp(cmd, "read_ram") == 0)     handle_read_ram(id, line);
     else if (strcmp(cmd, "pad_state") == 0)    handle_pad_state(id);
     else if (strcmp(cmd, "set_input") == 0)    handle_set_input(id, line);
-    else if (strcmp(cmd, "clear_input") == 0) { handle_set_input(id, "{\"pad\":0}");s_input_override=0; }
-    else if (strcmp(cmd, "press") == 0)        handle_press(id, line);
+    else if (strcmp(cmd, "clear_input") == 0) { handle_set_input(id, "{\"pad\":0}");s_input_override=0;vb_netplay_override_input(0,0); }
+    else if (strcmp(cmd, "press") == 0) {
+        if(vb_netplay_enabled())send_response("{\"ok\":false,\"error\":\"Use the local network input override\"}");else handle_press(id,line);
+    }
     else if (strcmp(cmd, "irq_state") == 0)    handle_irq_state(id);
     else if (strcmp(cmd, "irq_force") == 0)    handle_irq_force(id, line);
     else if (strcmp(cmd, "timer_state") == 0)  handle_timer_state(id);
@@ -1569,9 +1572,17 @@ static void dispatch_line(char* line) {
             send_response(result);
         }
     }
+    else if(strcmp(cmd,"net_hold")==0) {
+        long long tick=-1;extract_int(line,"\"tick\"",&tick);
+        int ok=tick>=0 && tick<=UINT32_MAX && vb_netplay_hold((uint32_t)tick);
+        send_response(ok?"{\"ok\":true}":"{\"ok\":false,\"error\":\"Invalid network hold\"}");
+    }
+    else if(strcmp(cmd,"net_release")==0) {vb_netplay_release();send_response("{\"ok\":true}");}
     else if (strcmp(cmd, "save_state") == 0 || strcmp(cmd, "load_state") == 0) {
         char path[2048] = {0};
-        if (!s_paused || !extract_str(line,"\"path\"",path,sizeof(path))) {
+        if(vb_netplay_enabled() && !strcmp(cmd,"load_state")) {
+            send_response("{\"ok\":false,\"error\":\"Network loads require a synchronized host operation\"}");
+        } else if (!s_paused || !extract_str(line,"\"path\"",path,sizeof(path))) {
             send_response("{\"ok\":false,\"error\":\"Pause and supply a snapshot path\"}");
         } else {
             int ok = strcmp(cmd,"save_state")==0 ? vb_state_save_file(path) : vb_state_load_file(path);
@@ -1586,18 +1597,18 @@ static void dispatch_line(char* line) {
             vb_state_digest(),(unsigned long long)vb_state_generation());send_response(result);
     }
     else if (strcmp(cmd,"reset")==0) {
-        int ok=s_paused && vb_state_reset();
+        int ok=!vb_netplay_enabled() && s_paused && vb_state_reset();
         send_response(ok?"{\"ok\":true,\"frame\":0}":"{\"ok\":false,\"error\":\"Pause before reset\"}");
     }
     else if (strcmp(cmd,"replay_frames")==0) {
         long long count=0;extract_int(line,"\"frames\"",&count);
-        int ok=s_paused && count>0 && count<=10000 && vb_state_replay_frames((unsigned)count);
+        int ok=!vb_netplay_enabled() && s_paused && count>0 && count<=10000 && vb_state_replay_frames((unsigned)count);
         char result[192];snprintf(result,sizeof(result),"{\"ok\":%s,\"frame\":%u,\"error\":\"%s\"}",
             ok?"true":"false",s_cpu->frame,vb_state_error());send_response(result);
     }
     else if (strcmp(cmd,"rewind_enable")==0 || strcmp(cmd,"rewind")==0) {
         long long tick=0;extract_int(line,"\"value\"",&tick);
-        int ok=s_paused && tick>=0 && tick<=UINT32_MAX;
+        int ok=!vb_netplay_enabled() && s_paused && tick>=0 && tick<=UINT32_MAX;
         if(ok) ok=strcmp(cmd,"rewind_enable")==0
             ? (vb_rewind_enable((unsigned)tick) && vb_rewind_record(s_cpu->frame))
             : vb_rewind_to((uint32_t)tick);
@@ -1605,7 +1616,7 @@ static void dispatch_line(char* line) {
             ok?"true":"false",s_cpu->frame,vb_rewind_count());send_response(result);
     }
     else if(strcmp(cmd,"game_inputs")==0) {
-        VbGameInputs bundle={0};unsigned slot;int valid=s_paused;
+        VbGameInputs bundle={0};unsigned slot;int valid=!vb_netplay_enabled() && s_paused;
         for(slot=0;slot<VB_GAME_HOST_SEATS;++slot) {
             char key[32];long long pad=0,command=0;
             snprintf(key,sizeof(key),"\"pad%u\"",slot);extract_int(line,key,&pad);

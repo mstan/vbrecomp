@@ -46,6 +46,7 @@ void vb_game_host_end_field(CPUState* cpu) {
     host.end_field(cpu,&inputs,host.context);
 }
 int vb_game_host_can_pause(void) {return !host.can_pause || host.can_pause(host.context);}
+unsigned vb_game_host_netplay_players(void){return host.netplay_players;}
 int vb_game_host_debug(const char* command,long long id,char* out,size_t capacity) {
     return host.debug && host.debug(command,id,out,capacity,host.context);
 }

@@ -329,4 +329,33 @@ int vb_rewind_to(uint32_t tick) {
 unsigned vb_rewind_count(void){return rbe_snap_ring_count(rewind_ring);}
 int vb_rewind_has(uint32_t tick){return rbe_snap_ring_has(rewind_ring,tick);}
 int vb_rewind_enabled(void){return rewind_ring!=nullptr;}
+struct VbRollbackHistory {RbeSnapRing* ring;};
+VbRollbackHistory* vb_rollback_history_create(unsigned depth) {
+    if(depth<2 || depth>512)return nullptr;
+    uint8_t* sample=nullptr;size_t size=0;
+    if(!capture_impl(&sample,&size,1,true))return nullptr;
+    std::free(sample);
+    if(size>512u*1024u*1024u/depth){error="Rollback history exceeds 512 MiB";return nullptr;}
+    auto* history=new(std::nothrow) VbRollbackHistory{rbe_snap_ring_create(depth)};
+    if(history && !history->ring){delete history;return nullptr;}return history;
+}
+void vb_rollback_history_destroy(VbRollbackHistory* h) {
+    if(h){rbe_snap_ring_destroy(h->ring);delete h;}
+}
+int vb_rollback_history_save(VbRollbackHistory* h,uint32_t tick) {
+    if(!h)return 0;
+    uint8_t* blob=nullptr;size_t size=0;if(!capture_impl(&blob,&size,1,true))return 0;
+    if(!rbe_snap_ring_store(h->ring,tick,blob,size)){std::free(blob);return 0;}return 1;
+}
+int vb_rollback_history_load(VbRollbackHistory* h,uint32_t tick) {
+    if(!h)return 0;
+    size_t size=0;const auto* blob=rbe_snap_ring_peek(h->ring,tick,&size);
+    return blob && restore_impl(blob,size,true,true);
+}
+int vb_rollback_history_has(const VbRollbackHistory* h,uint32_t tick){return h && rbe_snap_ring_has(h->ring,tick);}
+int vb_rollback_history_oldest(const VbRollbackHistory* h,uint32_t* tick) {
+    if(!h || !tick || !rbe_snap_ring_count(h->ring))return 0;
+    *tick=rbe_snap_ring_oldest_tick(h->ring);return 1;
+}
+void vb_rollback_history_drop_after(VbRollbackHistory* h,uint32_t tick){if(h)rbe_snap_ring_drop_after(h->ring,tick);}
 }

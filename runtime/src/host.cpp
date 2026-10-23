@@ -3,6 +3,7 @@
 #include "renderer.h"
 #include "memory.h"
 #include "savestate.h"
+#include "netplay.h"
 #include <chrono>
 #include <algorithm>
 #include <filesystem>
@@ -194,7 +195,10 @@ int vb_host_prepare(const char* executable, const char*& rom, bool headless) {
         if (!ok) { error = "Mod action failed: " + std::string(vb_mod_runtime_last_error_c()); return -1; }
     }
 #if defined(RECOMP_LAUNCHER)
-    if (!headless && !no_launcher && (force_launcher || !vb_host_config.skip_launcher || last_rom.empty()) && has_game) {
+    if(vb_netplay_auto_requested() && !vb_netplay_auto_launch(config_path.u8string().c_str())) {
+        error=vb_netplay_error();return -1;
+    }
+    if (!headless && !no_launcher && !vb_netplay_auto_requested() && (force_launcher || !vb_host_config.skip_launcher || last_rom.empty()) && has_game) {
         RecompLauncherCSettings settings = {};
         settings.window_scale = vb_host_config.scale;
         settings.fullscreen = vb_host_config.fullscreen;
@@ -222,6 +226,7 @@ int vb_host_prepare(const char* executable, const char*& rom, bool headless) {
         game.mods = vb_mod_runtime_launcher_provider_c();
         const std::string config_text = config_path.u8string();
         game.config_path = config_text.c_str();
+        vb_netplay_configure_launcher(&game);
         RecompLauncherCSettings defaults = settings;
         const VbHostConfig default_values;
         defaults.window_scale = 2;
@@ -245,6 +250,7 @@ int vb_host_prepare(const char* executable, const char*& rom, bool headless) {
         if (result == RECOMP_LAUNCHER_RESULT_QUIT) return 0;
         if (result != RECOMP_LAUNCHER_RESULT_LAUNCH) { error = "The launcher could not start."; return -1; }
         last_rom = selected;
+        if(!vb_netplay_apply_launch(&settings.netplay_launch)){error=vb_netplay_error();return -1;}
         vb_host_config.scale = std::clamp(settings.window_scale, 1, 6);
         vb_host_config.fullscreen = std::clamp(settings.fullscreen, 0, 2);
         vb_host_config.filter = settings.linear_filter != 0;

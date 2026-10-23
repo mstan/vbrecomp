@@ -55,7 +55,9 @@ static double process_cpu_seconds() {
 #include "machine.h"
 #include "savestate.h"
 #include "game_host.h"
+#include "netplay.h"
 #include "state_ui.h"
+static int can_pause_session(){return !vb_netplay_enabled() && vb_game_host_can_pause();}
 #include "vb_sha256.h"
 #include "rom_patch.h"
 #include "stub_abort.h"
@@ -441,7 +443,7 @@ static uint16_t pad_from_gamecontroller(bool* out_connected) {
 static void vb_sdl_audio_cb(void* /*ud*/, Uint8* stream, int len) {
     const size_t n_frames = (size_t)len / (2 * sizeof(int16_t));
     vb_vsu_pull_samples((int16_t*)stream, n_frames);
-    if(s_state_modal.load(std::memory_order_relaxed)){std::memset(stream,0,(size_t)len);return;}
+    if(s_state_modal.load(std::memory_order_relaxed) || vb_netplay_in_resim()){std::memset(stream,0,(size_t)len);return;}
     const int volume = s_runtime_audio_volume.load(std::memory_order_relaxed);
     if (volume < 100) {
         int16_t* samples = reinterpret_cast<int16_t*>(stream);
@@ -491,6 +493,9 @@ int main(int argc, char** argv) {
 
 
     for (int i = 1; i < argc; ++i) {
+        const int net_arg=vb_netplay_option(argc,argv,&i);
+        if(net_arg<0){std::fprintf(stderr,"vb-runtime: %s\n",vb_netplay_error());return 2;}
+        if(net_arg>0)continue;
         const int host_arg = vb_host_argument(i, argc, argv);
         if (host_arg < 0) { std::puts(vb_host_error().c_str()); return 2; }
         if (host_arg > 0) continue;
@@ -878,6 +883,7 @@ int main(int argc, char** argv) {
      * stuck at 0 (the `frame` TCP command and the frame ring both read it). */
     uint64_t last_frame_cycles = 0;
     bool sdl_quit = false;
+    int network_exit=0;
 
     // P4-A main loop: alternate between recompiled-code dispatch
     // and TCP polling, and tick device emulation (timer, VIP) by the
@@ -910,6 +916,9 @@ int main(int argc, char** argv) {
 #endif
     );
     uint64_t state_generation = vb_state_generation();
+    if(!vb_netplay_start(&cpu,&dispatch_pc,&last_frame_cycles)) {
+        std::fprintf(stderr,"vb-runtime: %s\n",vb_netplay_error());vb_netplay_stop();return 2;
+    }
     uint32_t history_frame = UINT32_MAX;
     if(!headless && !benchmark_frames && !rewind_explicit) {
         rewind_depth=vb_host_config.rewind?(unsigned)vb_host_config.rewind_depth:0;
@@ -918,8 +927,9 @@ int main(int argc, char** argv) {
 #if VB_RUNTIME_HAVE_SDL
     s_history_interval=rewind_interval;
 #endif
+    if(vb_netplay_enabled())rewind_depth=0;
     if(rewind_depth && !vb_rewind_enable(rewind_depth)) return 2;
-    if(!headless && !benchmark_frames) {
+    if(!headless && !benchmark_frames && !vb_netplay_enabled()) {
         vb_host_config.rewind=rewind_depth!=0;
         if(rewind_depth)vb_host_config.rewind_depth=(int)rewind_depth;
         vb_host_config.rewind_interval=(int)rewind_interval;
@@ -950,7 +960,7 @@ int main(int argc, char** argv) {
          * fingerprint into the always-on ring. The ring is queried, never
          * armed (debug `frame` command reports the seq). Catch-up loop in
          * case a single pass spanned more than one frame period. */
-        while (cpu.cycles - last_frame_cycles >= VB_CYCLES_PER_FRAME) {
+        while (!vb_netplay_enabled() && cpu.cycles - last_frame_cycles >= VB_CYCLES_PER_FRAME) {
             last_frame_cycles += VB_CYCLES_PER_FRAME;
             vb_devices_end_frame(cpu.cycles);
             cpu.frame++;
@@ -971,7 +981,7 @@ int main(int argc, char** argv) {
             while(cpu.frame>=benchmark_route[benchmark_segment].end) ++benchmark_segment;
             vb_input_set_pad(benchmark_route[benchmark_segment].pad);
         }
-        if (history_frame != cpu.frame) {
+        if (!vb_netplay_enabled() && history_frame != cpu.frame) {
             unsigned interval=rewind_interval;
 #if VB_RUNTIME_HAVE_SDL
             interval=s_history_interval;
@@ -999,13 +1009,13 @@ int main(int argc, char** argv) {
                 }
                 if (ev.type == SDL_KEYDOWN) {
                     if (ev.key.keysym.sym == SDLK_F5 && !ev.key.repeat) {
-                        if(!vb_game_host_can_pause())continue;
+                        if(!can_pause_session())continue;
                         if(!vb_state_save_file(state_file.c_str()))
                             SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR,"Save snapshot",vb_state_error(),win);
                         continue;
                     }
                     if (ev.key.keysym.sym == SDLK_F6 && !ev.key.repeat) {
-                        if(!vb_game_host_can_pause())continue;
+                        if(!can_pause_session())continue;
                         if(!vb_state_load_file(state_file.c_str()))
                             SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR,"Load snapshot",vb_state_error(),win);
                         continue;
@@ -1034,12 +1044,12 @@ int main(int argc, char** argv) {
             const bool focused=(SDL_GetWindowFlags(win)&SDL_WINDOW_INPUT_FOCUS)!=0;
             const uint16_t physical=focused?(uint16_t)(pad_from_keyboard()|pad_from_gamecontroller(nullptr)):0;
             uint16_t gesture=physical&(VB_PAD_SELECT|VB_PAD_RT|VB_PAD_LT);
-            if(vb_game_host_can_pause() && (gesture&(VB_PAD_SELECT|VB_PAD_RT))==(VB_PAD_SELECT|VB_PAD_RT) && (previous_gesture&(VB_PAD_SELECT|VB_PAD_RT))!=(VB_PAD_SELECT|VB_PAD_RT)) {
+            if(can_pause_session() && (gesture&(VB_PAD_SELECT|VB_PAD_RT))==(VB_PAD_SELECT|VB_PAD_RT) && (previous_gesture&(VB_PAD_SELECT|VB_PAD_RT))!=(VB_PAD_SELECT|VB_PAD_RT)) {
 #if defined(RECOMP_LAUNCHER)
                     recomp_runtime_ui_close(s_runtime_ui);
 #endif
                     vb_state_ui_action(VB_STATE_UI_SLOTS);
-            } else if(vb_game_host_can_pause() && (gesture&(VB_PAD_SELECT|VB_PAD_LT))==(VB_PAD_SELECT|VB_PAD_LT) && (previous_gesture&(VB_PAD_SELECT|VB_PAD_LT))!=(VB_PAD_SELECT|VB_PAD_LT)) {
+            } else if(can_pause_session() && (gesture&(VB_PAD_SELECT|VB_PAD_LT))==(VB_PAD_SELECT|VB_PAD_LT) && (previous_gesture&(VB_PAD_SELECT|VB_PAD_LT))!=(VB_PAD_SELECT|VB_PAD_LT)) {
 #if defined(RECOMP_LAUNCHER)
                     recomp_runtime_ui_close(s_runtime_ui);
 #endif
@@ -1078,7 +1088,8 @@ int main(int argc, char** argv) {
             menu_open=menu_open || (s_runtime_ui && recomp_runtime_ui_is_open(s_runtime_ui));
 #endif
             const bool focused=(SDL_GetWindowFlags(win)&SDL_WINDOW_INPUT_FOCUS)!=0;
-            vb_input_set_pad(menu_open || !focused?0:(uint16_t)((pad_from_keyboard() | controller_pad)&~menu_blocked_pad));
+            const uint16_t local_pad=menu_open || !focused?0:(uint16_t)((pad_from_keyboard() | controller_pad)&~menu_blocked_pad);
+            if(vb_netplay_enabled())vb_netplay_physical_input(local_pad);else vb_input_set_pad(local_pad);
             VbGameInputs physical{};
             if(focused && !menu_open)for(unsigned seat=1;seat<vb_host_player_count();++seat)
                 physical.buttons[seat]=pad_from_keyboard(seat)|s_controllers.read(seat);
@@ -1093,16 +1104,19 @@ int main(int argc, char** argv) {
 
         bool simulation_paused = vb_debug_server_is_paused() != 0;
 #if VB_RUNTIME_HAVE_SDL
-        simulation_paused=simulation_paused || (vb_game_host_can_pause() && !headless && vb_state_ui_mode());
+        simulation_paused=simulation_paused || (can_pause_session() && !headless && vb_state_ui_mode());
 #endif
 #if defined(RECOMP_LAUNCHER) && VB_RUNTIME_HAVE_SDL
-        simulation_paused = simulation_paused || (vb_game_host_can_pause() && s_runtime_ui && recomp_runtime_ui_is_open(s_runtime_ui));
+        simulation_paused = simulation_paused || (can_pause_session() && s_runtime_ui && recomp_runtime_ui_is_open(s_runtime_ui));
 #endif
         if (!simulation_paused) {
         vb_watchdog_beat(VB_WD_DISPATCH, dispatch_pc, cpu.cycles, present_count);
-        if (!vb_machine_step(&cpu, &dispatch_pc, last_frame_cycles + VB_CYCLES_PER_FRAME)) {
+        const int network_result=vb_netplay_enabled()?vb_netplay_poll():1;
+        if(network_result<0){std::fprintf(stderr,"vb-runtime: %s\n",vb_netplay_error());network_exit=8;break;}
+        if ((!vb_netplay_enabled() && !vb_machine_step(&cpu, &dispatch_pc, last_frame_cycles + VB_CYCLES_PER_FRAME))
+            || (vb_netplay_enabled() && !network_result)) {
             if(!benchmark_frames) std::this_thread::sleep_for(1ms);
-            continue;
+            if(!vb_netplay_enabled())continue;
         }
         if (!dispatched_once) {
             std::printf("vb-runtime: first yield at pc=0x%08X (cart is running)\n", cpu.pc);
@@ -1120,7 +1134,8 @@ int main(int argc, char** argv) {
             SDL_GetRendererOutputSize(ren, &win_w, &win_h);
             vb_viewport_window(win_w, stereo ? win_h / 2 : win_h);
             int view_width=0,view_height=0;
-            const bool game_video=vb_game_host_video_size(-1,&view_width,&view_height)!=0;
+            const int view_seat=vb_netplay_view_seat();
+            const bool game_video=vb_game_host_video_size(view_seat,&view_width,&view_height)!=0;
             if(!game_video) {view_width=vb_renderer_present_width();view_height=stereo?VB_RT_EYE_H*2:VB_RT_EYE_H;}
             if (view_width != tex_w || view_height != tex_h) {
                 SDL_Texture* resized = SDL_CreateTexture(ren, SDL_PIXELFORMAT_ARGB8888,
@@ -1143,7 +1158,7 @@ int main(int argc, char** argv) {
              * otherwise the faithful render. */
             const bool recolor = vb_recolor_active();
             if(game_video) {
-                if(!vb_game_host_video_render(-1,0,tex_pixels,tex_w,tex_h))
+                if(!vb_game_host_video_render(view_seat,0,tex_pixels,tex_w,tex_h))
                     vb_stub_abort("game presentation unavailable",cpu.pc,0);
             } else if (vb_renderer_active()) {
                 if (!vb_renderer_present_viewport(0, tex_w, tex_pixels))
@@ -1262,6 +1277,7 @@ int main(int argc, char** argv) {
             (unsigned long long)present_count,(unsigned long long)vb_vsu_total_frames(),
             measure_runtime?"uncapped-full-runtime":"headless-core");
     }
+    vb_netplay_stop();
     vb_state_shutdown();
     vb_state_ui_shutdown();
 #if defined(RECOMP_LAUNCHER) && VB_RUNTIME_HAVE_SDL
@@ -1287,5 +1303,5 @@ int main(int argc, char** argv) {
     vb_ring_frame_shutdown();
     vb_wtrace_shutdown();
     vb_fntrace_shutdown();
-    return save_ok ? 0 : 6;
+    return save_ok ? network_exit : 6;
 }

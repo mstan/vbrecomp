@@ -27,6 +27,7 @@ typedef struct VbGameHost {
     // nonnegative seats request independent native views for diagnostics/online.
     int (*video_size)(int seat,int* width,int* height,void* context);
     int (*video_render)(int seat,int eye,uint32_t* out,int width,int height,void* context);
+    unsigned netplay_players; // 0 unsupported; game-owned deterministic session ceiling
 } VbGameHost;
 int vb_game_host_register(const VbGameHost*);
 int vb_game_host_option(int argc,char** argv,int* index);
@@ -38,6 +39,7 @@ void vb_game_host_seal_inputs(const VbGameInputs*);
 void vb_game_host_physical_inputs(const VbGameInputs*);
 void vb_game_host_end_field(CPUState*);
 int vb_game_host_can_pause(void);
+unsigned vb_game_host_netplay_players(void);
 int vb_game_host_debug(const char*,long long,char*,size_t);
 int vb_game_host_video_size(int seat,int* width,int* height);
 int vb_game_host_video_render(int seat,int eye,uint32_t*,int width,int height);

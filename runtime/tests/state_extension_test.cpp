@@ -68,5 +68,16 @@ int main(int argc,char** argv) {
     assert(session.actors==0 && session.tick==0 && !session.values[0] && presentation==123);
     assert(vb_cart_ram_data()[123]==99 && loaded==3);
     assert(vb_state_restore(reset.data(),reset.size()));assert(loaded==4);
+    auto* network=vb_rollback_history_create(4);assert(network);
+    assert(!vb_rollback_history_oldest(network,&pc));
+    session.tick=30;assert(vb_rollback_history_save(network,100));
+    session.tick=40;assert(vb_rollback_history_save(network,110));
+    uint32_t oldest=0;assert(vb_rollback_history_oldest(network,&oldest) && oldest==100);
+    assert(vb_rewind_record(50));
+    assert(vb_rollback_history_load(network,100) && session.tick==30 && vb_rewind_has(50));
+    assert(vb_rollback_history_has(network,110));
+    vb_rollback_history_drop_after(network,100);assert(!vb_rollback_history_has(network,110));
+    assert(vb_rewind_to(50) && session.tick==40 && vb_rollback_history_has(network,100));
+    vb_rollback_history_destroy(network);
     vb_state_shutdown();vb_memory_shutdown();
 }

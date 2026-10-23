@@ -67,6 +67,18 @@ int vb_rewind_to(uint32_t tick);
 unsigned vb_rewind_count(void);
 int vb_rewind_has(uint32_t tick);
 int vb_rewind_enabled(void);
+/* A separate owned rbengine ring for network rollback. Local rewind and
+ * network history never clear or re-key each other's snapshots. Key T is
+ * the complete machine before network tick T. These are private trusted
+ * captures; external files still pass the strict public restore API. */
+typedef struct VbRollbackHistory VbRollbackHistory;
+VbRollbackHistory* vb_rollback_history_create(unsigned depth);
+void vb_rollback_history_destroy(VbRollbackHistory*);
+int vb_rollback_history_save(VbRollbackHistory*,uint32_t tick);
+int vb_rollback_history_load(VbRollbackHistory*,uint32_t tick);
+int vb_rollback_history_has(const VbRollbackHistory*,uint32_t tick);
+int vb_rollback_history_oldest(const VbRollbackHistory*,uint32_t* tick);
+void vb_rollback_history_drop_after(VbRollbackHistory*,uint32_t tick);
 #ifdef __cplusplus
 }
 #endif

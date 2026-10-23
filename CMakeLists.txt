@@ -18,6 +18,17 @@ option(VBRECOMP_CPUHOOK "Record per-instruction CPU state for oracle comparisons
 
 # Position-independent code, useful when generated/ ships .o for relocation.
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+option(VBRECOMP_NETPLAY "Build the optional shared network host" OFF)
+set(RECOMP_NET_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/lib/recomp-net" CACHE PATH "Shared recomp-net checkout")
+if(VBRECOMP_NETPLAY AND NOT TARGET recomp_net)
+    if(NOT EXISTS "${RECOMP_NET_ROOT}/CMakeLists.txt")
+        message(FATAL_ERROR "Netplay needs recomp-net; initialize its submodule or set RECOMP_NET_ROOT")
+    endif()
+    # A consumer builds the library, not recomp-net's standalone probes.
+    set(RNET_BUILD_EXAMPLES OFF)
+    set(RNET_BUILD_TESTS OFF)
+    add_subdirectory("${RECOMP_NET_ROOT}" "${CMAKE_CURRENT_BINARY_DIR}/recomp-net")
+endif()
 
 add_subdirectory(runtime)
 
