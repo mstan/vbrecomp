@@ -2,6 +2,7 @@
 #include "memory.h"
 #include "interrupts.h"
 #include "stub_abort.h"
+#include "game_host.h"
 
 int vb_machine_step(CPUState* cpu, uint32_t* dispatch_pc, uint64_t frame_end) {
     /* The debugger may have changed architectural PC while paused. Direct
@@ -33,11 +34,17 @@ int vb_machine_step(CPUState* cpu, uint32_t* dispatch_pc, uint64_t frame_end) {
 }
 int vb_machine_run_frame(CPUState* cpu, uint32_t* dispatch_pc, uint64_t* frame_cycles) {
     const uint64_t end=*frame_cycles+397824u;
+    unsigned redirects=0;
     while(cpu->cycles<end) {
-        uint64_t before=cpu->cycles;
+        uint64_t before=cpu->cycles;uint32_t previous_pc=cpu->pc;
         vb_machine_step(cpu,dispatch_pc,end);
-        if(cpu->cycles==before)return 0; /* a debugger breakpoint stopped it */
+        if(cpu->cycles==before) {
+            // A simulation point may redirect before charging an instruction.
+            // A debugger stop retains PC. Bound malformed redirect cycles.
+            if(cpu->pc==previous_pc || ++redirects>64)return 0;
+        } else redirects=0;
     }
     *frame_cycles=end;vb_devices_end_frame(cpu->cycles);++cpu->frame;
+    vb_game_host_end_field(cpu);
     return 1;
 }

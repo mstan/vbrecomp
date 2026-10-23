@@ -18,6 +18,17 @@ option(VBRECOMP_CPUHOOK "Record per-instruction CPU state for oracle comparisons
 
 # Position-independent code, useful when generated/ ships .o for relocation.
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+option(VBRECOMP_NETPLAY "Build the optional shared network host" OFF)
+set(RECOMP_NET_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/lib/recomp-net" CACHE PATH "Shared recomp-net checkout")
+if(VBRECOMP_NETPLAY AND NOT TARGET recomp_net)
+    if(NOT EXISTS "${RECOMP_NET_ROOT}/CMakeLists.txt")
+        message(FATAL_ERROR "Netplay needs recomp-net; initialize its submodule or set RECOMP_NET_ROOT")
+    endif()
+    # A consumer builds the library, not recomp-net's standalone probes.
+    set(RNET_BUILD_EXAMPLES OFF)
+    set(RNET_BUILD_TESTS OFF)
+    add_subdirectory("${RECOMP_NET_ROOT}" "${CMAKE_CURRENT_BINARY_DIR}/recomp-net")
+endif()
 
 add_subdirectory(runtime)
 
@@ -101,4 +112,62 @@ if(BUILD_TESTING)
     add_test(NAME vb-mod-runtime COMMAND "${Python3_EXECUTABLE}"
         "${CMAKE_CURRENT_SOURCE_DIR}/runtime/tests/run_mod_test.py"
         "$<TARGET_FILE:vb-mod-runtime-test>" "${CMAKE_CURRENT_BINARY_DIR}")
+
+    # Exercise canonical extensions through the real memory/devices/serializer.
+    # Reuse the runtime's source inventory without its desktop/main/debug host.
+    get_target_property(_state_runtime_sources vb-runtime SOURCES)
+    set(_state_core_sources)
+    foreach(_source IN LISTS _state_runtime_sources)
+        string(FIND "${_source}" "${CMAKE_CURRENT_SOURCE_DIR}/runtime/src/" _core_prefix)
+        get_filename_component(_name "${_source}" NAME)
+        if(_core_prefix EQUAL 0 AND NOT _name MATCHES "^(main\\.cpp|host\\.cpp|debug_server\\.c|wtrace\\.c|fntrace\\.c|cpuhook\\.c|vb_trace_stub\\.c)$")
+            list(APPEND _state_core_sources "${_source}")
+        endif()
+    endforeach()
+    add_executable(vb-state-extension-test runtime/tests/state_extension_test.cpp
+        ${_state_core_sources} runtime/src/vb_trace_stub.c runtime/src/no_game_linked.c)
+    target_include_directories(vb-state-extension-test PRIVATE runtime/include lib/retcomm-rbengine/include)
+    target_sources(vb-state-extension-test PRIVATE lib/retcomm-rbengine/src/snap/rbe_snap_ring.c)
+    target_compile_features(vb-state-extension-test PRIVATE cxx_std_17)
+    set_target_properties(vb-state-extension-test PROPERTIES VB_STATE_ID "canonical-extension-test")
+    target_compile_definitions(vb-state-extension-test PRIVATE VB_STATE_BUILD_ID="canonical-extension-test:$<CONFIG>")
+    if(WIN32)
+        target_link_libraries(vb-state-extension-test PRIVATE dbghelp)
+    endif()
+    if(MSVC)
+        target_compile_options(vb-state-extension-test PRIVATE /UNDEBUG)
+    else()
+        target_compile_options(vb-state-extension-test PRIVATE -UNDEBUG)
+        target_link_libraries(vb-state-extension-test PRIVATE m)
+    endif()
+    add_test(NAME vb-state-extension COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/runtime/tests/run_state_extension_test.py"
+        "$<TARGET_FILE:vb-state-extension-test>" "${CMAKE_CURRENT_BINARY_DIR}")
+
+    add_executable(vb-simulation-points-test runtime/tests/simulation_points_test.c
+        runtime/src/simulation_points.c runtime/src/v810_interpreter.c runtime/src/v810_extended.c runtime/src/interrupts.c)
+    target_include_directories(vb-simulation-points-test PRIVATE runtime/include)
+    target_compile_definitions(vb-simulation-points-test PRIVATE VB_SIMULATION_POINTS=1)
+    if(MSVC)
+        target_compile_options(vb-simulation-points-test PRIVATE /UNDEBUG)
+    else()
+        target_compile_options(vb-simulation-points-test PRIVATE -UNDEBUG)
+        target_link_libraries(vb-simulation-points-test PRIVATE m)
+    endif()
+    add_test(NAME vb-simulation-points COMMAND vb-simulation-points-test)
+    find_package(SDL2 QUIET)
+    if(TARGET SDL2::SDL2)
+        add_executable(vb-host-controllers-test runtime/tests/host_controllers_test.cpp)
+        target_include_directories(vb-host-controllers-test PRIVATE runtime/include)
+        target_compile_features(vb-host-controllers-test PRIVATE cxx_std_17)
+        target_compile_definitions(vb-host-controllers-test PRIVATE SDL_MAIN_HANDLED=1)
+        target_link_libraries(vb-host-controllers-test PRIVATE SDL2::SDL2)
+        if(MSVC)
+            target_compile_options(vb-host-controllers-test PRIVATE /UNDEBUG)
+        else()
+            target_compile_options(vb-host-controllers-test PRIVATE -UNDEBUG)
+        endif()
+        add_test(NAME vb-host-controllers COMMAND vb-host-controllers-test)
+        set_tests_properties(vb-host-controllers PROPERTIES ENVIRONMENT "SDL_VIDEODRIVER=dummy;SDL_AUDIODRIVER=dummy;SDL_JOYSTICK_HIDAPI=0")
+    endif()
 endif()

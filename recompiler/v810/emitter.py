@@ -326,8 +326,8 @@ def _emit_format_ii(ins: DecodedInstruction) -> str:
                     f"& 0x000FF3FFu;")
         if imm5_u in (4, 6, 7):  # ECR / PIR / TKCW — read-only
             return ""
-        if imm5_u == 24:  # CHCW — no I-cache modelling (transparent)
-            return ""
+        if imm5_u == 24:  # retain the readable enable latch; cache timing is unmodelled
+            return f"cpu->sysreg[24] = cpu->gpr[{r2}] & 0x2u;"
         return (f"vb_stub_abort_simple(\"LDSR to reserved sysreg "
                 f"{imm5_u}\", 0x{ins.pc:08X}u);")
     if op == 0x1D:  # STSR sysreg(imm5), reg2 — reg2 ← sysreg[imm5]

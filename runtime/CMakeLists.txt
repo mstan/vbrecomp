@@ -37,6 +37,9 @@ endif()
 # archives, the suffix is cosmetic.
 if(COMMAND recomp_target_launcher_ui)
     recomp_target_launcher_ui(vb-runtime CONSOLE vb)
+    if(VBRECOMP_NETPLAY)
+        recomp_target_launcher_netplay(vb-runtime)
+    endif()
 endif()
 
 set(BEETLE_VB_ROOT "${CMAKE_SOURCE_DIR}/beetle-vb" CACHE PATH "Instrumented Beetle VB oracle checkout")

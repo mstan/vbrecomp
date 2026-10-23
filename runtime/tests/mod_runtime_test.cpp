@@ -7,6 +7,11 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <array>
+
+static std::array<uint8_t,32> identity() {
+    std::array<uint8_t,32> out{};vb_mod_runtime_identity_c(out.data());return out;
+}
 
 static int activations, ticks, resets;
 static void tick() { ++ticks; }
@@ -47,11 +52,30 @@ int main(int argc, char** argv) {
     assert(!vb_mod_set_option("color", "color", "strength", "9223372036854775808"));
     assert(vb_mod_set_option("color", "color", "strength", "75"));
     assert(vb_mod_runtime_commit_c(rom.c_str()));
+    const auto vanilla_identity=identity();
     vb_mod_runtime_activate_plugins_c();
     assert(activations == 0); // Features default OFF.
     assert(vb_mod_enable("color", "color", 1));
     assert(!vb_mod_runtime_commit_c((root / "wrong.vb").string().c_str()));
     assert(vb_mod_runtime_commit_c(rom.c_str()));
+    const auto color_identity=identity();assert(color_identity!=vanilla_identity);
+    assert(vb_mod_set_option("color","color","strength","80"));
+    assert(identity()==color_identity); // Staging cannot change a running match.
+    assert(vb_mod_runtime_commit_c(rom.c_str()));assert(identity()!=color_identity);
+    assert(vb_mod_set_option("color","color","strength","75"));
+    assert(vb_mod_runtime_commit_c(rom.c_str()));assert(identity()==color_identity);
+    const auto palette=fs::path(mods)/"packages"/"color"/"1.0.0"/"palette.txt";
+    {std::ofstream file(palette,std::ios::binary|std::ios::app);file<<" changed";}
+    assert(vb_mod_runtime_commit_c(rom.c_str()));assert(identity()!=color_identity);
+    {std::ofstream file(palette,std::ios::binary|std::ios::trunc);file<<"fixture asset";}
+    assert(vb_mod_runtime_commit_c(rom.c_str()));assert(identity()==color_identity);
+    // The same installed bytes at a different host path have the same ID.
+    const auto other=root/"relocated-mods";
+    fs::copy(mods,other,fs::copy_options::recursive);
+    assert(vb_mod_runtime_initialize_c(other.string().c_str(),"test.game",digest));
+    assert(vb_mod_runtime_commit_c(rom.c_str()));assert(identity()==color_identity);
+    assert(vb_mod_runtime_initialize_c(mods.c_str(),"test.game",digest));
+    assert(vb_mod_runtime_commit_c(rom.c_str()));assert(identity()==color_identity);
     vb_mod_runtime_activate_plugins_c();
     assert(activations == 1);
     vb_mod_runtime_frame_tick_c();
@@ -60,6 +84,7 @@ int main(int argc, char** argv) {
     assert(vb_mod_enable("conflict", "color", 1));
     assert(vb_mod_set_option("color", "color", "strength", "80"));
     assert(!vb_mod_runtime_commit_c(rom.c_str()));
+    assert(identity()==color_identity); // A failed conflicting plan is not active.
     vb_mod_runtime_activate_plugins_c(); // Failed staged plan must still activate committed 75, not 80.
     assert(activations == 2);
     assert(vb_mod_set_option("color", "color", "strength", "75"));
@@ -82,6 +107,7 @@ int main(int argc, char** argv) {
     vb_mod_runtime_activate_plugins_c();
     vb_mod_runtime_frame_tick_c();
     assert(activations == 3 && ticks == 1);
+    assert(identity()==vanilla_identity);
     std::ifstream file(rom, std::ios::binary);
     assert(std::string(std::istreambuf_iterator<char>(file), {}) == "abc");
 #if defined(RECOMP_LAUNCHER)

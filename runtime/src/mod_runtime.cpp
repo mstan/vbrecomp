@@ -176,6 +176,7 @@ struct Runtime {
     std::string error;
     bool initialized = false;
     bool committed_ready = false;
+    std::array<uint8_t,32> committed_identity{};
     const ResolvedPlugin* activating = nullptr;
 };
 
@@ -2057,6 +2058,8 @@ bool mod_runtime_initialize(const fs::path& root,
     return true;
 }
 
+#include "mod_identity.inc"
+
 bool mod_runtime_commit(const fs::path& rom_path, std::string* error) {
     Runtime& runtime = state();
     if (!runtime.initialized || rom_path.empty()) {
@@ -2083,11 +2086,16 @@ bool mod_runtime_commit(const fs::path& rom_path, std::string* error) {
         set_error(error, runtime.error);
         return false;
     }
+    std::array<uint8_t,32> identity{};
+    if(!committed_mod_identity(runtime,identity,&runtime.error)) {
+        set_error(error,runtime.error);return false;
+    }
     if (!save_state(runtime, &runtime.error)) {
         set_error(error, runtime.error);
         return false;
     }
     runtime.committed = runtime.validation;
+    runtime.committed_identity=identity;
     runtime.committed_ready = true;
     runtime.error.clear();
     return true;
@@ -2172,6 +2180,9 @@ extern "C" int vb_mod_runtime_commit_c(const char* rom_path) {
     std::string error;
     return VBRecomp::mod_runtime_commit(
         rom_path ? fs::u8path(rom_path) : fs::path(), &error) ? 1 : 0;
+}
+extern "C" void vb_mod_runtime_identity_c(uint8_t out[32]) {
+    if(out)std::memcpy(out,VBRecomp::state().committed_identity.data(),32);
 }
 
 extern "C" void vb_mod_runtime_activate_plugins_c(void) {

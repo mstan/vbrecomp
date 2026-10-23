@@ -20,15 +20,20 @@ from _imgio import load_png
 
 
 class Runner:
-    def __init__(self, exe, rom, mode, port, directory, extra=()):
+    def __init__(self, exe, rom, mode, port, directory, extra=(), window=False):
         self.directory=Path(directory).resolve();self.directory.mkdir(parents=True,exist_ok=True)
         self.exe=Path(exe).resolve();self.rom=Path(rom).resolve()
-        command=[str(self.exe),"--rom",str(self.rom),"--headless","--paused","--port",str(port),*extra]
+        if window and mode=="oracle":raise ValueError("Windowed runtime fixture requires a runtime backend")
+        command=[str(self.exe),"--rom",str(self.rom),"--no-launcher" if window else "--headless","--paused","--port",str(port),*extra]
         if mode!="oracle":
             command += ["--execution",mode]
             command += ["--config",str(self.directory/"settings.cfg"),"--mods-dir",str(self.directory/"mods")]
             if "--save" not in extra: command += ["--no-save"]
         environment={k:v for k,v in os.environ.items() if not k.startswith("VBRECOMP_")}
+        if window:
+            (self.directory/'settings.cfg').write_text('fullscreen 0\naudio 1\nvolume 0\nscale 1\n')
+            environment.update(SDL_VIDEODRIVER='dummy',SDL_AUDIODRIVER='dummy',SDL_RENDER_DRIVER='software',
+                SDL_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT='0xffff/0xffff')
         # Refuse occupied ports before starting; never attach to another run.
         with socket.socket() as probe:
             if os.name=="nt": probe.setsockopt(socket.SOL_SOCKET,socket.SO_EXCLUSIVEADDRUSE,1)

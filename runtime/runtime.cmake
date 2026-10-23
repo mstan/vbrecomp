@@ -39,6 +39,9 @@ function(vb_add_runtime_target TARGET)
         ${VB_RUNTIME_DIR}/src/vb_crc32.c
         ${VB_RUNTIME_DIR}/src/memory.c
         ${VB_RUNTIME_DIR}/src/machine.c
+        ${VB_RUNTIME_DIR}/src/simulation_points.c
+        ${VB_RUNTIME_DIR}/src/game_host.c
+        ${VB_RUNTIME_DIR}/src/netplay.cpp
         ${VB_RUNTIME_DIR}/src/savestate.cpp
         ${VB_RUNTIME_DIR}/src/state_ui.cpp
         ${VB_RUNTIME_DIR}/src/rom_patch.c
@@ -180,6 +183,10 @@ function(vb_add_runtime_target TARGET)
         VB_DEFAULT_DEBUG_PORT=${VB_DEBUG_PORT}
         VB_DEFAULT_WINDOW_TITLE="${VB_WINDOW_TITLE}"
     )
+    if(VBRECOMP_NETPLAY)
+        target_compile_definitions(${TARGET} PRIVATE VB_RUNTIME_HAVE_NETPLAY=1)
+        target_link_libraries(${TARGET} PRIVATE recomp_net)
+    endif()
 
     if(VBRECOMP_DEBUG_TOOLS)
         target_compile_definitions(${TARGET} PRIVATE VBRECOMP_DEBUG_TOOLS=1)

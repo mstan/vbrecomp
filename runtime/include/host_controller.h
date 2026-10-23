@@ -9,7 +9,7 @@ inline constexpr uint16_t vb_host_pad_bits[14] = {
     VB_PAD_A, VB_PAD_B, VB_PAD_LT, VB_PAD_RT, VB_PAD_START, VB_PAD_SELECT
 };
 
-inline uint16_t vb_host_controller_pad(SDL_GameController* controller, const VbHostConfig& config) {
+inline uint16_t vb_host_controller_pad(SDL_GameController* controller, const VbHostPlayer& config) {
     if (!controller || config.player_source != 2) return 0;
     uint16_t pad = 0;
     const int threshold = config.deadzone * 32767 / 100;

@@ -6,6 +6,8 @@
 #include "renderer.h"
 #include "recolor.h"
 #include "vip.h"
+#include "game_host.h"
+#include "netplay.h"
 #include <algorithm>
 #include <array>
 #include <cstdio>
@@ -38,6 +40,8 @@ std::array<uint32_t,W*H> panel;
 fs::path directory;
 int mode,slot,selected,result;
 std::string status;
+bool network_pending,network_saving;
+Thumb network_preview;
 
 FILE* open_file(const fs::path& path,const char* access) {
 #ifdef _WIN32
@@ -78,6 +82,18 @@ void refresh_slots() {
     }
 }
 Thumb capture() {
+    int game_width=0,game_height=0;
+    if(vb_game_host_video_size(-1,&game_width,&game_height)) {
+        std::vector<uint32_t> pixels(size_t(game_width)*game_height);
+        if(!vb_game_host_video_render(-1,0,pixels.data(),game_width,game_height))
+            throw std::runtime_error("Game preview unavailable");
+        const double scale=std::min(double(TW)/game_width,double(TH)/game_height);
+        const int w=std::max(1,int(game_width*scale)),h=std::max(1,int(game_height*scale));
+        Thumb image{};image.fill(0xff000000u);
+        for(int y=0;y<h;++y)for(int x=0;x<w;++x)
+            image[(y+(TH-h)/2)*TW+x+(TW-w)/2]=pixels[(y*game_height/h)*game_width+x*game_width/w]|0xff000000u;
+        return image;
+    }
     const int width=vb_renderer_present_width();std::vector<uint32_t> pixels((size_t)width*224);
     if(vb_renderer_active())vb_renderer_present_viewport(0,width,pixels.data());
     else if(vb_recolor_active())vb_vip_render_framebuffer_recolored(0,pixels.data());
@@ -128,6 +144,12 @@ void fail(const char* reason) { result=-1;status=reason?reason:"Operation failed
 void close() { mode=0; }
 void submit(bool save) {
     auto path=slot_path(slot);auto utf8=path.u8string();
+    if(vb_netplay_enabled()) {
+        if(network_pending)return;
+        network_preview=capture();
+        if(!vb_netplay_state_request(utf8.c_str(),save,slot)){fail(vb_netplay_state_message());return;}
+        network_pending=true;network_saving=save;result=0;status="Waiting for every racer";return;
+    }
     if(save) {
         std::error_code ec;fs::create_directories(directory,ec);
         if(ec){fail("Cannot create state directory");return;}
@@ -148,14 +170,22 @@ void vb_state_ui_init(const char* path) {
     auto base=fs::absolute(fs::u8path(path)).parent_path();
     char content[65];for(int i=0;i<32;++i)std::snprintf(content+i*2,3,"%02x",vb_state_content_id()[i]);
     directory=base/"states"/content;
+    if(vb_netplay_enabled())directory/="online";
 }
-void vb_state_ui_shutdown(void){history.clear();slots={};mode=slot=selected=result=0;status.clear();}
+void vb_state_ui_shutdown(void){history.clear();slots={};mode=slot=selected=result=0;status.clear();network_pending=false;}
 int vb_state_ui_mode(void){return mode;}
 int vb_state_ui_slot(void){return slot;}
 int vb_state_ui_result(void){return result;}
 unsigned vb_state_ui_history_count(void){return (unsigned)history.size();}
 uint32_t vb_state_ui_selected_frame(void){return selected>=0 && (size_t)selected<history.size()?history[selected].frame:0;}
 void vb_state_ui_sync(void) {
+    if(network_pending && !vb_netplay_state_busy()) {
+        network_pending=false;result=vb_netplay_state_result();status=vb_netplay_state_message();
+        if(result>0) {
+            if(network_saving){write_thumb(slot_path(slot),network_preview);refresh_slots();}
+            else close();
+        }
+    }
     history.erase(std::remove_if(history.begin(),history.end(),[](const Entry& e){return !vb_rewind_has(e.frame);}),history.end());
     selected=std::max(0,std::min(selected,(int)history.size()-1));
 }
@@ -166,10 +196,12 @@ void vb_state_ui_record(uint32_t frame) {
     history.push_back({frame,capture()});
     } catch(const std::exception&) {fail("Preview allocation failed");}
 }
-void vb_state_ui_select_slot(int n){if(mode==1&&n>=0&&n<SLOTS){slot=n;result=0;status.clear();}}
+void vb_state_ui_select_slot(int n){if(mode==1&&!network_pending&&n>=0&&n<SLOTS){slot=n;result=0;status.clear();}}
 int vb_state_ui_action(int action) {
     try {
     if(action==VB_STATE_UI_SLOTS || action==VB_STATE_UI_REWIND) {
+        if(vb_netplay_enabled() && (action==VB_STATE_UI_REWIND || !vb_netplay_state_can_open()))return 1;
+        if(!vb_game_host_can_pause())return 1;
         int next=action==VB_STATE_UI_SLOTS?1:2;
         if(mode==next){close();return 1;}
         mode=next;result=0;status.clear();vb_state_ui_sync();
@@ -179,6 +211,7 @@ int vb_state_ui_action(int action) {
     }
     if(!mode)return 0;
     if(action==VB_STATE_UI_BACK){close();return 1;}
+    if(network_pending)return 1;
     if(mode==1) {
         if(action==VB_STATE_UI_LEFT||action==VB_STATE_UI_UP)vb_state_ui_select_slot((slot+SLOTS-1)%SLOTS);
         if(action==VB_STATE_UI_RIGHT||action==VB_STATE_UI_DOWN)vb_state_ui_select_slot((slot+1)%SLOTS);
@@ -199,7 +232,7 @@ const uint32_t* vb_state_ui_render(int* width,int* height) {
     if(!mode)return nullptr;
     panel.fill(0xff0f1118u);char label[128];
     if(mode==1) {
-        rect(0,0,W,44,0xff171b25u);text(24,14,"SAVE STATES",0xffffd24du,2);text(568,18,"F7 / SELECT+R",0xffb8bdc8u);
+        rect(0,0,W,44,0xff171b25u);text(24,14,vb_netplay_enabled()?"ONLINE STATES":"SAVE STATES",0xffffd24du,2);text(568,18,"F7 / SELECT+R",0xffb8bdc8u);
         int first=std::clamp(slot-1,0,SLOTS-3);
         for(int row=0;row<3;++row) {
             int i=first+row,y=56+row*110;auto& s=slots[i];bool active=i==slot;
