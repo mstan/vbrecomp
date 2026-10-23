@@ -81,6 +81,9 @@ This produces a generic `vb-runtime` linked against `no_game_linked.c`.
 Pass `--rom <cartridge>` to execute entirely through the interpreter; the TCP
 server supports runtime development without generated game code. Game hosts
 link generated dispatch and use hybrid execution by default.
+The generic host requires an explicit, unique `--save PATH` for each cartridge
+to load or persist native SRAM. It leaves existing default save files untouched.
+Named game hosts retain automatic per-game native saves.
 
 Initialize shared dependencies with `git submodule update --init --recursive`.
 Local execution snapshots use rbengine's standalone snapshot ring. F7 opens
