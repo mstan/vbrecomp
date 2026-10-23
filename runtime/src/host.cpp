@@ -2,6 +2,8 @@
 #include "mod_runtime.h"
 #include "renderer.h"
 #include "memory.h"
+#include "savestate.h"
+#include <chrono>
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
@@ -247,6 +249,17 @@ bool vb_host_save_sram() {
     if(sram_disabled) return true;
     std::error_code ec;fs::create_directories(sram_path.parent_path(),ec);
     if(ec) { error=ec.message();return false; }
+    const bool has_save=fs::exists(sram_path,ec);
+    if(ec) { error="Cannot inspect native save before replacement: "+ec.message();return false; }
+    if(vb_state_generation() && has_save) {
+        // Loading execution history may legitimately restore older SRAM in
+        // memory. Preserve the existing persistent progress before replacing it.
+        const auto stamp=std::chrono::system_clock::now().time_since_epoch().count();
+        auto backup=fs::path(sram_path.string()+".pre-state-"+std::to_string(stamp)+".bak");
+        if(!fs::copy_file(sram_path,backup,fs::copy_options::none,ec)) {
+            error="Cannot preserve native save before state restore: "+ec.message();return false;
+        }
+    }
     auto temporary=fs::path(sram_path.string()+".tmp");
     std::ofstream file(temporary,std::ios::binary|std::ios::trunc);
     file.write((const char*)vb_cart_ram_data(),65536);file.close();

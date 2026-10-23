@@ -1,3 +1,4 @@
+#include "savestate.h"
 /* Virtual Boy controller: hardware bit masks, byte-wide data ports, and
  * the 16 x 640-cycle hardware serial transfer with busy/abort/IRQ behavior.
  * SDR exposes the serially latched bits, including the previous transfer's
@@ -145,3 +146,19 @@ unsigned vb_input_snapshot(uint32_t* out) {
     return n;
 }
 #endif
+
+/* Execution state only: host pointers and diagnostic history stay local. */
+void vb_input_state_visit(VbStateVisit visit, void* context) {
+    visit(context, &s_read_counter, sizeof(s_read_counter));
+    visit(context, &s_read_bit, sizeof(s_read_bit));
+    visit(context, &s_latched, sizeof(s_latched));
+    visit(context, &s_serial, sizeof(s_serial));
+    visit(context, &s_scr, sizeof(s_scr));
+    visit(context, &s_pad, sizeof(s_pad));
+    visit(context, &s_press_mask, sizeof(s_press_mask));
+    visit(context, &s_press_frames, sizeof(s_press_frames));
+}
+int vb_input_state_valid(void) {
+    return s_read_bit <= 16 && s_read_counter <= 640 && s_read_counter >= -397824
+        && s_press_frames >= 0 && s_press_frames <= 1000000;
+}

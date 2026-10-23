@@ -15,6 +15,28 @@
 #include <thread>
 #include <vector>
 
+#include <ctime>
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+
+static double process_cpu_seconds() {
+#ifdef _WIN32
+    FILETIME created, exited, kernel, user;
+    if (!GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user)) return -1;
+    ULARGE_INTEGER k, u;
+    k.LowPart=kernel.dwLowDateTime; k.HighPart=kernel.dwHighDateTime;
+    u.LowPart=user.dwLowDateTime; u.HighPart=user.dwHighDateTime;
+    return (k.QuadPart + u.QuadPart) * 1e-7;
+#else
+    return (double)std::clock() / CLOCKS_PER_SEC;
+#endif
+}
+
 #include "asset_pack.h"
 #include "recolor.h"
 #include "renderer.h"
@@ -28,6 +50,9 @@
 #include "input.h"
 #include "interrupts.h"
 #include "memory.h"
+#include "machine.h"
+#include "savestate.h"
+#include "vb_sha256.h"
 #include "rom_patch.h"
 #include "stub_abort.h"
 #include "ring_frame.h"
@@ -71,6 +96,11 @@ static void print_help(const char* argv0) {
         "  --frames N       Exit cleanly after N guest frames (1..1000000).\n"
         "  --stereo         Show both eyes stacked vertically (L top / R bottom)\n"
         "                   instead of the single-eye default.\n"
+        "  --benchmark N    Run N uncapped headless frames and exit.\n"
+        "  --measure-runtime N  Run N uncapped frames with SDL render/present/audio.\n"
+        "  --benchmark-route PATH  Decimal frame-count and pad-mask per line.\n"
+        "  --state-file PATH  F5 saves / F8 restores this build-specific snapshot.\n"
+        "  --rewind-frames N  Keep 2..512 local frames; hold Backspace to rewind.\n"
         "  --paused         Start paused (requires debug tools).\n"
         "  --execution MODE hybrid (default), native, or interpreter.\n"
         "  --save PATH      Cartridge save (64KiB, saved on clean exit).\n"
@@ -358,9 +388,18 @@ int main(int argc, char** argv) {
     int port = VB_DEFAULT_DEBUG_PORT;
     const char* rom_path = nullptr;
     bool headless = false;
+    bool explicit_headless = false;
     bool stereo = false;
     bool start_paused = false;
     uint32_t frame_limit = 0;
+    std::string state_file = "quick.state";
+    unsigned rewind_depth = 0;
+    uint32_t benchmark_frames = 0;
+    bool measure_runtime = false;
+    const char* benchmark_route_path = nullptr;
+    struct BenchmarkSegment { uint32_t end; uint16_t pad; };
+    std::vector<BenchmarkSegment> benchmark_route;
+
 
     for (int i = 1; i < argc; ++i) {
         const int host_arg = vb_host_argument(i, argc, argv);
@@ -388,15 +427,62 @@ int main(int argc, char** argv) {
             unsigned long long value=std::strtoull(count.c_str(),nullptr,10);
             if(!value || value>1000000) { std::puts("Invalid --frames count");return 2; }
             frame_limit=(uint32_t)value;
+        } else if ((a == "--benchmark" || a == "--measure-runtime") && i + 1 < argc) {
+            if (benchmark_frames) { std::fputs("Only one finite measurement option is allowed.\n", stderr); return 2; }
+            measure_runtime = a == "--measure-runtime";
+            char* end = nullptr;
+            const char* value = argv[++i];
+            unsigned long n = std::strtoul(value, &end, 10);
+            if (!*value || *end || *value == '-' || !n || n > 1000000) {
+                std::fputs("--benchmark requires 1..1000000 frames.\n", stderr); return 2;
+            }
+            benchmark_frames = (uint32_t)n;
+            headless = !measure_runtime;
+        } else if (a == "--benchmark-route" && i + 1 < argc) {
+            benchmark_route_path = argv[++i];
+        } else if (a == "--state-file" && i + 1 < argc) {
+            state_file = argv[++i];
+        } else if (a == "--rewind-frames" && i + 1 < argc) {
+            char* end=nullptr;const char* value=argv[++i];
+            unsigned long n=std::strtoul(value,&end,10);
+            if(!*value || *end || *value=='-' || n<2 || n>512) {
+                std::puts("--rewind-frames requires 2..512");return 2;
+            }
+            rewind_depth=(unsigned)n;
         } else if (a == "--paused") {
             start_paused = true;
         } else if (a == "--headless") {
             headless = true;
+            explicit_headless = true;
         } else if (a == "--stereo" || a == "--dual-eye") {
             stereo = true;
         } else {
             std::fprintf(stderr, "unknown argument: %s (try --help)\n", argv[i]);
             return 2;
+        }
+    }
+
+    if (benchmark_frames && (start_paused || !rom_path)) {
+        std::fputs("--benchmark requires --rom and cannot use --paused.\n", stderr); return 2;
+    }
+    if (measure_runtime && explicit_headless) {
+        std::fputs("--measure-runtime cannot use --headless.\n", stderr); return 2;
+    }
+    if (benchmark_route_path) {
+        if (!benchmark_frames) { std::fputs("--benchmark-route requires --benchmark.\n", stderr); return 2; }
+        FILE* route = std::fopen(benchmark_route_path, "r");
+        if (!route) { std::perror("benchmark route"); return 2; }
+        char line[128]; unsigned total = 0; bool valid = true;
+        while (std::fgets(line, sizeof(line), route)) {
+            unsigned long long frames = 0, pad = 0; char extra;
+            if (std::sscanf(line, "%llu %llu %c", &frames, &pad, &extra) != 2 ||
+                !frames || pad > 65535 || frames > benchmark_frames - total) { valid = false; break; }
+            total += (unsigned)frames; benchmark_route.push_back({total, (uint16_t)pad});
+        }
+        if (std::ferror(route)) valid = false;
+        std::fclose(route);
+        if (!valid || total != benchmark_frames) {
+            std::fputs("Benchmark route must contain positive counts and 16-bit pad masks totaling N.\n", stderr); return 2;
         }
     }
 
@@ -409,9 +495,12 @@ int main(int argc, char** argv) {
 #if !defined(VBRECOMP_DEBUG_TOOLS)
     if (start_paused) { std::fputs("--paused requires a debug-tools build.\n", stderr); return 2; }
 #endif
-    const int host_result = vb_host_prepare(argv[0], rom_path, headless);
+    const int host_result = vb_host_prepare(argv[0], rom_path, headless || benchmark_frames != 0);
     if (host_result < 0) { std::puts(vb_host_error().c_str()); return 2; }
     if (host_result == 0) return 0;
+    if(measure_runtime && (headless || !vb_host_config.audio)) {
+        std::puts("Runtime measurement requires working SDL presentation and audio");return 3;
+    }
     CPUState cpu;
     std::memset(&cpu, 0, sizeof(cpu));
 
@@ -526,6 +615,7 @@ int main(int argc, char** argv) {
                                  "falling back to headless\n",
                          SDL_GetError());
             headless = true;
+            explicit_headless = true;
         } else {
             gamepad_open_first();
         }
@@ -540,6 +630,7 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "vb-runtime: SDL_CreateWindow failed: %s\n",
                          SDL_GetError());
             headless = true;
+            explicit_headless = true;
         }
     }
     if (!headless && vb_host_config.fullscreen)
@@ -554,13 +645,14 @@ int main(int argc, char** argv) {
          * scroll tearing; the manual pacer below still bounds the rate.
          * Fall back progressively if a driver can't provide vsync/accel. */
         ren = SDL_CreateRenderer(win, -1,
-                                 SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+                                 SDL_RENDERER_ACCELERATED | (measure_runtime ? 0 : SDL_RENDERER_PRESENTVSYNC));
         if (!ren) ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_ACCELERATED);
         if (!ren) ren = SDL_CreateRenderer(win, -1, 0);
         if (!ren) {
             std::fprintf(stderr, "vb-runtime: SDL_CreateRenderer failed: %s\n",
                          SDL_GetError());
             headless = true;
+            explicit_headless = true;
         }
     }
     if (!headless) {
@@ -571,6 +663,7 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "vb-runtime: SDL_CreateTexture failed: %s\n",
                          SDL_GetError());
             headless = true;
+            explicit_headless = true;
         }
     }
     if (!headless) {
@@ -601,6 +694,7 @@ int main(int argc, char** argv) {
         SDL_AudioSpec have;
         aud = SDL_OpenAudioDevice(nullptr, 0, &want, &have, 0);
         if (aud == 0) {
+            if(measure_runtime) return 3;
             std::fprintf(stderr,
                 "vb-runtime: SDL_OpenAudioDevice failed: %s "
                 "(continuing without audio)\n", SDL_GetError());
@@ -688,18 +782,40 @@ int main(int argc, char** argv) {
     // is a SEPARATE concern — the per-basic-block yield budget, decremented
     // once per BB leader so a tight intra-function loop still yields to the
     // TCP/SDL poll; it no longer feeds the cycle estimate.
-    constexpr uint64_t STEP_BUDGET     = 250000;
     bool dispatched_once = false;
     uint32_t dispatch_pc = cpu.pc;
     uint64_t present_count = 0;
     /* Always-on hang watchdog (separate thread). Started here, from the main
      * thread, so it can capture this thread's stack on a freeze. */
+    vb_state_bind(&cpu, &dispatch_pc, &last_frame_cycles,
+#if VB_RUNTIME_HAVE_SDL
+        [](void* p) { if (p) SDL_LockAudioDevice((SDL_AudioDeviceID)(uintptr_t)p); },
+        [](void* p) { if (p) SDL_UnlockAudioDevice((SDL_AudioDeviceID)(uintptr_t)p); },
+        (void*)(uintptr_t)aud
+#else
+        nullptr, nullptr, nullptr
+#endif
+    );
+    uint64_t state_generation = vb_state_generation();
+    uint32_t history_frame = UINT32_MAX;
+    if(rewind_depth && !vb_rewind_enable(rewind_depth)) return 2;
+    const auto benchmark_start = std::chrono::steady_clock::now();
+    const double benchmark_cpu_start = process_cpu_seconds();
+    double benchmark_seconds=0, benchmark_cpu_seconds=0;
+    size_t benchmark_segment=0;
     vb_watchdog_start();
     while (vb_debug_server_poll() == 0 && !sdl_quit) {
         // Debugger PC writes are applied while paused. Resume from the
         // architectural PC rather than overwriting it with the prior cache.
         dispatch_pc = cpu.pc;
         vb_watchdog_beat(VB_WD_POLL, dispatch_pc, cpu.cycles, present_count);
+        if (state_generation != vb_state_generation()) {
+            state_generation = vb_state_generation(); last_present_cycles = cpu.cycles;
+            history_frame = UINT32_MAX;
+#if VB_RUNTIME_HAVE_SDL
+            sdl_deadline = 0;
+#endif
+        }
 
         /* Axis-6 frame ring: advance the VIP-frame counter from elapsed
          * cycles (covers both the active-dispatch and HALT-idle paths, which
@@ -718,6 +834,19 @@ int main(int argc, char** argv) {
                         (unsigned long long)vb_execution.native_instructions,(unsigned long long)vb_execution.fallback);
             break;
         }
+        if (benchmark_frames && cpu.frame >= benchmark_frames) {
+            benchmark_cpu_seconds=process_cpu_seconds()-benchmark_cpu_start;
+            benchmark_seconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-benchmark_start).count();
+            break;
+        }
+        if (!benchmark_route.empty()) {
+            while(cpu.frame>=benchmark_route[benchmark_segment].end) ++benchmark_segment;
+            vb_input_set_pad(benchmark_route[benchmark_segment].pad);
+        }
+        if (history_frame != cpu.frame) {
+            if (!vb_rewind_record(cpu.frame)) vb_stub_abort("rewind capture failed",cpu.pc,cpu.frame);
+            history_frame = cpu.frame;
+        }
 #if VB_RUNTIME_HAVE_SDL
         if (!headless) {
             SDL_Event ev;
@@ -731,6 +860,19 @@ int main(int argc, char** argv) {
                     gamepad_handle_device_event(ev);
                 }
                 if (ev.type == SDL_KEYDOWN) {
+                    if (ev.key.keysym.sym == SDLK_F5) {
+                        if(!vb_state_save_file(state_file.c_str()))
+                            SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR,"Save snapshot",vb_state_error(),win);
+                        continue;
+                    }
+                    if (ev.key.keysym.sym == SDLK_F8) {
+                        if(!vb_state_load_file(state_file.c_str()))
+                            SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR,"Load snapshot",vb_state_error(),win);
+                        continue;
+                    }
+                    if (ev.key.keysym.sym == SDLK_BACKSPACE) {
+                        if (cpu.frame) vb_rewind_to(cpu.frame - 1); continue;
+                    }
                     if (ev.key.keysym.sym == SDLK_ESCAPE) {
                         sdl_quit = true;
                         break;
@@ -758,7 +900,7 @@ int main(int argc, char** argv) {
         /* The configured keyboard/controller drives a windowed game unless
          * a TCP input override is active. clear_input restores physical input. */
 #if VB_RUNTIME_HAVE_SDL
-        if (!headless && !vb_debug_server_input_override()) {
+        if (!headless && benchmark_route.empty() && !vb_debug_server_input_override()) {
             uint16_t controller_pad = pad_from_gamecontroller(nullptr);
 #if defined(RECOMP_LAUNCHER)
             if (s_runtime_ui && recomp_runtime_ui_is_open(s_runtime_ui))
@@ -775,100 +917,25 @@ int main(int argc, char** argv) {
         }
 
         bool simulation_paused = vb_debug_server_is_paused() != 0;
+#if VB_RUNTIME_HAVE_SDL
+        if (!headless && vb_rewind_count()) {
+            const Uint8* keys=SDL_GetKeyboardState(nullptr);
+            simulation_paused=simulation_paused || (keys && keys[SDL_SCANCODE_BACKSPACE]);
+        }
+#endif
 #if defined(RECOMP_LAUNCHER) && VB_RUNTIME_HAVE_SDL
         simulation_paused = simulation_paused || (s_runtime_ui && recomp_runtime_ui_is_open(s_runtime_ui));
 #endif
         if (!simulation_paused) {
-        // Deliver any pending IRQ before re-entering dispatch.
-        // vb_irq_check_and_deliver retargets cpu.pc to the vector
-        // when accepted and clears cpu.halted; the next dispatch
-        // call will start executing the ISR.
-        if (vb_irq_check_and_deliver(&cpu)) {
-            dispatch_pc = cpu.pc;
-        }
-
-        if (cpu.halted) {
-            // Event-driven idle (Axis-3 IRQ-take precision). Advance device
-            // time to the next device-state boundary (VIP column/drawing,
-            // timer divider) instead of a fixed 20000-cycle chunk, breaking
-            // as soon as an ACCEPTABLE IRQ is pending (same acceptance rule
-            // as vb_irq_check_and_deliver, which the top of the loop then
-            // applies). IRQ-take latency drops from ~20000 cyc to ~one
-            // column (259 cyc), and we sleep once per wake instead of ~20x
-            // per frame. The frame-sized cap bounds a pass when nothing is
-            // deliverable (e.g. all sources masked).
-            uint64_t idle_consumed = 0;
-            while (cpu.cycles < last_frame_cycles + VB_CYCLES_PER_FRAME) {
-                int32_t step = vb_devices_cycles_to_next_event(cpu.cycles);
-                if (step < 1) step = 1;
-                uint64_t frame_remaining=last_frame_cycles + VB_CYCLES_PER_FRAME-cpu.cycles;
-                if ((uint64_t)step > frame_remaining) step=(int32_t)frame_remaining;
-                cpu.cycles += (uint64_t)step;
-                vb_devices_sync(cpu.cycles);
-                idle_consumed += (uint64_t)step;
-                const int lvl = vb_irq_highest_pending_level();
-                if (lvl >= 0 && !cpu.psw_np && !cpu.psw_ep && !cpu.psw_id
-                    && lvl >= (int)cpu.psw_int_level)
-                    break;   // acceptable IRQ pending — loop top will deliver
-            }
-            std::this_thread::sleep_for(1ms);
+        vb_watchdog_beat(VB_WD_DISPATCH, dispatch_pc, cpu.cycles, present_count);
+        if (!vb_machine_step(&cpu, &dispatch_pc, last_frame_cycles + VB_CYCLES_PER_FRAME)) {
+            if(!benchmark_frames) std::this_thread::sleep_for(1ms);
             continue;
         }
-
-        // Axis-3 mid-block IRQ take: bound this dispatch pass to the next
-        // device-event cycle (VIP column / timer divider — the same
-        // boundaries the HALT idle loop steps to). The recompiled per-BB
-        // check yields once cpu.cycles reaches the deadline, so an IRQ that
-        // becomes pending mid-pass is delivered (top-of-loop
-        // vb_irq_check_and_deliver) within one basic block of the true
-        // event instead of up to a 250000-block pass later. This removes the
-        // interrupt-latency a timer-re-arming music ISR would accumulate
-        // into tempo drift. STEP_BUDGET remains the backstop for the case
-        // where no device event is near (both sources disabled).
-        {
-            int32_t ev_next = vb_devices_cycles_to_next_event(cpu.cycles);
-            if (ev_next < 1) ev_next = 1;
-            cpu.cycle_deadline = cpu.cycles + (uint64_t)ev_next;
-            if (cpu.cycle_deadline > last_frame_cycles + VB_CYCLES_PER_FRAME)
-                cpu.cycle_deadline = last_frame_cycles + VB_CYCLES_PER_FRAME;
+        if (!dispatched_once) {
+            std::printf("vb-runtime: first yield at pc=0x%08X (cart is running)\n", cpu.pc);
+            std::fflush(stdout); dispatched_once = true;
         }
-        cpu.step_budget = STEP_BUDGET;
-        cpu.yielded = 0;
-        vb_watchdog_beat(VB_WD_DISPATCH, dispatch_pc, cpu.cycles, present_count);
-        const uint64_t cyc_before = cpu.cycles;
-        vb_dispatch(&cpu, dispatch_pc);
-
-        // Axis-2 cycle model: the recompiled code now accumulates each
-        // instruction's real V810 base cost into cpu.cycles as it runs
-        // (recompiler/v810/cycles.py), so the device-tick delta is just
-        // how far cpu.cycles advanced this pass — no more bbs_run*3
-        // estimate. step_budget is unchanged: it remains the per-basic-
-        // block yield budget, fully decoupled from cycle accounting.
-        const uint64_t cyc_delta = cpu.cycles - cyc_before;
-        vb_devices_sync(cpu.cycles);
-
-        if (cpu.yielded) {
-            // Resume from wherever the cart left off next tick.
-            dispatch_pc = cpu.pc;
-            if (!dispatched_once) {
-                std::printf("vb-runtime: first yield at pc=0x%08X "
-                            "(cart is running)\n", cpu.pc);
-                std::fflush(stdout);
-                dispatched_once = true;
-            }
-        } else if (cpu.halted) {
-            // HALT instruction; idle loop above will tick devices
-            // until an IRQ wakes us. cpu.pc points just past the
-            // HALT; on resume, dispatch_pc will be set by the IRQ
-            // check above.
-            dispatch_pc = cpu.pc;
-            std::printf("vb-runtime: HALT at pc=0x%08X (waiting for IRQ)\n",
-                        cpu.pc);
-            std::fflush(stdout);
-        } else {
-            vb_stub_abort("dispatcher returned without yielding or halting", cpu.pc, 0);
-        }
-
         } else {
             std::this_thread::sleep_for(2ms);
         }
@@ -960,7 +1027,7 @@ int main(int argc, char** argv) {
 
             /* Pace to VB_RT_FRAME_HZ — TAB skips the wait (turbo). */
             const Uint8* keys = SDL_GetKeyboardState(nullptr);
-            const bool turbo = keys && keys[SDL_SCANCODE_TAB];
+            const bool turbo = measure_runtime || (keys && keys[SDL_SCANCODE_TAB]);
             Uint64 now = SDL_GetPerformanceCounter();
             if (sdl_deadline == 0 || now >= sdl_deadline + sdl_period * 3) {
                 /* Either first present or we fell badly behind; resync. */
@@ -994,6 +1061,21 @@ int main(int argc, char** argv) {
     }
 
     vb_watchdog_stop();
+    if (benchmark_frames) {
+        if(cpu.frame!=benchmark_frames || benchmark_seconds<=0) return 7;
+        uint8_t digest[32];char hash[65];vb_sha256_compute(vb_wram_data(),VB_WRAM_SIZE,digest);
+        for(unsigned i=0;i<32;++i)std::sprintf(hash+2*i,"%02x",digest[i]);
+        std::printf("VBRECOMP_BENCHMARK {\"frames\":%u,\"seconds\":%.9f,\"fps\":%.3f,"
+            "\"process_cpu_seconds\":%.9f,\"cycles\":%llu,\"pc\":%u,\"wram_sha256\":\"%s\","
+            "\"native_instructions\":%llu,\"interpreted_instructions\":%llu,\"fallback_instructions\":%llu,"
+            "\"presents\":%llu,\"synthesized_audio_frames\":%llu,\"workload_scope\":\"%s\"}\n",
+            cpu.frame,benchmark_seconds,cpu.frame/benchmark_seconds,benchmark_cpu_seconds,
+            (unsigned long long)cpu.cycles,cpu.pc,hash,(unsigned long long)vb_execution.native_instructions,
+            (unsigned long long)vb_execution.interpreted,(unsigned long long)vb_execution.fallback,
+            (unsigned long long)present_count,(unsigned long long)vb_vsu_total_frames(),
+            measure_runtime?"uncapped-full-runtime":"headless-core");
+    }
+    vb_state_shutdown();
 #if defined(RECOMP_LAUNCHER) && VB_RUNTIME_HAVE_SDL
     recomp_runtime_ui_destroy(s_runtime_ui);
     s_runtime_ui = nullptr;

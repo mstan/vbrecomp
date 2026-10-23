@@ -1,3 +1,4 @@
+#include "savestate.h"
 /* vsu.c — Virtual Sound Unit.
  *
  * Port of beetle-vb/mednafen/vb/vsu.c (lines 26-475), including the
@@ -96,6 +97,7 @@ static size_t   s_ring_tail;   /* next slot the consumer will read */
  * The accuracy capture tap reads by this absolute index, decoupled from
  * the SDL drain cursor s_ring_tail. */
 static uint64_t s_ring_total;
+static uint64_t s_ring_origin; /* discarded pre-restore output is unavailable */
 
 /* ------------------ Band-limited output (Blip_Synth) -------------- */
 /* One Blip_Buffer per stereo side, clocked at the 5 MHz VSU domain, and
@@ -167,6 +169,7 @@ void vb_vsu_init(void) {
 
     s_ring_head = s_ring_tail = 0;
     s_ring_total = 0;
+    s_ring_origin = 0;
     s_vsu_clock_residue = 0;
 
     /* Band-limited output stage. Mirror the oracle's setup exactly
@@ -622,8 +625,9 @@ size_t vb_vsu_read_abs(uint64_t start_abs, int16_t* dst, size_t max_frames,
     /* Oldest still-readable absolute index: frame i is overwritten at
      * write (i + VSU_RING_FRAMES), so anything >= head - capacity is
      * still in its slot. (head - 1 is the newest written frame.) */
-    const uint64_t resident_lo =
+    uint64_t resident_lo =
         (head > (uint64_t)VSU_RING_FRAMES) ? head - (uint64_t)VSU_RING_FRAMES : 0;
+    if (resident_lo < s_ring_origin) resident_lo = s_ring_origin;
     if (out_head_abs)    *out_head_abs    = head;
     if (out_resident_lo) *out_resident_lo = resident_lo;
     if (!dst || !max_frames) return 0;
@@ -957,3 +961,75 @@ unsigned vb_vsu_snapshot(uint32_t* out) {
     return n;
 }
 #endif
+
+/* Execution state only: host pointers and diagnostic history stay local. */
+void vb_vsu_state_visit(VbStateVisit visit, void* context) {
+    visit(context, &s_intl_control, sizeof(s_intl_control));
+    visit(context, &s_left_level, sizeof(s_left_level));
+    visit(context, &s_right_level, sizeof(s_right_level));
+    visit(context, &s_frequency, sizeof(s_frequency));
+    visit(context, &s_env_control, sizeof(s_env_control));
+    visit(context, &s_ram_address, sizeof(s_ram_address));
+    visit(context, &s_sweep_control, sizeof(s_sweep_control));
+    visit(context, &s_wave_data, sizeof(s_wave_data));
+    visit(context, &s_mod_data, sizeof(s_mod_data));
+    visit(context, &s_eff_freq, sizeof(s_eff_freq));
+    visit(context, &s_envelope, sizeof(s_envelope));
+    visit(context, &s_wave_pos, sizeof(s_wave_pos));
+    visit(context, &s_mod_wave_pos, sizeof(s_mod_wave_pos));
+    visit(context, &s_latcher_clock_divider, sizeof(s_latcher_clock_divider));
+    visit(context, &s_freq_counter, sizeof(s_freq_counter));
+    visit(context, &s_interval_counter, sizeof(s_interval_counter));
+    visit(context, &s_envelope_counter, sizeof(s_envelope_counter));
+    visit(context, &s_sweep_mod_counter, sizeof(s_sweep_mod_counter));
+    visit(context, &s_effects_clock_divider, sizeof(s_effects_clock_divider));
+    visit(context, &s_interval_clock_divider, sizeof(s_interval_clock_divider));
+    visit(context, &s_envelope_clock_divider, sizeof(s_envelope_clock_divider));
+    visit(context, &s_sweep_mod_clock_divider, sizeof(s_sweep_mod_clock_divider));
+    visit(context, &s_noise_latcher_clock_divider, sizeof(s_noise_latcher_clock_divider));
+    visit(context, &s_noise_latcher, sizeof(s_noise_latcher));
+    visit(context, &s_lfsr, sizeof(s_lfsr));
+    visit(context, &s_last_output, sizeof(s_last_output));
+    visit(context, &s_vsu_frame_ts, sizeof(s_vsu_frame_ts));
+    visit(context, &s_vsu_clock_residue, sizeof(s_vsu_clock_residue));
+    visit(context, &s_ring_total, sizeof(s_ring_total));
+    /* Fixed-rate Blip configuration and synth kernels are immutable. Keep
+     * phase, filter accumulator and complete impulse tails, never pointers. */
+    visit(context, &s_bb_l.offset, sizeof(s_bb_l.offset));
+    visit(context, &s_bb_l.reader_accum, sizeof(s_bb_l.reader_accum));
+    visit(context, &s_bb_l.modified, sizeof(s_bb_l.modified));
+    visit(context, s_bb_l.buffer, (s_bb_l.buffer_size + blip_buffer_extra_) * sizeof(*s_bb_l.buffer));
+    visit(context, &s_bb_r.offset, sizeof(s_bb_r.offset));
+    visit(context, &s_bb_r.reader_accum, sizeof(s_bb_r.reader_accum));
+    visit(context, &s_bb_r.modified, sizeof(s_bb_r.modified));
+    visit(context, s_bb_r.buffer, (s_bb_r.buffer_size + blip_buffer_extra_) * sizeof(*s_bb_r.buffer));
+}
+int vb_vsu_state_valid(void) {
+    if (!s_blip_inited || s_vsu_clock_residue < 0 || s_vsu_clock_residue > 3
+        || s_vsu_frame_ts < 0 || s_vsu_frame_ts > VSU_FLUSH_CLOCKS
+        || s_mod_wave_pos < 0 || s_mod_wave_pos > 32
+        || s_noise_latcher_clock_divider < 1 || s_noise_latcher_clock_divider > 120
+        || s_sweep_mod_clock_divider < 1 || s_sweep_mod_clock_divider > 8
+        || s_sweep_mod_counter < 0 || s_sweep_mod_counter > 7
+        || (s_bb_l.offset >> BLIP_BUFFER_ACCURACY) > (uint64_t)s_bb_l.buffer_size
+        || (s_bb_r.offset >> BLIP_BUFFER_ACCURACY) > (uint64_t)s_bb_r.buffer_size) return 0;
+    for (unsigned ch=0;ch<6;++ch) {
+        if (s_wave_pos[ch]<0 || s_wave_pos[ch]>31 || s_ram_address[ch]>15
+            || s_envelope[ch]<0 || s_envelope[ch]>15
+            || s_eff_freq[ch]<0 || s_eff_freq[ch]>2047
+            || s_frequency[ch]>2047 || s_freq_counter[ch]<-200000
+            || s_freq_counter[ch]>20480 || s_latcher_clock_divider[ch]<1
+            || s_latcher_clock_divider[ch]>120 || s_effects_clock_divider[ch]<1
+            || s_effects_clock_divider[ch]>4800 || s_interval_clock_divider[ch]<1
+            || s_interval_clock_divider[ch]>4 || s_envelope_clock_divider[ch]<1
+            || s_envelope_clock_divider[ch]>4) return 0;
+    }
+    return 1;
+}
+void vb_vsu_state_loaded(void) {
+    /* Drop host playback from the discarded future. Blip impulse tails and
+     * absolute synthesis index came from the snapshot; replay regenerates PCM. */
+    s_ring_head=s_ring_tail=(size_t)(s_ring_total & VSU_RING_MASK);
+    s_ring_origin=s_ring_total;
+}
+void vb_vsu_discard_playback(void) { s_ring_tail=s_ring_head; }
