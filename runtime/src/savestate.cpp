@@ -278,4 +278,6 @@ int vb_rewind_to(uint32_t tick) {
     rbe_snap_ring_drop_after(rewind_ring,tick);return 1;
 }
 unsigned vb_rewind_count(void){return rbe_snap_ring_count(rewind_ring);}
+int vb_rewind_has(uint32_t tick){return rbe_snap_ring_has(rewind_ring,tick);}
+int vb_rewind_enabled(void){return rewind_ring!=nullptr;}
 }

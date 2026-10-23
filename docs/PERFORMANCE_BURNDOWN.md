@@ -39,7 +39,7 @@ that unchanged generator into G: scratch. Mario's Tennis is the regression title
 | Profile CPU/dispatch, scheduler, VIP modes, both eyes, copies, allocations, audio and host presentation | Done with attribution limits | Perturbed main-thread PC samples plus source audit; DLL/internal allocator attribution and physical GPU/audio delivery remain unverified. |
 | Add local rbengine lifecycle | Automated qualification complete | `beads-8m99`; standalone snapshot-ring module only. `beads-7plg` tracks companion game presentation spans. |
 | Test bounded candidates | Done | Ledger below; no speculative decode/display-list rewrite. |
-| Balanced A/A and A/B CPU measurements | Passed | Final depth32 CPU reduction 37.15%, A/A 0.35%, both pair directions agree; same source/features except serializer. Earlier series retained separately. |
+| Balanced A/A and A/B CPU measurements | Passed before menu integration | Depth32 CPU reduction 37.15%, A/A 0.35%, both pair directions agree; same source/features except serializer. New UI overhead remains unmeasured. |
 | Automated qualification | Passed | Independent Zero Racers and Mario routes, both eyes, full state/PCM; stock/color/portable lifecycle, actual build-configuration rejection, native persistence, CTest and recompiler tests. |
 | Combined normal-window, normal-audio, one-eye playtest | Ready for human review | Qualified executable and isolated profile staged. No final integration or original-worktree changes. |
 
@@ -116,7 +116,7 @@ Both arms include the same local lifecycle functionality. Subsequent file-error
 handling, explicit 512-slot bounds, custom-source build-identity registration
 and discovery documentation do not change the timed depth0/depth32 path.
 Do not reuse that 53.31% result for the final head: palette hoisting was removed
-and current upstream corpus coverage changed. Final debug/UI game host SHA256:
+and current upstream corpus coverage changed. Pre-menu debug/UI game host SHA256:
 `116bb55548ba3dc5a621e6ee1dea2d0203e01c413fb0bd90d3c1d4a64602cc01`.
 Its UI, custom color renderer and normal audio driver are covered by separate
 correctness/playtest checks, not these production CPU numbers.
@@ -143,7 +143,7 @@ Only the earlier serializer differs in the baseline. The upstream coverage
 improvement is not attributed to this optimization. Acceptance requires A/A
 <=3% and both pair reductions greater than twice the measured noise.
 
-Final result: baseline mean CPU 13.1640625s, candidate 8.2734375s, reduction
+Final pre-menu result: baseline mean CPU 13.1640625s, candidate 8.2734375s, reduction
 37.1513%; A/A variation 0.3474%; paired reductions 37.2121% and 37.0930%.
 All eight runs completed, including the predetermined warmups and control.
 One post-run CPU headroom spike is retained; no foreign benchmark overlapped.
@@ -175,13 +175,61 @@ owner handoff uses a normal window, real audio driver and volume100 with the
 combined local-history changes. Human controls/audio/feel and final integration
 remain pending; network rollback, netplay and link cable behavior are absent.
 
+## Owner-requested F7/F8 host integration
+
+The owner approved gameplay, then identified that the first handoff had raw
+backend controls instead of the established PSX/SNES menus. That handoff did
+not complete the player-facing lifecycle integration. Inspection confirmed
+PSX's `runtime/src/psx_savestate_menu.c` and SNES's
+`runner/src/snes_savestate_menu.c` / `snes_rewind.c` own their state machines
+and raster overlays; recomp-ui itself does not supply these browsers.
+
+Virtual Boy now follows that host pattern in one framework module, so future
+game hosts inherit it: twelve thumbnail/timestamp slots on F7, F8 rewind
+filmstrip with explicit select/cancel, controller navigation and Select+R/L
+gestures, modal execution/audio policy and a release guard for menu inputs.
+Browsing never restores machine state. New Settings actions and history
+enable/depth/interval controls accompany it. Interactive history defaults to
+32 snapshots every six frames; headless/finite workloads retain opt-in history.
+F5/F6 are quick save/load. No game renderer was replaced.
+
+`ui-final-menu-stock` and `ui-final-menu-color` each pass 21 checks through actual SDL keyboard/controller-button
+events and real snapshot files/ring entries. It covers Unicode profiles,
+twelve-slot navigation, bound thumbnails, running-guest modal freeze, complete
+state preservation while browsing/canceling, save/load failures, rewind commit
+and future truncation, reset invalidation and damaged input. Dummy output and
+a process-local SDL controller filter prevent physical input from interfering with
+automation. OS-held keys and physical controller drivers remain human QA.
+The initial Unicode startup failure is retained in `ui-menu-qualified`;
+Windows argv and host filesystem boundaries now use UTF-8 consistently.
+
+The combined menu build also repeats stock/color lifecycle and independent
+reference qualification under `ui-final-*`: stock/color/MSVC each pass36
+lifecycle checks; Zero Racers39 checkpoints/273 byte audits and Mario15/105
+match the independent reference; native persistence7 and MSVC Unicode-native
+persistence7 pass; actual Release/Debug identity6, CTest7/7 and finiteCLI pass.
+Production MinGW and MSVC Release/Debug build successfully. The preceding 37.15% measurement
+qualifies the serializer implementation before thumbnail/menu integration;
+it does not measure the new UI's incremental capture cost or its six-frame
+interactive cadence. That overhead remains unmeasured. No new overall CPU
+percentage is claimed for this UI follow-up.
+
+Full regression menu build SHA256:
+`c1c1c779e1b2e37291afac99e3ec0dbeff669563f754d77032df76c6adeae99d`.
+Delivery build after glyph-header line-ending normalization:
+`72cfe70cd85f70293d3bdee210350a35b44ead175aa67ae749f0b7685aa54d81`.
+`font-normalization-proof.json` confirms identical executable code sections;
+only `.rdata` changed with the source-derived snapshot build identity. The
+stock/color 21-check current-build menu suites were repeated against the
+delivery binary in `ui-delivery-menu-stock` and `ui-delivery-menu-color`.
+
 Handoff: `final-review/Playtest.ps1` inside the evidence root. One eye, color mod on,
-32-frame local history, isolated SRAM/config/snapshot paths. The real Windows
+32-snapshot history at six-frame intervals, isolated SRAM/config/snapshot paths. The real Windows
 audio driver is restored; software SDL presentation avoids driver shader-cache
 output on C:. TEMP/TMP stay under the handoff directory. The executable is the
-same qualified game host named above. Human checking should cover ordinary
-controls and steering, music/SFX, F5/F8 during a turn, Backspace rewind/release,
-repeated loads and close/relaunch. Both eyes were checked independently by
+same qualified menu build named above. Gameplay has owner approval; final UI
+checking should cover F7 save/load, F8 scrub/cancel/select, controller gestures,
+input release and audio resumption. Both eyes were checked independently by
 automation; the owner display deliberately shows one eye. No native owner save
 is used. Non-Windows builds remain unverified; no mandatory host-specific
 backend, assembly or SIMD was introduced.

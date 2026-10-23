@@ -12,6 +12,7 @@
  */
 #include "debug_server.h"
 #include "savestate.h"
+#include "state_ui.h"
 #include "v810_interpreter.h"
 
 #include <stdarg.h>
@@ -344,6 +345,11 @@ static void handle_timer_state(long long id) {
 }
 
 static VbDebugHostCapture s_host_capture;
+static VbDebugHostInput s_host_input;
+static void* s_host_input_context;
+void vb_debug_server_set_host_input(VbDebugHostInput input,void* context) {
+    s_host_input=input;s_host_input_context=context;
+}
 static void source_put16(uint8_t* p, uint16_t v) { p[0]=(uint8_t)v; p[1]=(uint8_t)(v>>8); }
 static void source_put32(uint8_t* p, uint32_t v) { source_put16(p,(uint16_t)v); source_put16(p+2,(uint16_t)(v>>16)); }
 static void handle_source_dump(const char* line) {
@@ -1372,6 +1378,19 @@ static void dispatch_line(char* line) {
 
     if (strcmp(cmd, "device_state") == 0) { char body[16384]; vb_device_response(body,sizeof(body)); send_response(body); }
     else if (strcmp(cmd, "capabilities") == 0) { send_response("{\"ok\":true,\"protocol\":2,\"commands\":[\"device_state\",\"audio_pcm\",\"audio_shadow_state\",\"breakpoint\",\"capabilities\",\"capture_dump\",\"clear_input\",\"continue\",\"cpuhook\",\"execution_stats\",\"fallback_coverage\",\"branch_rules\",\"set_gpr\",\"pc_set\",\"fntrace_dump\",\"fntrace_reset\",\"fntrace_stats\",\"frame\",\"get_frame\",\"get_registers\",\"history\",\"irq_force\",\"irq_state\",\"memory_map\",\"overrides_state\",\"pad_state\",\"pause\",\"ping\",\"press\",\"psw_set\",\"psw_state\",\"quit\",\"read_ram\",\"recolor_reload\",\"recolor_state\",\"recolor_trace\",\"run_frames\",\"screenshot\",\"set_input\",\"source_dump\",\"step\",\"timer_state\",\"viewport_state\",\"vip_phase\",\"vip_state\",\"watchdog\",\"world_map\",\"world_trace\",\"wram_anchors\",\"wram_hash\",\"write_ram\",\"wtrace_dump\",\"wtrace_reset\",\"wtrace_stats\"],\"max_read_bytes\":65536,\"instruction_control\":true,\"trace_version\":2}"); }
+    else if (strcmp(cmd,"state_ui") == 0) {
+        char body[256];snprintf(body,sizeof(body),"{\"ok\":true,\"mode\":%d,\"slot\":%d,\"result\":%d,\"count\":%u,\"selected_frame\":%u,\"snapshots\":%u}",
+            vb_state_ui_mode(),vb_state_ui_slot(),vb_state_ui_result(),vb_state_ui_history_count(),vb_state_ui_selected_frame(),vb_rewind_count());send_response(body);
+    }
+    else if (strcmp(cmd,"host_input") == 0) {
+        long long device=-1,value=-1,pressed=1,repeat=0;
+        extract_int(line,"\"device\"",&device);extract_int(line,"\"value\"",&value);
+        extract_int(line,"\"pressed\"",&pressed);extract_int(line,"\"repeat\"",&repeat);
+        if(!s_host_input || device<0 || device>1 || value<0 || value>(device?20:511) || pressed<0 || pressed>1 || repeat<0 || repeat>1
+           || !s_host_input((int)device,(int)value,(int)pressed,(int)repeat,s_host_input_context))
+            send_response("{\"ok\":false,\"error\":\"invalid or unavailable SDL host input\"}");
+        else send_response("{\"ok\":true}");
+    }
     else if (strcmp(cmd, "ping") == 0)         handle_ping(id);
     else if (strcmp(cmd, "step") == 0) {
         long long count=1;extract_int(line,"\"count\"",&count);

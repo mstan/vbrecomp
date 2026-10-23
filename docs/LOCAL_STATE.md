@@ -18,11 +18,30 @@ temporary file and atomic replacement.
 
 ## Controls
 
-`--state-file PATH` selects the quick snapshot file (default `quick.state` in
-the working directory). F5 captures it; F8 restores it. `--rewind-frames N`
-enables a local history of 2..512 frame slots, subject to a 512 MiB memory
-limit. Hold Backspace to step backward and release it to resume. Rewind is off
-by default. Captures and restores occur between guest dispatches; they never
+F7 opens the twelve-slot save-state browser, matching the PSX/SNES hosts.
+Arrows choose a slot; Enter/X loads, S saves, and Escape cancels. Gamepad A
+loads, X saves and B cancels; Select+R toggles the browser. A save stays open
+to show its thumbnail and timestamp. Files live under `states/<ROM SHA256>`
+beside `--state-file`. Preview sidecars are bound to the snapshot header, so
+a replacement with a different identity/checksum does not inherit an old
+preview. Thumbnails are cosmetic; actual loads validate the complete file.
+Save and load errors remain visible without closing the browser.
+
+F8 (or Select+L) opens the rewind filmstrip. Left/right select a captured
+point; Enter/gamepad A commits it; Escape/gamepad B cancels. Browsing freezes
+execution and mutes playback without restoring any state. Cancel preserves
+the live machine; commit restores the selected snapshot and discards its
+abandoned future. The preview deliberately shows one eye and keeps its aspect.
+The closing controller/keyboard gesture is masked until released.
+
+`--state-file PATH` selects the quick file (default `quick.state`); F5 saves
+and F6 loads it. F8 is reserved for the visual rewind menu. Interactive hosts
+default to 32 snapshots every six frames (about 3.8 seconds at VB timing).
+Settings controls enablement, depth and capture interval. Headless/finite
+workloads retain explicit opt-in history. `--rewind-frames N` selects 2..512
+slots and retains the original per-frame cadence unless `--rewind-interval
+1..60` is supplied. Snapshots remain subject to the 512 MiB ring limit.
+Captures and restores occur between guest dispatches; they never
 serialize a host call stack or a bus function pointer.
 
 The development TCP interface supports `save_state` / `load_state` with a
@@ -92,3 +111,11 @@ netplay, link-cable or cross-build compatibility.
 `--mod-archive` and `--enable-mod package:feature` exercise an installed mod in
 the isolated profile. `replay_frames` is a paused diagnostic operation using
 the same frame scheduler, not a rollback session or network protocol.
+
+`tools/qualify_state_ui.py` runs the actual SDL event pump and real slot/ring
+backend with dummy output and isolated physical controllers. It injects SDL
+keyboard/controller-button events, checks graphical output, twelve-slot
+navigation, Unicode profiles and bound thumbnails, full-state freeze while
+debugger execution is resumed, save/load/error paths, rewind scrub/cancel/
+commit/future truncation and reset invalidation. OS keyboard holds and physical
+controller drivers remain human QA; injected events do not establish those.

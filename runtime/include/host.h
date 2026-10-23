@@ -4,6 +4,7 @@
 struct VbHostConfig {
     int scale = 2, fullscreen = 0, filter = 0, audio = 1, volume = 100;
     int player_source = 1, deadzone = 35, skip_launcher = 0;
+    int rewind = 1, rewind_depth = 32, rewind_interval = 6;
     std::string gamepad_guid;
     int keys[14] = {82,81,80,79,26,22,4,7,27,29,20,8,40,229};
     int pads[14] = {12,13,14,15,106,107,104,105,1,2,10,11,7,5};

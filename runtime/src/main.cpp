@@ -7,6 +7,7 @@
  * input feeding vb_input_set_pad.
  */
 #include <chrono>
+#include <algorithm>
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
@@ -22,6 +23,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <shellapi.h>
 #endif
 
 static double process_cpu_seconds() {
@@ -52,6 +54,7 @@ static double process_cpu_seconds() {
 #include "memory.h"
 #include "machine.h"
 #include "savestate.h"
+#include "state_ui.h"
 #include "vb_sha256.h"
 #include "rom_patch.h"
 #include "stub_abort.h"
@@ -99,8 +102,9 @@ static void print_help(const char* argv0) {
         "  --benchmark N    Run N uncapped headless frames and exit.\n"
         "  --measure-runtime N  Run N uncapped frames with SDL render/present/audio.\n"
         "  --benchmark-route PATH  Decimal frame-count and pad-mask per line.\n"
-        "  --state-file PATH  F5 saves / F8 restores this build-specific snapshot.\n"
-        "  --rewind-frames N  Keep 2..512 local frames; hold Backspace to rewind.\n"
+        "  --state-file PATH  F5 quick save / F6 quick load; F7 slot browser.\n"
+        "  --rewind-frames N  Keep 2..512 local snapshots; F8 opens rewind.\n"
+        "  --rewind-interval N  Frames per snapshot (1..60; CLI depth defaults 1).\n"
         "  --paused         Start paused (requires debug tools).\n"
         "  --execution MODE hybrid (default), native, or interpreter.\n"
         "  --save PATH      Cartridge save (64KiB, saved on clean exit).\n"
@@ -143,10 +147,26 @@ static constexpr double VB_RT_FRAME_HZ = 50.27;
 static constexpr int VB_RT_WIN_SCALE = 2;   /* legibility default */
 
 static std::atomic<int> s_runtime_audio_volume{100};
+static std::atomic<bool> s_state_modal{false};
+static unsigned s_history_interval=1;
 struct VbHostCapture { const uint32_t* pixels; int width, height; };
 static int vb_capture_host(const char* path, void* context) {
     const auto* frame = static_cast<VbHostCapture*>(context);
     return vb_write_png_32bpp(path, frame->width, frame->height, frame->pixels);
+}
+static int vb_inject_host_input(int device,int value,int pressed,int repeat,void* context) {
+    SDL_Event event{};
+    if(!device) {
+        event.type=pressed?SDL_KEYDOWN:SDL_KEYUP;
+        event.key.windowID=SDL_GetWindowID(static_cast<SDL_Window*>(context));
+        event.key.keysym.scancode=(SDL_Scancode)value;
+        event.key.keysym.sym=SDL_GetKeyFromScancode((SDL_Scancode)value);
+        event.key.repeat=(Uint8)repeat;
+    } else {
+        event.type=pressed?SDL_CONTROLLERBUTTONDOWN:SDL_CONTROLLERBUTTONUP;
+        event.cbutton.button=(Uint8)value;
+    }
+    return SDL_PushEvent(&event)>0;
 }
 
 #if defined(RECOMP_LAUNCHER)
@@ -192,6 +212,9 @@ static int vb_runtime_ui_get(void* opaque, const RecompRuntimeUiItem* item, int*
     else if (std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_LINEAR_FILTER) == 0) *out = c->linear_filter;
     else if (std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_AUDIO) == 0) *out = c->audio_enabled;
     else if (std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_VOLUME) == 0) *out = c->volume;
+    else if (std::strcmp(item->key, "history.enabled") == 0) *out = vb_host_config.rewind;
+    else if (std::strcmp(item->key, "history.depth") == 0) *out = vb_host_config.rewind_depth;
+    else if (std::strcmp(item->key, "history.interval") == 0) *out = (int)s_history_interval;
     else return 0;
     return 1;
 }
@@ -228,6 +251,15 @@ static int vb_runtime_ui_set(void* opaque, const RecompRuntimeUiItem* item, int 
     } else if (std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_VOLUME) == 0) {
         c->volume = value < 0 ? 0 : value > 100 ? 100 : value;
         s_runtime_audio_volume = c->volume;
+    } else if (std::strcmp(item->key, "history.enabled") == 0 || std::strcmp(item->key, "history.depth") == 0) {
+        const bool enabled=std::strcmp(item->key,"history.enabled")==0?value!=0:vb_host_config.rewind!=0;
+        const int depth=std::strcmp(item->key,"history.depth")==0?value:vb_host_config.rewind_depth;
+        if(enabled && !vb_rewind_enable((unsigned)depth))return 0;
+        if(!enabled)vb_rewind_shutdown();
+        vb_state_ui_sync();vb_host_config.rewind=enabled;vb_host_config.rewind_depth=depth;
+    } else if (std::strcmp(item->key, "history.interval") == 0) {
+        s_history_interval=(unsigned)std::max(1,std::min(value,60));
+        vb_host_config.rewind_interval=(int)s_history_interval;
     } else return 0;
     vb_host_config.scale = c->window_scale;
     vb_host_config.filter = c->linear_filter;
@@ -239,6 +271,10 @@ static int vb_runtime_ui_set(void* opaque, const RecompRuntimeUiItem* item, int 
 }
 
 static int vb_runtime_ui_action(void*, const RecompRuntimeUiItem* item) {
+    if(item && (!std::strcmp(item->key,"history.browser") || !std::strcmp(item->key,"history.rewind"))) {
+        recomp_runtime_ui_close(s_runtime_ui);
+        return vb_state_ui_action(!std::strcmp(item->key,"history.browser")?VB_STATE_UI_SLOTS:VB_STATE_UI_REWIND);
+    }
     if (item && std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_RESUME) == 0) {
         recomp_runtime_ui_close(s_runtime_ui);
         return 1;
@@ -293,6 +329,46 @@ static bool vb_runtime_ui_event(const SDL_Event& ev) {
     return recomp_runtime_ui_is_open(s_runtime_ui) || mapped;
 }
 #endif
+
+static bool vb_state_ui_event(const SDL_Event& ev) {
+    if(ev.type==SDL_KEYDOWN && (ev.key.keysym.sym==SDLK_F7 || ev.key.keysym.sym==SDLK_F8)) {
+        if(!ev.key.repeat) {
+#if defined(RECOMP_LAUNCHER)
+            if(s_runtime_ui)recomp_runtime_ui_close(s_runtime_ui);
+#endif
+            vb_state_ui_action(ev.key.keysym.sym==SDLK_F7?VB_STATE_UI_SLOTS:VB_STATE_UI_REWIND);
+        }
+        return true;
+    }
+    if(!vb_state_ui_mode())return false;
+    if(ev.type==SDL_KEYDOWN) {
+        int key=ev.key.keysym.sym,action=-1;
+        int jump=key>=SDLK_1&&key<=SDLK_9?key-SDLK_1:key==SDLK_0?9:key==SDLK_MINUS?10:key==SDLK_EQUALS?11:-1;
+        if(jump>=0){vb_state_ui_select_slot(jump);return true;}
+        switch(key) {
+            case SDLK_ESCAPE: case SDLK_BACKSPACE: action=VB_STATE_UI_BACK;break;
+            case SDLK_LEFT: action=VB_STATE_UI_LEFT;break;
+            case SDLK_RIGHT: action=VB_STATE_UI_RIGHT;break;
+            case SDLK_UP: action=VB_STATE_UI_UP;break;
+            case SDLK_DOWN: action=VB_STATE_UI_DOWN;break;
+            case SDLK_s: action=VB_STATE_UI_SAVE;break;
+            case SDLK_x: case SDLK_l: case SDLK_RETURN: case SDLK_SPACE: action=VB_STATE_UI_LOAD;break;
+        }
+        if(action>=0 && (!ev.key.repeat || (action>=VB_STATE_UI_LEFT&&action<=VB_STATE_UI_DOWN)))vb_state_ui_action(action);
+        return true;
+    }
+    if(ev.type==SDL_CONTROLLERBUTTONDOWN) {
+        int action=-1;
+        switch(ev.cbutton.button) {
+            case SDL_CONTROLLER_BUTTON_A: action=VB_STATE_UI_LOAD;break;
+            case SDL_CONTROLLER_BUTTON_X: action=VB_STATE_UI_SAVE;break;
+            case SDL_CONTROLLER_BUTTON_B: action=VB_STATE_UI_BACK;break;
+        }
+        if(action>=0)vb_state_ui_action(action);
+        return true;
+    }
+    return ev.type==SDL_KEYUP || ev.type==SDL_CONTROLLERBUTTONUP;
+}
 
 static uint16_t pad_from_keyboard(void) {
     /* Hardware pad masks use one bit per pressed button. */
@@ -374,6 +450,7 @@ static uint16_t pad_from_gamecontroller(bool* out_connected) {
 static void vb_sdl_audio_cb(void* /*ud*/, Uint8* stream, int len) {
     const size_t n_frames = (size_t)len / (2 * sizeof(int16_t));
     vb_vsu_pull_samples((int16_t*)stream, n_frames);
+    if(s_state_modal.load(std::memory_order_relaxed)){std::memset(stream,0,(size_t)len);return;}
     const int volume = s_runtime_audio_volume.load(std::memory_order_relaxed);
     if (volume < 100) {
         int16_t* samples = reinterpret_cast<int16_t*>(stream);
@@ -385,6 +462,25 @@ static void vb_sdl_audio_cb(void* /*ud*/, Uint8* stream, int len) {
 #endif
 
 int main(int argc, char** argv) {
+#ifdef _WIN32
+    // Windows' narrow CRT argv can lose Unicode paths before filesystem code
+    // sees them. Match the debugger's UTF-8 path contract at the entry point.
+    int wide_count=0;
+    auto wide_args=CommandLineToArgvW(GetCommandLineW(),&wide_count);
+    std::vector<std::string> utf8_args;
+    std::vector<char*> utf8_argv;
+    if(!wide_args)return 2;
+    for(int i=0;i<wide_count;++i) {
+        int bytes=WideCharToMultiByte(CP_UTF8,0,wide_args[i],-1,nullptr,0,nullptr,nullptr);
+        if(bytes<=0){LocalFree(wide_args);return 2;}
+        std::string value((size_t)bytes,'\0');
+        WideCharToMultiByte(CP_UTF8,0,wide_args[i],-1,value.data(),bytes,nullptr,nullptr);
+        value.pop_back();utf8_args.push_back(std::move(value));
+    }
+    LocalFree(wide_args);
+    for(auto& value:utf8_args)utf8_argv.push_back(value.data());
+    utf8_argv.push_back(nullptr);argc=wide_count;argv=utf8_argv.data();
+#endif
     int port = VB_DEFAULT_DEBUG_PORT;
     const char* rom_path = nullptr;
     bool headless = false;
@@ -394,6 +490,8 @@ int main(int argc, char** argv) {
     uint32_t frame_limit = 0;
     std::string state_file = "quick.state";
     unsigned rewind_depth = 0;
+    unsigned rewind_interval=1;
+    bool rewind_explicit=false,interval_explicit=false;
     uint32_t benchmark_frames = 0;
     bool measure_runtime = false;
     const char* benchmark_route_path = nullptr;
@@ -448,7 +546,11 @@ int main(int argc, char** argv) {
             if(!*value || *end || *value=='-' || n<2 || n>512) {
                 std::puts("--rewind-frames requires 2..512");return 2;
             }
-            rewind_depth=(unsigned)n;
+            rewind_depth=(unsigned)n;rewind_explicit=true;
+        } else if (a == "--rewind-interval" && i + 1 < argc) {
+            char* end=nullptr;const char* value=argv[++i];unsigned long n=std::strtoul(value,&end,10);
+            if(!*value || *end || *value=='-' || n<1 || n>60){std::puts("--rewind-interval requires 1..60");return 2;}
+            rewind_interval=(unsigned)n;interval_explicit=true;
         } else if (a == "--paused") {
             start_paused = true;
         } else if (a == "--headless") {
@@ -594,6 +696,10 @@ int main(int argc, char** argv) {
     SDL_Window*       win = nullptr;
     SDL_Renderer*     ren = nullptr;
     SDL_Texture*      tex = nullptr;
+    SDL_Texture*      state_tex = nullptr;
+    uint16_t menu_blocked_pad=0,previous_gesture=0;
+    int held_menu_direction=0;
+    Uint32 next_menu_repeat=0;
     SDL_AudioDeviceID aud = 0;
     Uint64            sdl_freq = 0;
     Uint64            sdl_period = 0;
@@ -662,7 +768,8 @@ int main(int argc, char** argv) {
         tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_ARGB8888,
                                 SDL_TEXTUREACCESS_STREAMING,
                                 tex_w, tex_h);
-        if (!tex) {
+        state_tex=SDL_CreateTexture(ren,SDL_PIXELFORMAT_ARGB8888,SDL_TEXTUREACCESS_STREAMING,768,448);
+        if (!tex || !state_tex) {
             std::fprintf(stderr, "vb-runtime: SDL_CreateTexture failed: %s\n",
                          SDL_GetError());
             headless = true;
@@ -671,6 +778,7 @@ int main(int argc, char** argv) {
     }
     if (!headless) {
         sdl_freq = SDL_GetPerformanceFrequency();
+        vb_debug_server_set_host_input(vb_inject_host_input,win);
         const double frame_ms = 1000.0 / VB_RT_FRAME_HZ;
         sdl_period = (Uint64)((double)sdl_freq * (frame_ms / 1000.0));
         std::printf("vb-runtime: SDL window %dx%d at %.2f Hz (%s)\n",
@@ -737,17 +845,22 @@ int main(int argc, char** argv) {
             const int count = provider->feature_count(provider->ctx);
             ui_features.resize(count);
             ui_feature_keys.resize(count);
-            ui_mod_items.resize(count);
+            ui_mod_items.reserve(count+5);
             for (int i = 0; i < count; ++i) {
                 provider->feature_get(provider->ctx, i, &ui_features[i]);
                 const auto& f = ui_features[i];
                 ui_feature_keys[i] = std::string("mod:") + f.package_id + ":" + f.id;
-                ui_mod_items[i] = {ui_feature_keys[i].c_str(), "Mods", f.name, f.description,
-                    RECOMP_RUNTIME_UI_BOOL, 0, 1, 1, nullptr, 0, nullptr};
+                ui_mod_items.push_back({ui_feature_keys[i].c_str(), "Mods", f.name, f.description,
+                    RECOMP_RUNTIME_UI_BOOL, 0, 1, 1, nullptr, 0, nullptr});
             }
-            runtime_ui_config.extra_items = ui_mod_items.data();
-            runtime_ui_config.extra_item_count = ui_mod_items.size();
         }
+        ui_mod_items.push_back({"history.browser","System","Save states (F7)","Browse twelve thumbnail slots.",RECOMP_RUNTIME_UI_ACTION,0,0,0,nullptr,0,nullptr});
+        ui_mod_items.push_back({"history.rewind","System","Rewind (F8)","Browse local history and select a point to resume.",RECOMP_RUNTIME_UI_ACTION,0,0,0,nullptr,0,nullptr});
+        ui_mod_items.push_back({"history.enabled","Rewind","Enable rewind","Keep local execution snapshots while playing.",RECOMP_RUNTIME_UI_BOOL,0,1,1,nullptr,0,nullptr});
+        ui_mod_items.push_back({"history.depth","Rewind","Snapshots","History slots, subject to a 512 MiB limit.",RECOMP_RUNTIME_UI_INT,8,64,8,nullptr,0,nullptr});
+        ui_mod_items.push_back({"history.interval","Rewind","Frames per snapshot","Larger intervals retain more seconds of history.",RECOMP_RUNTIME_UI_INT,1,60,1,nullptr,0,nullptr});
+        runtime_ui_config.extra_items = ui_mod_items.data();
+        runtime_ui_config.extra_item_count = ui_mod_items.size();
         s_runtime_ui = recomp_runtime_ui_create_standard(&runtime_ui_config);
 #endif
     }
@@ -801,7 +914,20 @@ int main(int argc, char** argv) {
     );
     uint64_t state_generation = vb_state_generation();
     uint32_t history_frame = UINT32_MAX;
+    if(!headless && !benchmark_frames && !rewind_explicit) {
+        rewind_depth=vb_host_config.rewind?(unsigned)vb_host_config.rewind_depth:0;
+        if(!interval_explicit)rewind_interval=(unsigned)vb_host_config.rewind_interval;
+    }
+#if VB_RUNTIME_HAVE_SDL
+    s_history_interval=rewind_interval;
+#endif
     if(rewind_depth && !vb_rewind_enable(rewind_depth)) return 2;
+    if(!headless && !benchmark_frames) {
+        vb_host_config.rewind=rewind_depth!=0;
+        if(rewind_depth)vb_host_config.rewind_depth=(int)rewind_depth;
+        vb_host_config.rewind_interval=(int)rewind_interval;
+    }
+    vb_state_ui_init(state_file.c_str());
     const auto benchmark_start = std::chrono::steady_clock::now();
     const double benchmark_cpu_start = process_cpu_seconds();
     double benchmark_seconds=0, benchmark_cpu_seconds=0;
@@ -815,6 +941,7 @@ int main(int argc, char** argv) {
         if (state_generation != vb_state_generation()) {
             state_generation = vb_state_generation(); last_present_cycles = cpu.cycles;
             history_frame = UINT32_MAX;
+            vb_state_ui_sync();
 #if VB_RUNTIME_HAVE_SDL
             sdl_deadline = 0;
 #endif
@@ -847,14 +974,24 @@ int main(int argc, char** argv) {
             vb_input_set_pad(benchmark_route[benchmark_segment].pad);
         }
         if (history_frame != cpu.frame) {
-            if (!vb_rewind_record(cpu.frame)) vb_stub_abort("rewind capture failed",cpu.pc,cpu.frame);
+            unsigned interval=rewind_interval;
+#if VB_RUNTIME_HAVE_SDL
+            interval=s_history_interval;
+#endif
+            if(cpu.frame%interval==0 || !vb_rewind_count()) {
+                if (!vb_rewind_record(cpu.frame)) vb_stub_abort("rewind capture failed",cpu.pc,cpu.frame);
+                if(!headless)vb_state_ui_record(cpu.frame);
+            }
             history_frame = cpu.frame;
         }
 #if VB_RUNTIME_HAVE_SDL
         if (!headless) {
+            bool was_modal=vb_state_ui_mode()!=0,closed_modal=false;
             SDL_Event ev;
             while (SDL_PollEvent(&ev)) {
                 if (ev.type == SDL_QUIT) { sdl_quit = true; break; }
+                int old_mode=vb_state_ui_mode();
+                if (vb_state_ui_event(ev)) {closed_modal|=old_mode&&!vb_state_ui_mode();continue;}
 #if defined(RECOMP_LAUNCHER)
                 if (vb_runtime_ui_event(ev)) continue;
 #endif
@@ -863,18 +1000,15 @@ int main(int argc, char** argv) {
                     gamepad_handle_device_event(ev);
                 }
                 if (ev.type == SDL_KEYDOWN) {
-                    if (ev.key.keysym.sym == SDLK_F5) {
+                    if (ev.key.keysym.sym == SDLK_F5 && !ev.key.repeat) {
                         if(!vb_state_save_file(state_file.c_str()))
                             SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR,"Save snapshot",vb_state_error(),win);
                         continue;
                     }
-                    if (ev.key.keysym.sym == SDLK_F8) {
+                    if (ev.key.keysym.sym == SDLK_F6 && !ev.key.repeat) {
                         if(!vb_state_load_file(state_file.c_str()))
                             SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR,"Load snapshot",vb_state_error(),win);
                         continue;
-                    }
-                    if (ev.key.keysym.sym == SDLK_BACKSPACE) {
-                        if (cpu.frame) vb_rewind_to(cpu.frame - 1); continue;
                     }
                     if (ev.key.keysym.sym == SDLK_ESCAPE) {
                         sdl_quit = true;
@@ -897,6 +1031,39 @@ int main(int argc, char** argv) {
                     }
                 }
             }
+            const uint16_t physical=(uint16_t)(pad_from_keyboard()|pad_from_gamecontroller(nullptr));
+            uint16_t gesture=physical&(VB_PAD_SELECT|VB_PAD_RT|VB_PAD_LT);
+            if((gesture&(VB_PAD_SELECT|VB_PAD_RT))==(VB_PAD_SELECT|VB_PAD_RT) && (previous_gesture&(VB_PAD_SELECT|VB_PAD_RT))!=(VB_PAD_SELECT|VB_PAD_RT)) {
+#if defined(RECOMP_LAUNCHER)
+                    recomp_runtime_ui_close(s_runtime_ui);
+#endif
+                    vb_state_ui_action(VB_STATE_UI_SLOTS);
+            } else if((gesture&(VB_PAD_SELECT|VB_PAD_LT))==(VB_PAD_SELECT|VB_PAD_LT) && (previous_gesture&(VB_PAD_SELECT|VB_PAD_LT))!=(VB_PAD_SELECT|VB_PAD_LT)) {
+#if defined(RECOMP_LAUNCHER)
+                    recomp_runtime_ui_close(s_runtime_ui);
+#endif
+                    vb_state_ui_action(VB_STATE_UI_REWIND);
+            }
+            previous_gesture=gesture;
+            if(vb_state_ui_mode() && s_pad) {
+                int direction=0;
+                int axis=SDL_GameControllerGetAxis(s_pad,SDL_CONTROLLER_AXIS_LEFTX);
+                if(SDL_GameControllerGetButton(s_pad,SDL_CONTROLLER_BUTTON_DPAD_LEFT)||SDL_GameControllerGetButton(s_pad,SDL_CONTROLLER_BUTTON_DPAD_UP)||axis < -16000)direction=-1;
+                if(SDL_GameControllerGetButton(s_pad,SDL_CONTROLLER_BUTTON_DPAD_RIGHT)||SDL_GameControllerGetButton(s_pad,SDL_CONTROLLER_BUTTON_DPAD_DOWN)||axis > 16000)direction=1;
+                Uint32 now=SDL_GetTicks();
+                if(direction && (direction!=held_menu_direction || (int32_t)(now-next_menu_repeat)>=0)) {
+                    vb_state_ui_action(direction<0?VB_STATE_UI_LEFT:VB_STATE_UI_RIGHT);
+                    next_menu_repeat=now+(direction!=held_menu_direction?350:90);
+                }
+                held_menu_direction=direction;
+            } else held_menu_direction=0;
+            bool modal=vb_state_ui_mode()!=0;
+            if((was_modal||closed_modal)&&!modal)menu_blocked_pad|=physical;
+            menu_blocked_pad&=physical;
+            if(modal && !s_state_modal.exchange(true) && aud) {
+                SDL_LockAudioDevice(aud);vb_vsu_discard_playback();SDL_UnlockAudioDevice(aud);
+            }
+            if(!modal)s_state_modal=false;
             if (sdl_quit) break;
         }
 #endif
@@ -905,12 +1072,11 @@ int main(int argc, char** argv) {
 #if VB_RUNTIME_HAVE_SDL
         if (!headless && benchmark_route.empty() && !vb_debug_server_input_override()) {
             uint16_t controller_pad = pad_from_gamecontroller(nullptr);
+            bool menu_open=vb_state_ui_mode()!=0;
 #if defined(RECOMP_LAUNCHER)
-            if (s_runtime_ui && recomp_runtime_ui_is_open(s_runtime_ui))
-                vb_input_set_pad(0);
-            else
+            menu_open=menu_open || (s_runtime_ui && recomp_runtime_ui_is_open(s_runtime_ui));
 #endif
-                vb_input_set_pad((uint16_t)(pad_from_keyboard() | controller_pad));
+            if(!menu_open)vb_input_set_pad((uint16_t)((pad_from_keyboard() | controller_pad)&~menu_blocked_pad));
         }
 #endif
 
@@ -921,10 +1087,7 @@ int main(int argc, char** argv) {
 
         bool simulation_paused = vb_debug_server_is_paused() != 0;
 #if VB_RUNTIME_HAVE_SDL
-        if (!headless && vb_rewind_count()) {
-            const Uint8* keys=SDL_GetKeyboardState(nullptr);
-            simulation_paused=simulation_paused || (keys && keys[SDL_SCANCODE_BACKSPACE]);
-        }
+        simulation_paused=simulation_paused || (!headless && vb_state_ui_mode());
 #endif
 #if defined(RECOMP_LAUNCHER) && VB_RUNTIME_HAVE_SDL
         simulation_paused = simulation_paused || (s_runtime_ui && recomp_runtime_ui_is_open(s_runtime_ui));
@@ -1011,21 +1174,28 @@ int main(int argc, char** argv) {
                                                tex_w * (int)sizeof(uint32_t));
 #endif
 
-            SDL_UpdateTexture(tex, nullptr, tex_pixels,
-                              tex_w * (int)sizeof(uint32_t));
+            int output_w=tex_w,output_h=tex_h;
+            const uint32_t* output=tex_pixels;
+            SDL_Texture* output_texture=tex;
+            if(vb_state_ui_mode()) {
+                output=vb_state_ui_render(&output_w,&output_h);output_texture=state_tex;
+            }
+            host_capture={output,output_w,output_h};
+            SDL_UpdateTexture(output_texture, nullptr, output,
+                              output_w * (int)sizeof(uint32_t));
 
-            double sx = (double)win_w / tex_w;
-            double sy = (double)win_h / tex_h;
+            double sx = (double)win_w / output_w;
+            double sy = (double)win_h / output_h;
             double s  = (sx < sy) ? sx : sy;
             SDL_Rect dst;
-            dst.w = (int)(tex_w * s);
-            dst.h = (int)(tex_h * s);
+            dst.w = (int)(output_w * s);
+            dst.h = (int)(output_h * s);
             dst.x = (win_w - dst.w) / 2;
             dst.y = (win_h - dst.h) / 2;
 
             SDL_SetRenderDrawColor(ren, 0, 0, 0, 0xFF);
             SDL_RenderClear(ren);
-            SDL_RenderCopy(ren, tex, nullptr, &dst);
+            SDL_RenderCopy(ren, output_texture, nullptr, &dst);
             SDL_RenderPresent(ren);
 
             /* Pace to VB_RT_FRAME_HZ — TAB skips the wait (turbo). */
@@ -1079,6 +1249,7 @@ int main(int argc, char** argv) {
             measure_runtime?"uncapped-full-runtime":"headless-core");
     }
     vb_state_shutdown();
+    vb_state_ui_shutdown();
 #if defined(RECOMP_LAUNCHER) && VB_RUNTIME_HAVE_SDL
     recomp_runtime_ui_destroy(s_runtime_ui);
     s_runtime_ui = nullptr;
@@ -1088,6 +1259,7 @@ int main(int argc, char** argv) {
     if (s_pad) { SDL_GameControllerClose(s_pad); s_pad = nullptr; }
     if (aud) { SDL_PauseAudioDevice(aud, 1); SDL_CloseAudioDevice(aud); }
     if (tex) SDL_DestroyTexture(tex);
+    if (state_tex) SDL_DestroyTexture(state_tex);
     if (ren) SDL_DestroyRenderer(ren);
     if (win) SDL_DestroyWindow(win);
     if (!headless) SDL_Quit();

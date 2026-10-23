@@ -39,6 +39,8 @@ python tools/debug_client.py breakpoint pc=-1
 | `reset` | Runtime, paused: restore startup execution state, preserving live cartridge SRAM. |
 | `replay_frames` | Runtime, paused: `frames=1..10000`; synchronous deterministic local replay through the shared scheduler, discarding abandoned playback. |
 | `rewind_enable`, `rewind` | Runtime, paused: history depth `value=2..512`, or absolute target frame in `value`. Requires a resident history entry. |
+| `state_ui` | Runtime: host menu mode (0 closed, 1 slots, 2 rewind), selected slot/frame, preview count and last action result. |
+| `host_input` | Windowed development host only: inject an SDL event, `device=0` keyboard scancode or `device=1` controller button, `value`, `pressed=0|1`, `repeat=0|1`. Tests use isolated dummy devices; this is not OS keyboard or physical-driver coverage. |
 | `screenshot` | `path`, `eye=0|1`, native framebuffer by default. Runtime supports presentation/UI capture through existing capture options. |
 | `viewport_state` | Runtime: active provider, current width/height and maximum width. Optional `window_width`, `window_height` supply per-eye output dimensions for headless adaptive tests; SDL updates these from its live window. |
 | `source_dump` | Runtime: `path`, `eye=0|1`; `VBSRC001` source records at native extent. `presented=1` returns the current viewport's attribution; read width/height from the header. |

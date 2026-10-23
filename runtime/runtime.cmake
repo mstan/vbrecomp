@@ -40,6 +40,7 @@ function(vb_add_runtime_target TARGET)
         ${VB_RUNTIME_DIR}/src/memory.c
         ${VB_RUNTIME_DIR}/src/machine.c
         ${VB_RUNTIME_DIR}/src/savestate.cpp
+        ${VB_RUNTIME_DIR}/src/state_ui.cpp
         ${VB_RUNTIME_DIR}/src/rom_patch.c
         ${VB_RUNTIME_DIR}/src/v810_interpreter.c
         ${VB_RUNTIME_DIR}/src/v810_extended.c
@@ -203,7 +204,7 @@ function(vb_add_runtime_target TARGET)
     # stack on a freeze (StackWalk64 / SymFromAddr). Game-controller support is
     # cross-platform via SDL_GameController (see main.cpp), so no XInput link.
     if(WIN32)
-        target_link_libraries(${TARGET} PRIVATE ws2_32 dbghelp)
+        target_link_libraries(${TARGET} PRIVATE ws2_32 dbghelp shell32)
         # When building with MinGW (the project's primary toolchain),
         # statically link the gcc/stdc++/winpthread runtimes so the
         # release zip ships just vb-runtime.exe + SDL2.dll without

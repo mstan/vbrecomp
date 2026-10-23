@@ -28,7 +28,8 @@ class DebugClient:
     def command(self, cmd, **args):
         self.seq += 1
         request = {"cmd": cmd, "id": self.seq, **args}
-        self.socket.sendall((json.dumps(request) + "\n").encode())
+        # The runtime path boundary consumes UTF-8, not literal \uXXXX text.
+        self.socket.sendall((json.dumps(request, ensure_ascii=False) + "\n").encode())
         raw = self.file.readline(64 * 1024 * 1024)
         if not raw.endswith(b"\n"):
             raise RuntimeError("Debugger closed or returned an incomplete response")

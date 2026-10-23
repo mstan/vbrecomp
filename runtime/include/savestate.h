@@ -54,6 +54,8 @@ void vb_rewind_shutdown(void);
 int vb_rewind_record(uint32_t tick);
 int vb_rewind_to(uint32_t tick);
 unsigned vb_rewind_count(void);
+int vb_rewind_has(uint32_t tick);
+int vb_rewind_enabled(void);
 #ifdef __cplusplus
 }
 #endif
