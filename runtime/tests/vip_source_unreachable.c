@@ -34,5 +34,6 @@ uint32_t vb_red_lut_map(int value) {
 UNREACHABLE(vb_vip_phase_record)
 UNREACHABLE(vb_vip_phase_reset)
 UNREACHABLE(vb_wram_hash_record)
+UNREACHABLE(vb_wram_hash_recording)
 UNREACHABLE(vb_wram_hash_reset)
 UNREACHABLE(vb_wram_region_fnv)

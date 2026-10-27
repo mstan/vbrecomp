@@ -457,7 +457,7 @@ static void vip_advance_column(void) {
                 /* Axis-6 whole-session fidelity: fingerprint WRAM at the
                  * game-frame boundary (1:1-aligned with the oracle via the
                  * proven GAME_START sequence). */
-                {
+                if (vb_wram_hash_recording()) {
                     uint32_t wr_fnv[VB_WRAM_FNV_REGIONS];
                     vb_wram_region_fnv(wr_fnv);
                     vb_wram_hash_record(wr_fnv);

@@ -11,6 +11,7 @@ static uint64_t        s_total;
 void vb_wram_hash_reset(void) {
     s_total = 0;
 }
+int vb_wram_hash_recording(void) { return s_total < VB_WRAM_HASH_RING; }
 
 void vb_wram_hash_record(const uint32_t fnv[VB_WRAMHASH_REGIONS]) {
     if (s_total >= VB_WRAM_HASH_RING) return;   /* first-N: frozen when full */

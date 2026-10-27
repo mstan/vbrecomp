@@ -32,6 +32,8 @@ typedef struct {
 } vb_wramhash_rec;
 
 void vb_wram_hash_record(const uint32_t fnv[VB_WRAMHASH_REGIONS]);
+/* First-N recording freezes at capacity. Avoid preparing a discarded hash. */
+int vb_wram_hash_recording(void);
 uint64_t vb_wram_hash_head(void);
 size_t   vb_wram_hash_read_abs(uint64_t start_abs, vb_wramhash_rec* dst,
                                size_t max_recs, uint64_t* out_head,
