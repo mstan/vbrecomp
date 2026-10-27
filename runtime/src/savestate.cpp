@@ -329,8 +329,10 @@ int vb_rewind_enable(unsigned depth) {
     uint8_t* sample=nullptr;size_t size=0;
     if(!vb_state_capture(&sample,&size,1))return 0;
     std::free(sample);
-    if(size>512u*1024u*1024u/depth) {
-        error="Rewind history exceeds 512 MiB; reduce the frame count";return 0;
+    /* Full stereo attribution + viewport snapshots exceed 16 MiB. Preserve
+     * the default 32 entries with those supported features, still bounded. */
+    if(size>640u*1024u*1024u/depth) {
+        error="Rewind history exceeds 640 MiB; reduce the frame count";return 0;
     }
     RbeSnapRing* next=rbe_snap_ring_create(depth);if(!next)return 0;
     vb_rewind_shutdown();rewind_ring=next;return 1;

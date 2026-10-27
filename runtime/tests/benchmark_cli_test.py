@@ -20,6 +20,9 @@ rejected(["--benchmark", "1", "--measure-runtime", "1"], "Only one finite")
 rejected(["--benchmark", "2", "--frames", "1", "--rom", "missing.vb"], "--frames cannot be combined")
 rejected(["--benchmark", "1"], "requires --rom")
 rejected(["--benchmark", "1", "--rom", "missing.vb", "--paused"], "cannot use --paused")
+for value in ('0x0', '-1x300', '1400x0', '1400x900junk', '9000x900', '1400', ''):
+    rejected(['--measure-window', value], '--measure-window requires WIDTHxHEIGHT')
+rejected(['--measure-window', '1400x1200'], '--measure-window requires --measure-runtime')
 with tempfile.TemporaryDirectory() as directory:
     route = pathlib.Path(directory) / "route.txt"
     for content in ("", "0 0\n", "1 65536\n", "2 0\n", "1 0 extra\n", "1\n", "-1 0\n", "4294967297 0\n", "1 4294967296\n"):

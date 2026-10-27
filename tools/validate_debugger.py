@@ -54,8 +54,15 @@ def validate(args,mode,port):
         first=c.command("get_registers");time.sleep(.08);second=c.command("get_registers")
         assert {k:v for k,v in first.items() if k!="id"}=={k:v for k,v in second.items() if k!="id"}
         checks.append("exact frame advance and stable pause")
-        c.run_frames(40)
         trace=c.command("cpuhook",start=0,max=2)
+        # Instruction density varies by cartridge and scene. Wait for actual
+        # eviction instead of assuming forty frames always fill the 8M ring.
+        rollover_deadline=time.monotonic()+30
+        while trace["resident_lo"]==0:
+            if time.monotonic()>=rollover_deadline:
+                raise TimeoutError(f"trace did not roll over; head={trace['head']}")
+            c.run_frames(40)
+            trace=c.command("cpuhook",start=0,max=2)
         assert trace["resident_lo"]>0 and trace["begin"]==trace["resident_lo"]
         records=list(struct.iter_unpack("<IIIIQ",bytes.fromhex(trace["hex"])))
         assert len(records)==2 and all(row[3]==2 for row in records)

@@ -3,7 +3,7 @@
 `runtime/include/viewport.h` exposes a wider, read-only replay of captured VIP
 drawing inputs. This is a presentation renderer; CPU dispatch, device timing,
 VRAM, SRAM, packed native framebuffers and native screenshot APIs stay unchanged.
-The first consumer is SD Gundam: Dimension War's optional widescreen package.
+Consumers include SD Gundam: Dimension War and Wario Land's optional widescreen packages.
 
 ## Contract and lifetime
 
@@ -29,10 +29,16 @@ layout policy. It must establish that new bounds expose valid source content.
 `vb_viewport_track_extra()` registers one startup capture callback for at most
 16 KiB of title-owned metadata per block. This data follows the same framebuffer
 lifetime as VIP input; presentation callbacks must not substitute newer live
-guest state. The callback writes only the supplied host buffer.
+guest state. The callback writes only the supplied host buffer. That buffer is
+aligned to `uint64_t` for captured title records.
 
 A normal BG world's `outside` callback can map samples beyond its horizontal
 bounds back to original source-map coordinates, preserving CHR provenance.
+Alternatively, `outside_cell` supplies an original 16-bit metatile cell when
+the rolling native tilemap does not contain the extra level area. It receives
+unwrapped source texels and uses captured CHR, decoded palettes and cell flips.
+Return zero for transparent or out-of-level space. When both hooks are set,
+the cell hook handles samples outside the submitted world bounds first.
 Up to 96 extra sprites may reference borrowed original cell maps and CHR banks.
 Each supplies an eye, native-size position and a world after which it is drawn,
 so subsequent native worlds still occlude it. Their source records use OBJ
@@ -50,6 +56,11 @@ culled before VIP submission requires title-owned captured records and original
 art through the extra-sprite API. The shared renderer does not discover those
 records or extend camera movement.
 
+`VbViewportLayout.camera_shift_x` moves the native presentation origin relative
+to its default centered position. Clipping intervals move with it, so level
+edge camera clamping can expose the complete newly visible side. HUD anchors
+may compensate for the origin shift. It never changes the guest camera.
+
 This replay models VIP drawing inputs. It does **not** replay direct CPU writes
 to the packed framebuffer. A title that uses those stores in a widened scene
 needs additional provenance-aware presentation work before enabling this path.
@@ -64,6 +75,13 @@ Width is rounded to the nearest even integer so the native image stays centered
 on its original pixel grid. Narrow windows preserve 384 pixels; extremely wide
 ones cap at 2048. SDL scales uniformly and letterboxes any residual mismatch.
 Stacked stereo divides window height between the eyes before deriving aspect.
+
+Replay brightness uses `vb_vip_column_argb()` for the selected eye's 96 CT
+groups, using the same pure calculation as native framebuffer presentation.
+The original four-column brightness groups follow the native presentation
+origin, including a title camera shift; columns beyond the original view use
+the nearest native edge group. No hardware CT exists for those extra columns.
+The calculation does not modify the live scan Repeat or brightness cache.
 
 `vb_renderer_present_width()` reports the current extent.
 `vb_renderer_present_viewport()` renders that extent and then invokes the color
@@ -89,6 +107,9 @@ There are no changes to native raster loops, guest code or hardware rules.
 796 pixels, actual clipped edge recovery, snapshot lifetime and aspect limits.
 It also checks extra metadata lifetime, duplicate registration rejection,
 out-of-bounds BG source mapping and flipped extra sprites in both eyes.
+Wario coverage adds original-cell provenance/flips, camera-shift clipping,
+native-width transform bypass, and exact RGB replay with differing per-eye
+first/middle/last CT groups and unchanged native-edge brightness.
 The complete runtime CTest suite passes 6/6.
 
 Title-level evidence is in SD Gundam's `docs/WIDESCREEN.md` and compact JSON
@@ -100,3 +121,5 @@ save publication. These tests establish the captured title routes, not universal
 coverage of all games or every VIP edge case.
 
 Central framework issue: `beads-vb.1.6`; title issue: `beads-vb.4.4`.
+Wario additions: `beads-vb.1.9`; title evidence and implementation boundaries
+are in `WarioLandVirtualBoyRecomp/docs/ENHANCEMENTS.md` and `docs/WARIO_LAND.md`.

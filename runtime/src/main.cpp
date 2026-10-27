@@ -494,6 +494,7 @@ int main(int argc, char** argv) {
     bool rewind_explicit=false,interval_explicit=false;
     uint32_t benchmark_frames = 0;
     bool measure_runtime = false;
+    int measure_window_width = 0, measure_window_height = 0;
     const char* benchmark_route_path = nullptr;
     struct BenchmarkSegment { uint32_t end; uint16_t pad; };
     std::vector<BenchmarkSegment> benchmark_route;
@@ -544,6 +545,13 @@ int main(int argc, char** argv) {
             headless = !measure_runtime;
         } else if (a == "--benchmark-route" && i + 1 < argc) {
             benchmark_route_path = argv[++i];
+        } else if (a == "--measure-window" && i + 1 < argc) {
+            char extra;
+            if (std::sscanf(argv[++i], "%dx%d%c", &measure_window_width, &measure_window_height, &extra) != 2 ||
+                measure_window_width < 128 || measure_window_width > 8192 ||
+                measure_window_height < 128 || measure_window_height > 8192) {
+                std::fputs("--measure-window requires WIDTHxHEIGHT in 128..8192\n", stderr); return 2;
+            }
         } else if (a == "--state-file" && i + 1 < argc) {
             state_file = argv[++i];
         } else if (a == "--rewind-frames" && i + 1 < argc) {
@@ -578,6 +586,9 @@ int main(int argc, char** argv) {
     }
     if (measure_runtime && explicit_headless) {
         std::fputs("--measure-runtime cannot use --headless.\n", stderr); return 2;
+    }
+    if (measure_window_width && !measure_runtime) {
+        std::fputs("--measure-window requires --measure-runtime\n", stderr); return 2;
     }
     if (benchmark_route_path) {
         if (!benchmark_frames) { std::fputs("--benchmark-route requires --benchmark.\n", stderr); return 2; }
@@ -731,7 +742,8 @@ int main(int argc, char** argv) {
         win = SDL_CreateWindow(
             VB_GAME_TITLE,
             SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-            tex_w * vb_host_config.scale, tex_h * vb_host_config.scale,
+            measure_window_width ? measure_window_width : tex_w * vb_host_config.scale,
+            measure_window_height ? measure_window_height : tex_h * vb_host_config.scale,
             SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
         if (!win) {
             std::fprintf(stderr, "vb-runtime: SDL_CreateWindow failed: %s\n",
@@ -945,7 +957,10 @@ int main(int argc, char** argv) {
     s_history_interval=rewind_interval;
 #endif
     if(vb_netplay_enabled())rewind_depth=0;
-    if(rewind_depth && !vb_rewind_enable(rewind_depth)) return 2;
+    if(rewind_depth && !vb_rewind_enable(rewind_depth)) {
+        fprintf(stderr, "Unable to enable rewind: %s\n", vb_state_error());
+        return 2;
+    }
     if(!headless && !benchmark_frames && !vb_netplay_enabled()) {
         vb_host_config.rewind=rewind_depth!=0;
         if(rewind_depth)vb_host_config.rewind_depth=(int)rewind_depth;

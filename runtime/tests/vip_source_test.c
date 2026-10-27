@@ -102,9 +102,25 @@ static void extended_layout(const VbViewportScene* scene,int kind,int width,
     for(int eye=0;eye<2;++eye)
         layout->sprites[layout->sprite_count++]=(VbViewportSprite){31,eye,430+eye*2,8,1,1,2048,cells,scene->chars};
 }
+static int original_cell(int x,int y,uint16_t* cell,void* context) {
+    (void)y;(void)context;
+    if(x < -16 || x >= 500)return 0;
+    *cell=0x3001;return 1; /* Original CHR, both flips; absent from native map. */
+}
+static void cell_layout(const VbViewportScene* scene,int kind,int width,
+                         VbViewportLayout* layout,void* context) {
+    (void)scene;(void)kind;(void)width;(void)context;
+    layout->worlds[31].outside_cell=original_cell;
+}
+static void shifted_cell_layout(const VbViewportScene* scene,int kind,int width,
+                                 VbViewportLayout* layout,void* context) {
+    cell_layout(scene,kind,width,layout,context);
+    layout->camera_shift_x=-(width-384)/2;
+}
 static void viewport_tests(void) {
     enum { W = 796, N = W * 224 };
     static uint32_t colors[N];
+    static uint32_t native_colors[384 * 224];
     static uint8_t levels[N], saved[384 * 224];
     static uint16_t worlds[N];
     static VbSourceTexel sources[N];
@@ -118,10 +134,19 @@ static void viewport_tests(void) {
         w[1]=(uint16_t)-12; w[7]=420; w[8]=7;
         for(int block=0;block<28;++block)vip_draw_block_into(block,left,right);
         s_display_fb=0;
+        memcpy(s_vip_mem,left,sizeof(left));
+        memcpy(s_vip_mem+0x10000,right,sizeof(right));
+        s_brta=16;s_brtb=32;s_brtc=0;s_rest=0;s_brt_repeat=7;
+        build_color_lut();recalc_brt_cache();
+        s_vip_mem[0x3ddff]=1;s_vip_mem[0x3dfff]=2;
+        s_vip_mem[0x3ddff-48*2]=3;s_vip_mem[0x3dfff-48*2]=1;
+        s_vip_mem[0x3ddff-95*2]=2;s_vip_mem[0x3dfff-95*2]=3;
         assert(vb_viewport_width()==796);
         for(int eye=0;eye<2;++eye) {
             const uint8_t* fb=eye?right:left;
             assert(vb_viewport_render(0,eye,384,colors,levels,worlds,sources));
+            vb_vip_render_framebuffer(eye,native_colors);
+            assert(!memcmp(colors,native_colors,sizeof(native_colors)));
             for(int y=0;y<224;++y)for(int x=0;x<384;++x) {
                 unsigned i=y*384+x;
                 unsigned raw=(fb[x*64+y/4]>>(2*(y%4)))&3;
@@ -130,8 +155,13 @@ static void viewport_tests(void) {
             }
             memcpy(saved,levels,sizeof(saved));
             assert(vb_viewport_render(0,eye,W,colors,levels,worlds,sources));
-            for(int y=0;y<224;++y)for(int x=0;x<384;++x)
+            for(int y=0;y<224;++y)for(int x=0;x<384;++x) {
                 assert(levels[y*W+x+(W-384)/2]==saved[y*384+x]);
+                assert(colors[y*W+x+(W-384)/2]==native_colors[y*384+x]);
+            }
+            /* Backdrop rows extend edge brightness, independently per eye. */
+            assert(colors[223*W]==native_colors[223*384]);
+            assert(colors[224*W-1]==native_colors[224*384-1]);
             if(mode!=3) {
                 int recovered=0;
                 for(int y=0;y<8;++y)for(int x=-12;x<0;++x)
@@ -163,6 +193,33 @@ static void viewport_tests(void) {
             if(raw)assert(sources[at].u==u && sources[at].v==v && sources[at].kind==3 && sources[at].raw==raw);
         }
         assert(levels[(W-384)/2-1]==3); /* Extended BG samples original x=7. */
+    }
+    vb_viewport_reset();
+    assert(vb_viewport_register("test.cells",32,9,0,viewport_scene,cell_layout,0));
+    setup(0,0,0);
+    for(int block=0;block<28;++block)vip_draw_block_into(block,left,right);
+    s_display_fb=0;
+    for(int eye=0;eye<2;++eye) {
+        assert(vb_viewport_render(0,eye,W,colors,levels,worlds,sources));
+        const unsigned at=(W-384)/2-1;
+        assert(sources[at].world==32 && sources[at].tile==1 && sources[at].u==0 && sources[at].v==7);
+        assert(sources[at].kind==0 && sources[at].raw==2 && levels[at]==2);
+        assert(worlds[0]==0 && levels[0]==2); /* Explicitly refused outside range. */
+        assert(worlds[(W-384)/2-17]==0);
+        assert(vb_viewport_render(0,eye,384,colors,levels,worlds,sources));
+        assert(worlds[16]==0); /* Width 384 never applies the title's extra cell. */
+    }
+    vb_viewport_reset();
+    assert(vb_viewport_register("test.shifted",32,9,0,viewport_scene,shifted_cell_layout,0));
+    memcpy(s_vip_mem,left,sizeof(left));memcpy(s_vip_mem+0x10000,right,sizeof(right));
+    s_vip_mem[0x3ddff]=1;s_vip_mem[0x3dfff]=2;
+    for(int eye=0;eye<2;++eye) {
+        assert(vb_viewport_render(0,eye,W,colors,levels,worlds,sources));
+        vb_vip_render_framebuffer(eye,native_colors);
+        assert(colors[1]==native_colors[1]); /* Brightness follows shifted native columns. */
+        assert(sources[1].world==32 && sources[1].u==1);
+        assert(sources[490].world==32 && sources[490].u==5); /* Shifted right edge is sampled fully. */
+        assert(worlds[500]==0);
     }
     vb_viewport_reset();
     assert(vb_viewport_register("test.unwrapped-objects",32,9,0,viewport_scene,unwrapped_layout,0));

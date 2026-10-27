@@ -8,7 +8,7 @@
 typedef struct ViewBlock {
     uint16_t dram[65536], chars[16384], spt[4], suppress[1024];
     uint8_t gplt[4][4], jplt[4][4], backdrop, valid;
-    uint8_t extra[VB_VIEWPORT_MAX_EXTRA];
+    _Alignas(uint64_t) uint8_t extra[VB_VIEWPORT_MAX_EXTRA];
 } ViewBlock;
 static ViewBlock blocks[2][28];
 static int tracking, adaptive, window_width = 1280, window_height = 720;
@@ -141,7 +141,7 @@ static void background(ViewTarget* t, const uint16_t* w, int limited) {
     int x0 = gx, x1 = gx + (int)width;
     int min_x = limited ? 0 : -t->margin;
     int max_x = limited ? 383 : t->width - t->margin - 1;
-    if (t->kind == 0 && layout->outside && !limited) { x0 = min_x; x1 = max_x; }
+    if (t->kind == 0 && (layout->outside || layout->outside_cell) && !limited) { x0 = min_x; x1 = max_x; }
     /* Anchored HUD pixels may be inside the native window but outside a
      * translated output interval. Sample their original coordinates first. */
     if (x0 < min_x) x0 = min_x;
@@ -182,6 +182,13 @@ static void background(ViewTarget* t, const uint16_t* w, int limited) {
         unsigned yy = source_y & (over ? 8191 : ys - 1);
         for (int x = x0; x <= x1; ++x) {
             int sample_x = source_x + x - gx, sample_y = source_y;
+            if (layout->outside_cell && (x < gx || x > gx + (int)width)) {
+                uint16_t cell;
+                if (layout->outside_cell(sample_x, sample_y, &cell, layout->outside_cell_context))
+                    pixel(t, x, cell & 2047, (sample_x & 7) ^ ((cell & 0x2000) ? 7 : 0),
+                          (sample_y & 7) ^ ((cell & 0x1000) ? 7 : 0), sample_x, sample_y, cell >> 14, 0);
+                continue;
+            }
             if (layout->outside && (x < gx || x > gx + (int)width)
                 && !layout->outside(sample_x, sample_y, &sample_x, &sample_y, layout->outside_context)) continue;
             unsigned xx = (unsigned)sample_x & (over ? 8191 : xs - 1);
@@ -260,8 +267,9 @@ int vb_viewport_render(int slot, int eye, int width, uint32_t* argb,
     for (int row = 0; row < 28; ++row) if (!blocks[slot][row].valid) return 0;
     memset(worlds, 0, width * 224 * sizeof(*worlds));
     memset(sources, 0, width * 224 * sizeof(*sources));
-    uint32_t palette[4];
-    for (int i = 0; i < 4; ++i) palette[i] = vb_vip_level_argb(i);
+    uint32_t palette[96][4];
+    int origins[28];
+    vb_vip_column_argb(eye, palette);
     for (int row = 0; row < 28; ++row) {
         const ViewBlock* b = &blocks[slot][row];
         VbViewportScene scene = scene_of(b);
@@ -270,7 +278,8 @@ int vb_viewport_render(int slot, int eye, int width, uint32_t* argb,
         if (kind && width > 384) arrange_scene(&scene, kind, width, &layout, policy_context);
         ViewTarget target = {0};
         target.block = b; target.layout = &layout; target.width = width;
-        target.margin = (width - 384) / 2; target.eye = eye != 0;
+        target.margin = (width - 384) / 2 + layout.camera_shift_x; target.eye = eye != 0;
+        origins[row] = target.margin;
         target.levels = levels; target.worlds = worlds; target.sources = sources;
         memset(levels + row * 8 * width, b->backdrop, 8 * width);
         int group = 3;
@@ -292,6 +301,13 @@ int vb_viewport_render(int slot, int eye, int width, uint32_t* argb,
             }
         }
     }
-    for (int i = 0; i < width * 224; ++i) argb[i] = palette[levels[i] & 3];
+    for (int y = 0; y < 224; ++y) for (int x = 0; x < width; ++x) {
+        /* Preserve native CT alignment in the center. Extra columns inherit
+         * the nearest native edge's brightness; no hardware CT exists there. */
+        int native_x = x - origins[y / 8];
+        unsigned group = native_x < 0 ? 0 : native_x > 383 ? 95 : (unsigned)native_x / 4;
+        unsigned i = y * width + x;
+        argb[i] = palette[group][levels[i] & 3];
+    }
     return 1;
 }

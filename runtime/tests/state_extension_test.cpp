@@ -1,9 +1,12 @@
 #include "savestate.h"
 #include "memory.h"
 #include "vb_crc32.h"
+#include "renderer.h"
+#include "viewport.h"
 #include <cassert>
 #include <cstdlib>
 #include <cstring>
+#include <cstdio>
 #include <vector>
 
 namespace {
@@ -25,7 +28,9 @@ void put32(uint8_t* p,uint32_t value){for(unsigned i=0;i<4;++i)p[i]=(uint8_t)(va
 void crc(std::vector<uint8_t>& blob){put32(blob.data()+80,vb_crc32_compute(blob.data()+112,blob.size()-112));}
 }
 int main(int argc,char** argv) {
-    assert(argc==2);
+    assert(argc==2 || (argc==3 && !std::strcmp(argv[2],"--wide-history")));
+    const bool wide_history=argc==3;
+    if(wide_history) {vb_renderer_track_texels();vb_viewport_track();}
     assert(vb_state_register_simulation("test.session.v1",&session,sizeof(session),validate,did_load,nullptr));
     assert(!vb_state_register_presentation("test.session.v1",&presentation,sizeof(presentation)));
     assert(!vb_state_register_simulation("test.no-validator",&session,sizeof(session),nullptr,nullptr,nullptr));
@@ -37,6 +42,19 @@ int main(int argc,char** argv) {
     cpu.write8=vb_write8;cpu.write16=vb_write16;cpu.write32=vb_write32;
     vb_memory_set_cpu(&cpu);uint32_t pc=cpu.pc;uint64_t frame_cycles=0;
     vb_state_bind(&cpu,&pc,&frame_cycles,nullptr,nullptr,nullptr);
+    if(wide_history) {
+        const auto wide=capture();
+        assert(wide.size()>16u*1024u*1024u);
+        assert(vb_rewind_enable(32));
+        session.tick=17;assert(vb_rewind_record(10));
+        session.tick=29;assert(vb_rewind_record(20));
+        assert(vb_rewind_to(10) && session.tick==17);
+        assert(!vb_rewind_has(20));
+        assert(!vb_rewind_enable(512));
+        assert(vb_rewind_has(10)); // Rejection preserves existing history.
+        std::printf("wide snapshot: %zu bytes; 32 entries: %zu bytes\n",wide.size(),wide.size()*32);
+        vb_state_shutdown();vb_memory_shutdown();return 0;
+    }
     assert(!vb_state_register_simulation("test.too-late",&session,sizeof(session),validate,nullptr,nullptr));
     const auto reset=capture();
     const auto initial_digest=vb_state_digest();

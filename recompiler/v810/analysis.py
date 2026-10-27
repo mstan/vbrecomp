@@ -876,14 +876,10 @@ def discover_functions(rom: RomImage,
     function-pointer-table entries that the static walker can't
     follow (state-machine dispatch, vtables, callback registration).
 
-    Returns a list of `FunctionRange` sorted by `start_pc`. Each
-    function spans from its entry PC to the highest visited byte
-    inside its bucket (split at the next function entry). The
-    bucketing is approximate — two physically-adjacent functions
-    will merge if one falls through into the other via JR. That's
-    accepted for L1 oracle parity (which compares per-instruction
-    mnemonics, not function boundaries); P3's lifter will refine
-    boundaries with dominator analysis if it ever matters.
+    Returns `FunctionRange` objects sorted by `start_pc`. Entry buckets
+    are split at gaps and overlapping instruction streams so linear
+    emission never decodes unvisited bytes between branch destinations.
+    These are native dispatch regions, not recovered source functions.
     """
     # Seed from RESET_VECTOR rather than the resolved trampoline target.
     # The walker's per-path constant tracker handles the MOVHI/MOVEA/JMP
@@ -1009,12 +1005,21 @@ def discover_functions(rom: RomImage,
         pcs = buckets[start]
         if not pcs:
             continue
-        end = max(pc + walk.visited[pc] for pc in pcs)
-        fns.append(FunctionRange(
-            name=f"fn_{start:08X}",
-            start_pc=start,
-            end_pc=end,
-        ))
+        # A bucket can contain disjoint branch destinations, including distant
+        # ROM mirrors. Linear emission across the holes would turn unvisited
+        # cartridge data into code (and can produce gigabytes of C). Keep only
+        # contiguous discovered streams. Each island gets a dispatch entry;
+        # guest branches and fallthrough still transfer through the live PC.
+        begin = pcs[0]
+        end = begin + walk.visited[begin]
+        for pc in pcs[1:]:
+            if pc != end:
+                fns.append(FunctionRange(name=f"fn_{begin:08X}",
+                                         start_pc=begin, end_pc=end))
+                begin = pc
+            end = pc + walk.visited[pc]
+        fns.append(FunctionRange(name=f"fn_{begin:08X}",
+                                 start_pc=begin, end_pc=end))
     # A discovered entry can overlap the second half of a 32-bit instruction.
     # Bucketing alone then loses the alternate valid instruction stream.
     # Retain each visited PC that the linear function emit would otherwise skip.

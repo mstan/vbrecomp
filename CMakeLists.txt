@@ -143,6 +143,9 @@ if(BUILD_TESTING)
     add_test(NAME vb-state-extension COMMAND "${Python3_EXECUTABLE}"
         "${CMAKE_CURRENT_SOURCE_DIR}/runtime/tests/run_state_extension_test.py"
         "$<TARGET_FILE:vb-state-extension-test>" "${CMAKE_CURRENT_BINARY_DIR}")
+    add_test(NAME vb-wide-history COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/runtime/tests/run_state_extension_test.py"
+        "$<TARGET_FILE:vb-state-extension-test>" "${CMAKE_CURRENT_BINARY_DIR}" --wide-history)
 
     add_executable(vb-simulation-points-test runtime/tests/simulation_points_test.c
         runtime/src/simulation_points.c runtime/src/v810_interpreter.c runtime/src/v810_extended.c runtime/src/interrupts.c)

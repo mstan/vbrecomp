@@ -25,6 +25,10 @@ typedef struct VbViewportScene {
  * source artwork. Return zero for transparent space. Coordinates are unwrapped
  * source-map texels; only an explicitly registered world uses this extension. */
 typedef int (*VbViewportOutside)(int x, int y, int* source_x, int* source_y, void*);
+/* Supply an original tile cell beyond a BG world's submitted bounds. It uses
+ * the captured CHR bank and native palette/flip rules. Coordinates are the
+ * unwrapped source texels; return zero for transparent/out-of-level space. */
+typedef int (*VbViewportOutsideCell)(int x, int y, uint16_t* cell, void*);
 
 typedef struct VbViewportWorldLayout {
     int top, bottom; /* half-open destination y range; empty means no transform */
@@ -32,6 +36,8 @@ typedef struct VbViewportWorldLayout {
     int left_shift, center_shift, right_shift;
     VbViewportOutside outside;
     void* outside_context;
+    VbViewportOutsideCell outside_cell;
+    void* outside_cell_context;
 } VbViewportWorldLayout;
 typedef struct VbViewportSprite {
     int world, eye, x, y;
@@ -40,6 +46,7 @@ typedef struct VbViewportSprite {
     const uint16_t* chars;
 } VbViewportSprite;
 typedef struct VbViewportLayout {
+    int camera_shift_x; /* Extra offset of the native origin; default centered. */
     VbViewportWorldLayout worlds[32];
     int object_shift[1024]; /* shifts base x, preserving native eye parallax */
     /* A game that stores full signed JPX values may recover offscreen OBJ

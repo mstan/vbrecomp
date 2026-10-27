@@ -414,6 +414,32 @@ class TestBuildCFG(unittest.TestCase):
 
 
 class TestCartridgeCoverage(unittest.TestCase):
+    def test_branch_over_data_does_not_emit_the_gap(self):
+        data = bytearray(b'\xff' * TEST_ROM_SIZE)
+        base = 0x100000000 - len(data)
+        _install_simple_trampoline(data, entry_va=base + 0x20)
+        data[0x20:0x24] = _jr(0x200 - 0x20)
+        data[0x24:0x200] = _mov_rr(0, 0) * ((0x200 - 0x24) // 2)
+        data[0x200:0x202] = _ret()
+        image = RomImage.from_bytes(bytes(data))
+        ranges = discover_functions(image)
+        self.assertTrue(any(fn.start_pc == base + 0x200 for fn in ranges))
+        self.assertFalse(any(fn.start_pc <= base + 0x100 < fn.end_pc for fn in ranges))
+        entry = next(fn for fn in ranges if fn.start_pc == base + 0x20)
+        self.assertEqual(entry.end_pc, base + 0x24)
+
+    def test_distant_mirror_branch_keeps_only_reached_instructions(self):
+        data = bytearray(b'\xff' * TEST_ROM_SIZE)
+        entry = CART_BANK_BASE + 0x20
+        target = CART_BANK_BASE + 0x200000 + 0x100
+        _install_simple_trampoline(data, entry_va=entry)
+        data[0x20:0x24] = _jr(target - entry)
+        data[0x100:0x102] = _ret()
+        image = RomImage.from_bytes(bytes(data))
+        ranges = discover_functions(image)
+        self.assertTrue(any(fn.start_pc == target for fn in ranges))
+        self.assertLess(sum(fn.end_pc - fn.start_pc for fn in ranges), 128)
+
     def test_pointer_target_can_rejoin_large_known_function(self):
         data = bytearray(b'\xff' * TEST_ROM_SIZE)
         base = 0x100000000 - len(data)
