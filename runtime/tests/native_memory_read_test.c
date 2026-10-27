@@ -58,6 +58,10 @@ static void compare(uint32_t a,unsigned width) {
 }
 int main(int argc,char** argv) {
     assert(argc==2);unsigned comparisons=0;
+    assert(ordinary_rom_read_mask(1)==0 && ordinary_rom_read_mask(3)==0);
+    assert(ordinary_rom_read_mask(4)==3 && ordinary_rom_read_mask(8192)==8191);
+    assert(ordinary_rom_read_mask(0x08000000)==0x07ffffff);
+    assert(!ordinary_rom_read_mask(0x10000000) && !ordinary_rom_read_mask(0x80000000));
     for(unsigned size=8192;size<=12288;size+=4096) {
         FILE* f=fopen(argv[1],"wb");assert(f);
         for(unsigned i=0;i<size;++i)assert(fputc((i*37+size/256)&255,f)!=EOF);

@@ -96,6 +96,10 @@ static uint8_t* s_rom = NULL;
 static uint32_t s_rom_size = 0;
 /* Host-derived mapping metadata; contents remain the live canonical arrays. */
 static uint32_t s_rom_read_mask;
+static uint32_t ordinary_rom_read_mask(uint32_t size) {
+    /* Larger accepted images need the original 27-bit physical folding. */
+    return size>=4 && size<=VB_PHYS_MASK+1u && !(size&(size-1)) ? size-1 : 0;
+}
 static uint8_t s_cart_ram[65536];
 uint8_t* vb_cart_ram_data(void) { return s_cart_ram; }
 static uint8_t  s_wram[VB_WRAM_SIZE];
@@ -149,7 +153,7 @@ int vb_memory_init(const char* rom_path) {
     }
     fclose(f);
     s_rom_size = (uint32_t)sz;
-    if (s_rom_size>=4 && !(s_rom_size & (s_rom_size-1))) s_rom_read_mask=s_rom_size-1;
+    s_rom_read_mask=ordinary_rom_read_mask(s_rom_size);
     memset(s_wram, 0, sizeof(s_wram));
     memset(s_cart_ram, 0, sizeof(s_cart_ram));
 
