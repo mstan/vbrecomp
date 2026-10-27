@@ -200,6 +200,10 @@ function(vb_add_runtime_target TARGET)
         if(VBRECOMP_CPUHOOK)
             target_compile_definitions(${TARGET} PRIVATE VB_CPUHOOK_ENABLE=1)
         endif()
+    else()
+        # The production host has no instruction-step/breakpoint frontend.
+        # Keep device deadlines, budgets and game simulation points intact.
+        target_compile_definitions(${TARGET} PRIVATE VBRECOMP_INSTRUCTION_DEBUG=0)
     endif()
 
     # Warnings — match psxrecomp's discipline.

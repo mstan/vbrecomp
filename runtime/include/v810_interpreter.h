@@ -74,8 +74,13 @@ void vb_interpreter_step(CPUState* cpu);
 void vb_interpreter_fallback(CPUState* cpu);
 void vb_interpreter_extended(CPUState* cpu, uint16_t first, uint16_t second);
 int vb_execution_debug_check(CPUState* cpu);
+#ifndef VBRECOMP_INSTRUCTION_DEBUG
+#define VBRECOMP_INSTRUCTION_DEBUG 1
+#endif
 static inline int vb_execution_before(CPUState* cpu) {
+#if VBRECOMP_INSTRUCTION_DEBUG
     if((vb_execution.stepping || vb_execution.breakpoint_enabled) && vb_execution_debug_check(cpu))return 1;
+#endif
 #ifdef VB_SIMULATION_POINTS
     return vb_simulation_before(cpu);
 #else

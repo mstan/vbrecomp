@@ -34,8 +34,14 @@ int main(void) {
     assert(!vb_simulation_point_register(0xfff00400,0,redirect,&first));
     cpu.pc=0xfff00100;cpu.gpr[10]=0;cpu.cycles=0;
     vb_execution.breakpoint_pc=cpu.pc;vb_execution.breakpoint_enabled=1;
+#if VBRECOMP_INSTRUCTION_DEBUG
     vb_interpreter_step(&cpu);assert(!first && !cpu.cycles && cpu.pc==0xfff00100);
     vb_execution.breakpoint_enabled=0;vb_execution.stopped=0;
+#else
+    // A stripped host must retain simulation redirects and ordinary execution,
+    // even though its unavailable instruction-debug state is not consulted.
+    vb_execution.stepping=1;
+#endif
     vb_interpreter_step(&cpu);
     assert(first==1 && !second && cpu.gpr[7]==1 && cpu.gpr[10]==0 && !cpu.cycles && cpu.pc==0xfff00102 && cpu.yielded);
     vb_interpreter_step(&cpu);assert(cpu.gpr[10]==2 && cpu.cycles==1 && first==1);
