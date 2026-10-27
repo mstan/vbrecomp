@@ -27,10 +27,12 @@ def main():
     p.add_argument('--color', type=Path)
     p.add_argument('--wide', type=Path)
     p.add_argument('--aspect', default='adaptive')
-    p.add_argument('--window', default='1400x1200', help='Actual SDL window; stereo per-eye aspect defaults to 21:9')
+    p.add_argument('--window', default='522x448', help='Unscaled stereo 21:9 pixel grid, avoiding unrelated software-upscale cost')
     p.add_argument('--package', required=True)
+    p.add_argument('--history', type=int, choices=(0, 32), default=32)
     p.add_argument('--profile', action='store_true')
     p.add_argument('--nm', type=Path, default=Path('C:/msys64/mingw64/bin/nm.exe'))
+    p.add_argument('--symbols', type=Path, help='Matching baseline symbols for profiling on a second host')
     args = p.parse_args()
     args.out = args.out.resolve()
     args.out.mkdir(parents=True, exist_ok=False)
@@ -40,7 +42,7 @@ def main():
     report = dict(passed=False, package=args.package, host=platform.node(), platform=platform.platform(),
                   scope='Windows process CPU; stereo; SDL dummy video/audio; physical GPU/audio excluded',
                   features=dict(color=bool(args.color), widescreen=args.aspect if args.wide else 'off', window=args.window,
-                                rewind=False, debug_tools=False, cpuhook=False), frames=frames, runs=[])
+                                rewind_depth=args.history, rewind_interval=6, debug_tools=False, cpuhook=False), frames=frames, runs=[])
     report['identities'] = {n: dict(path=str(v.resolve()), sha256=hashlib.sha256(v.read_bytes()).hexdigest())
         for n in ('baseline', 'candidate', 'rom', 'route', 'color', 'wide') if (v := getattr(args, n))}
     def save():
@@ -89,6 +91,8 @@ def main():
                     '--measure-runtime', str(frames), '--measure-window', args.window,
                     '--benchmark-route', str(route), '--stereo', '--no-save',
                     '--config', str(config), '--mods-dir', str(directory / 'mods')]
+                if args.history:
+                    command += ['--rewind-frames', str(args.history), '--rewind-interval', '6']
                 for archive, feature in ((args.color, 'wario-land-color:color'), (args.wide, 'wario-land-widescreen:widescreen')):
                     if archive:
                         command += ['--install-mod', str(archive.resolve()), '--enable-mod', feature]
@@ -96,9 +100,12 @@ def main():
                     command += ['--set-mod-option', 'wario-land-widescreen:widescreen:aspect=' + args.aspect]
                 if args.profile:
                     command = [sys.executable, str(Path(__file__).with_name('profile_native_windows.py')),
-                               '--out', str(directory / 'capture'), '--nm', str(args.nm), '--', *command]
+                               '--out', str(directory / 'capture'),
+                               '--symbols' if args.symbols else '--nm',
+                               str(args.symbols.resolve()) if args.symbols else str(args.nm), '--', *command]
                 row = dict(label=label, arm=arm, command=command, census_before=before, status='running')
                 report['runs'].append(row); save()
+                launched = time.perf_counter()
                 with (directory / 'stdout.txt').open('wb') as out, (directory / 'stderr.txt').open('wb') as err:
                     child = subprocess.Popen(command, cwd=directory, env=env, stdout=out, stderr=err,
                                              creationflags=subprocess.CREATE_NO_WINDOW)
@@ -109,6 +116,7 @@ def main():
                     except subprocess.TimeoutExpired:
                         child.terminate(); child.wait(); raise
                 row['exit_code'] = code
+                row['launch_to_exit_seconds'] = time.perf_counter() - launched
                 if code:
                     raise RuntimeError('Finite child failed: ' + label)
                 if args.profile:

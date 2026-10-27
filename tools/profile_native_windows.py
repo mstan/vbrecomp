@@ -20,7 +20,9 @@ import time
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--out', type=Path, required=True)
-    p.add_argument('--nm', type=Path, required=True)
+    symbols_input = p.add_mutually_exclusive_group(required=True)
+    symbols_input.add_argument('--nm', type=Path)
+    symbols_input.add_argument('--symbols', type=Path, help='Matching nm output prepared on the build host')
     p.add_argument('command', nargs=argparse.REMAINDER)
     args = p.parse_args()
     command = args.command[1:] if args.command[:1] == ['--'] else args.command
@@ -31,7 +33,8 @@ def main():
     if struct.unpack_from('<H', raw, pe + 24)[0] != 0x20b:
         raise ValueError('This probe requires a 64-bit Windows PE')
     preferred = struct.unpack_from('<Q', raw, pe + 48)[0]
-    symbols = subprocess.check_output([str(args.nm), '-n', '--defined-only', str(exe)], text=True)
+    symbols = args.symbols.read_text() if args.symbols else subprocess.check_output(
+        [str(args.nm), '-n', '--defined-only', str(exe)], text=True)
     (args.out / 'symbols.txt').write_text(symbols)
     entries = []
     for line in symbols.splitlines():
@@ -58,7 +61,7 @@ def main():
     k.K32GetModuleFileNameExW.argtypes = [w.HANDLE, w.HMODULE, w.LPWSTR, w.DWORD]
     k.GetThreadTimes.argtypes = [w.HANDLE, c.POINTER(w.FILETIME), c.POINTER(w.FILETIME),
                                 c.POINTER(w.FILETIME), c.POINTER(w.FILETIME)]
-    counts = Counter(); errors = 0; module_map = []; thread = None
+    counts = Counter(); external_addresses = Counter(); errors = 0; module_map = []; thread = None
     with (args.out / 'child.stdout').open('wb') as out, (args.out / 'child.stderr').open('wb') as err:
         process = subprocess.Popen(command, cwd=args.out, stdout=out, stderr=err,
                                    creationflags=subprocess.CREATE_NO_WINDOW)
@@ -89,8 +92,9 @@ def main():
                     info = Module(); name = c.create_unicode_buffer(2048)
                     if k.K32GetModuleInformation(int(process._handle), handle, c.byref(info), c.sizeof(info)):
                         k.K32GetModuleFileNameExW(int(process._handle), handle, name, len(name))
-                        module_map.append((info.base, info.base + info.size, Path(name.value).name))
+                        module_map.append((info.base, info.base + info.size, Path(name.value).name, name.value))
             refresh_modules()
+            last_module_refresh = time.monotonic()
             context_storage = c.create_string_buffer(1232 + 16)
             context_address = (c.addressof(context_storage) + 15) & ~15
             context = (c.c_char * 1232).from_address(context_address)
@@ -104,12 +108,19 @@ def main():
                     if suspended and k.GetThreadContext(thread, context_address):
                         pc = struct.unpack_from('<Q', context, 248)[0]
                         module = next((m for m in module_map if m[0] <= pc < m[1]), None)
+                        # Popen can return before the loader has mapped SDL/CRT.
+                        # Keep late DLLs attributable instead of freezing the startup map.
+                        if module is None and time.monotonic()-last_module_refresh>1:
+                            refresh_modules(); last_module_refresh=time.monotonic()
+                            module=next((m for m in module_map if m[0]<=pc<m[1]),None)
                         name = 'unresolved-address'
                         if module and module[2].lower() == exe.name.lower():
                             offset = pc - module[0] + preferred
                             index = bisect.bisect_right(addresses, offset) - 1
                             name = entries[index][1] if index >= 0 else 'executable-header'
-                        elif module: name = 'DLL:' + module[2]
+                        elif module:
+                            name = 'DLL:' + module[2]
+                            external_addresses[(module[3],pc-module[0])] += 1
                         counts[name] += 1
                     else: errors += 1
                 finally:
@@ -123,8 +134,11 @@ def main():
     if identity != hashlib.sha256(exe.read_bytes()).hexdigest():
         raise RuntimeError('Executable changed during capture')
     report = {'scope': 'perturbed main-thread PC samples; not throughput', 'command': command,
-              'exe_sha256': identity, 'main_tid': tid, 'sample_errors': errors,
+              'exe_sha256': identity, 'symbols_sha256': hashlib.sha256(symbols.encode()).hexdigest(),
+              'main_tid': tid, 'sample_errors': errors,
               'samples': sum(counts.values()), 'modules': module_map,
+              'external_addresses': [{'module':n,'rva':hex(rva),'samples':value}
+                                     for (n,rva),value in external_addresses.most_common()],
               'functions': [{'name': n, 'samples': value, 'percent': 100 * value / sum(counts.values())}
                             for n, value in counts.most_common()]}
     (args.out / 'profile.json').write_text(json.dumps(report, indent=2))

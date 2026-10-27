@@ -1467,8 +1467,14 @@ static void vip_resolve_overrides(void) {
  * natural (x, y) order and unpack on the fly. */
 void vb_vip_render_framebuffer(int eye, uint32_t* argb_out) {
     if (!argb_out) return;
-    uint8_t colors[96][4];
-    framebuffer_column_colors(eye, colors);
+    uint8_t red[96][4];
+    uint32_t colors[96][4];
+    framebuffer_column_colors(eye, red);
+    /* The LED transfer depends on column brightness and level, not pixel
+     * position. Keep all models, including led_warm, in this small palette. */
+    for (unsigned group = 0; group < 96; ++group)
+        for (unsigned level = 0; level < 4; ++level)
+            colors[group][level] = vb_red_lut_map(red[group][level]);
     uint32_t base;
     if (eye == 0) {
         base = s_display_fb ? 0x8000u  : 0x0000u;   /* L */
@@ -1487,7 +1493,6 @@ void vb_vip_render_framebuffer(int eye, uint32_t* argb_out) {
             /* Beetle MakeColorLUT (vip.c:108-144) applies a 1/2.2
              * gamma curve before emitting the host pixel. Skipping it
              * gives BrightnessCache[3]=199 → R=0xC7 instead of 0xE3. */
-            uint32_t r = colors[x >> 2][v];
             /* Virtual Boy LEDs are red-only; G=B=0 to match what the
              * real hardware emits (and what the Beetle oracle outputs
              * via libretro's XRGB8888 framebuffer).
@@ -1499,7 +1504,7 @@ void vb_vip_render_framebuffer(int eye, uint32_t* argb_out) {
              * frame is byte-identical unless VBRECOMP_SCREEN opts in.
              * This never feeds the verify path (raw `r` stays the
              * oracle); see red_lut.h. */
-            argb_out[y * 384 + x] = vb_red_lut_map((int)r);
+            argb_out[y * 384 + x] = colors[x >> 2][v];
         }
     }
 }

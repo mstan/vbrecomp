@@ -5,6 +5,10 @@
 #include "vip.h"
 #include <string.h>
 
+#ifndef VB_VIEWPORT_TILE_JOBS
+#define VB_VIEWPORT_TILE_JOBS 1
+#endif
+
 typedef struct ViewBlock {
     uint16_t dram[65536], chars[16384], spt[4], suppress[1024];
     uint8_t gplt[4][4], jplt[4][4], backdrop, valid;
@@ -127,6 +131,43 @@ static void pixel(ViewTarget* target, int x, unsigned tile, unsigned u, unsigned
         (uint8_t)(target->world + 1)};
 }
 
+#if VB_VIEWPORT_TILE_JOBS
+/* One captured tile row, in original paint order. Resolve CHR, material source,
+ * palette and fingerprint once. Layout transforms still apply independently
+ * to each destination, including runs crossing HUD anchors or clipping edges. */
+static void tile_row(ViewTarget* t, int x, unsigned cell, unsigned xx,
+                     unsigned yy, unsigned count) {
+    unsigned tile = cell & 2047, flip = (cell & 0x2000) ? 7 : 0;
+    unsigned v = (yy & 7) ^ ((cell & 0x1000) ? 7 : 0);
+    uint16_t bits = t->block->chars[tile * 8 + v];
+    if (!bits) return;
+    if (!t->hashed[tile]) {
+        const uint8_t* bytes = (const uint8_t*)&t->block->chars[tile * 8];
+        uint32_t h = 2166136261u;
+        for (int i = 0; i < 16; ++i) h = (h ^ bytes[i]) * 16777619u;
+        t->hashes[tile] = h; t->hashed[tile] = 1;
+    }
+    const uint8_t* palette = t->block->gplt[cell >> 14];
+    const VbViewportWorldLayout* rule = &t->layout->worlds[t->world];
+    int transform = t->y >= rule->top && t->y < rule->bottom;
+    unsigned row = t->y * t->width;
+    for (unsigned i = 0; i < count; ++i) {
+        unsigned u = ((xx + i) & 7) ^ flip, raw = (bits >> (u * 2)) & 3;
+        if (!raw) continue;
+        int dst = x + (int)i;
+        if (transform) dst += dst < rule->left_end ? rule->left_shift
+            : dst >= rule->right_start ? rule->right_shift : rule->center_shift;
+        dst += t->margin;
+        if (dst < 0 || dst >= t->width) continue;
+        unsigned at = row + dst;
+        t->levels[at] = palette[raw]; t->worlds[at] = t->world + 1;
+        t->sources[at] = (VbSourceTexel){t->hashes[tile], (uint16_t)(xx + i),
+            (uint16_t)yy, (uint16_t)tile, (uint8_t)u, (uint8_t)v,
+            (uint8_t)t->map, (uint8_t)t->kind, (uint8_t)raw, (uint8_t)(t->world + 1)};
+    }
+}
+#endif
+
 static void background(ViewTarget* t, const uint16_t* w, int limited) {
     const uint16_t* dram = t->block->dram;
     int eye = t->eye;
@@ -199,8 +240,21 @@ static void background(ViewTarget* t, const uint16_t* w, int limited) {
                     | ((xx >> 3) & 63u) | (((yy >> 3) & 63u) * 64);
                 cell = dram[at & 65535];
             }
+#if VB_VIEWPORT_TILE_JOBS
+            /* Arbitrary outside callbacks may remap each texel separately.
+             * Only ordinary, in-window coordinates have a linear tile run. */
+            unsigned count = 1;
+            if (x >= gx && x <= gx + (int)width) {
+                count = 8 - (xx & 7);
+                if (count > (unsigned)(x1 - x + 1)) count = x1 - x + 1;
+                if (count > (unsigned)(gx + (int)width - x + 1)) count = gx + (int)width - x + 1;
+            }
+            tile_row(t, x, cell, xx, yy, count);
+            x += (int)count - 1;
+#else
             pixel(t, x, cell & 2047, (xx & 7) ^ ((cell & 0x2000) ? 7 : 0),
                   (yy & 7) ^ ((cell & 0x1000) ? 7 : 0), xx, yy, cell >> 14, 0);
+#endif
         }
     }
 }
