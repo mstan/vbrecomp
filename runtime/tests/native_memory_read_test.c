@@ -60,8 +60,9 @@ int main(int argc,char** argv) {
     assert(argc==2);unsigned comparisons=0;
     assert(ordinary_rom_read_mask(1)==0 && ordinary_rom_read_mask(3)==0);
     assert(ordinary_rom_read_mask(4)==3 && ordinary_rom_read_mask(8192)==8191);
-    assert(ordinary_rom_read_mask(0x08000000)==0x07ffffff);
-    assert(!ordinary_rom_read_mask(0x10000000) && !ordinary_rom_read_mask(0x80000000));
+    assert(ordinary_rom_read_mask(0x01000000)==0x00ffffff);
+    assert(ordinary_rom_read_mask(0x02000000)==0x00ffffff);
+    assert(ordinary_rom_read_mask(0x80000000)==0x00ffffff);
     for(unsigned size=8192;size<=12288;size+=4096) {
         FILE* f=fopen(argv[1],"wb");assert(f);
         for(unsigned i=0;i<size;++i)assert(fputc((i*37+size/256)&255,f)!=EOF);
@@ -82,6 +83,15 @@ int main(int argc,char** argv) {
         }
         vb_memory_shutdown();assert(!s_rom_read_mask);
     }
-    assert(!remove(argv[1]));printf("PASS: %u native/legacy reads, aliases, alignment, live bytes, non-power-of-two ROM and MMIO timing\n",comparisons);
+    /* Oversized images are accepted by the original loader: only the first
+     * 16 MiB is addressable. Distinct halves catch retaining bank bits. */
+    s_rom_size=0x02000000;s_rom=(uint8_t*)malloc(s_rom_size);assert(s_rom);
+    s_rom_read_mask=ordinary_rom_read_mask(s_rom_size);
+    memset(s_rom,0x3c,0x01000000);memset(s_rom+0x01000000,0xc3,0x01000000);
+    for(unsigned i=0;i<4096;++i)for(unsigned w=1;w<=4;w*=2) {
+        compare(0x07000000u|((i*2654435761u)&0x00ffffffu)|((i&31u)<<27),w);++comparisons;
+    }
+    vb_memory_shutdown();
+    assert(!remove(argv[1]));printf("PASS: %u native/legacy reads, aliases, alignment, live bytes, oversized/non-power-of-two ROM and MMIO timing\n",comparisons);
     return 0;
 }

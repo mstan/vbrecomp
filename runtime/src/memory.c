@@ -97,8 +97,9 @@ static uint32_t s_rom_size = 0;
 /* Host-derived mapping metadata; contents remain the live canonical arrays. */
 static uint32_t s_rom_read_mask;
 static uint32_t ordinary_rom_read_mask(uint32_t size) {
-    /* Larger accepted images need the original 27-bit physical folding. */
-    return size>=4 && size<=VB_PHYS_MASK+1u && !(size&(size-1)) ? size-1 : 0;
+    /* Region 7 is a 16 MiB cartridge window. Larger accepted images still
+     * start at ROM byte zero; bank/address-alias bits never index the image. */
+    return size>=4 && !(size&(size-1)) ? (size-1)&0x00ffffffu : 0;
 }
 static uint8_t s_cart_ram[65536];
 uint8_t* vb_cart_ram_data(void) { return s_cart_ram; }
