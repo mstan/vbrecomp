@@ -40,6 +40,8 @@ const uint8_t* previous_sram;
 uint64_t generation;
 uint8_t content[32];
 RbeSnapRing* rewind_ring;
+uint64_t rewind_revision;
+void clear_rewind() {rbe_snap_ring_clear(rewind_ring);++rewind_revision;}
 struct Extension { char id[96]; void* bytes; size_t size; };
 Extension extensions[16];
 unsigned extension_count;
@@ -238,7 +240,7 @@ static int restore_impl(const uint8_t* data, size_t size, bool trusted, bool kee
         error=accepted?"":"Snapshot contains invalid device, scheduler or policy state";return accepted?1:0;
     }
     std::free(backup);vb_vsu_state_loaded();vb_vip_state_loaded();++generation;
-    if(!keep_history)rbe_snap_ring_clear(rewind_ring);
+    if(!keep_history)clear_rewind();
     previous_sram=old_sram.data();
     for(unsigned i=0;i<simulation_extension_count;++i) {
         const auto& e=simulation_extensions[i];if(e.loaded)e.loaded(e.context);
@@ -304,7 +306,7 @@ int vb_state_reset(void) {
     uint8_t sram[65536];std::memcpy(sram,vb_cart_ram_data(),sizeof(sram));
     if(!vb_state_restore(reset_blob,reset_size))return 0;
     std::memcpy(vb_cart_ram_data(),sram,sizeof(sram));
-    rbe_snap_ring_clear(rewind_ring);return 1;
+    clear_rewind();return 1;
 }
 int vb_state_replay_frames(unsigned frames) {
     if(!cpu || !frames || frames>10000 || frames>UINT32_MAX-cpu->frame)return 0;
@@ -337,22 +339,23 @@ int vb_rewind_enable(unsigned depth) {
     RbeSnapRing* next=rbe_snap_ring_create(depth);if(!next)return 0;
     vb_rewind_shutdown();rewind_ring=next;return 1;
 }
-void vb_rewind_shutdown(void){rbe_snap_ring_destroy(rewind_ring);rewind_ring=nullptr;}
+void vb_rewind_shutdown(void){if(rewind_ring)++rewind_revision;rbe_snap_ring_destroy(rewind_ring);rewind_ring=nullptr;}
 int vb_rewind_record(uint32_t tick) {
     if(!rewind_ring)return 1;
     uint8_t* blob=nullptr;size_t size=0;if(!capture_impl(&blob,&size,1,true))return 0;
-    if(!rbe_snap_ring_store(rewind_ring,tick,blob,size)){std::free(blob);return 0;}return 1;
+    if(!rbe_snap_ring_store(rewind_ring,tick,blob,size)){std::free(blob);return 0;}++rewind_revision;return 1;
 }
 int vb_rewind_to(uint32_t tick) {
     if(!rewind_ring){error="Rewind is disabled";return 0;}
     size_t size=0;const uint8_t* blob=rbe_snap_ring_peek(rewind_ring,tick,&size);
     if(!blob){error="Requested rewind frame is no longer available";return 0;}
     if(!restore_impl(blob,size,true,true))return 0;
-    rbe_snap_ring_drop_after(rewind_ring,tick);return 1;
+    rbe_snap_ring_drop_after(rewind_ring,tick);++rewind_revision;return 1;
 }
 unsigned vb_rewind_count(void){return rbe_snap_ring_count(rewind_ring);}
 int vb_rewind_has(uint32_t tick){return rbe_snap_ring_has(rewind_ring,tick);}
 int vb_rewind_enabled(void){return rewind_ring!=nullptr;}
+uint64_t vb_rewind_revision(void){return rewind_revision;}
 struct VbRollbackHistory {RbeSnapRing* ring;};
 VbRollbackHistory* vb_rollback_history_create(unsigned depth) {
     if(depth<2 || depth>512)return nullptr;

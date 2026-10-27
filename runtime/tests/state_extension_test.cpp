@@ -3,6 +3,7 @@
 #include "vb_crc32.h"
 #include "renderer.h"
 #include "viewport.h"
+#include "state_ui.h"
 #include <cassert>
 #include <cstdlib>
 #include <cstring>
@@ -50,7 +51,8 @@ int main(int argc,char** argv) {
         session.tick=29;assert(vb_rewind_record(20));
         assert(vb_rewind_to(10) && session.tick==17);
         assert(!vb_rewind_has(20));
-        assert(!vb_rewind_enable(512));
+        const auto revision=vb_rewind_revision();assert(!vb_rewind_enable(512));
+        assert(vb_rewind_revision()==revision);
         assert(vb_rewind_has(10)); // Rejection preserves existing history.
         std::printf("wide snapshot: %zu bytes; 32 entries: %zu bytes\n",wide.size(),wide.size()*32);
         vb_state_shutdown();vb_memory_shutdown();return 0;
@@ -86,13 +88,21 @@ int main(int argc,char** argv) {
     invalid=complete;put32(invalid.data()+112+offsetof(CPUState,sysreg)+24*sizeof(uint32_t),4);crc(invalid);
     assert(!vb_state_restore(invalid.data(),invalid.size()));
     assert(capture()==before && loaded==1);
-    assert(vb_rewind_enable(4));assert(vb_rewind_record(10));
+    assert(vb_rewind_enable(4));vb_state_ui_init(argv[1]);assert(vb_rewind_record(10));
+    vb_state_ui_record(10);assert(vb_state_ui_history_count()==1);
+    const auto revision=vb_rewind_revision();
+    for(unsigned i=0;i<1000;++i)vb_state_ui_sync();
+    assert(vb_rewind_revision()==revision && vb_state_ui_history_count()==1);
     session.tick=20;session.values[0]=77;assert(vb_rewind_record(20));
+    assert(vb_rewind_revision()!=revision);vb_state_ui_record(20);
+    assert(vb_state_ui_history_count()==2);
     assert(vb_rewind_to(10));assert(session.tick==17 && session.values[0]==10 && loaded==2);
     assert(!vb_rewind_has(20));
+    vb_state_ui_sync();assert(vb_state_ui_history_count()==1);
     vb_cart_ram_data()[123]=99;assert(vb_state_reset());
     assert(session.actors==0 && session.tick==0 && !session.values[0] && presentation==123);
     assert(vb_cart_ram_data()[123]==99 && loaded==3);
+    vb_state_ui_sync();assert(!vb_state_ui_history_count());
     assert(vb_state_restore(reset.data(),reset.size()));assert(loaded==4);
     auto* network=vb_rollback_history_create(4);assert(network);
     assert(!vb_rollback_history_oldest(network,&pc));
@@ -108,5 +118,9 @@ int main(int argc,char** argv) {
     vb_cart_ram_data()[999]=77;
     assert(!vb_state_previous_sram());assert(vb_state_restore(reset.data(),reset.size()));
     assert(old_sram_value==77 && !vb_state_previous_sram() && vb_cart_ram_data()[999]==0);
-    vb_state_shutdown();vb_memory_shutdown();
+    vb_state_ui_shutdown();vb_state_ui_init(argv[1]);assert(vb_rewind_enable(2));
+    for(unsigned tick:{100u,110u,120u}) {assert(vb_rewind_record(tick));vb_state_ui_record(tick);}
+    vb_state_ui_sync();assert(vb_state_ui_history_count()==2 && vb_state_ui_selected_frame()==110);
+    vb_rewind_shutdown();vb_state_ui_sync();assert(!vb_state_ui_history_count());
+    vb_state_ui_shutdown();vb_state_shutdown();vb_memory_shutdown();
 }

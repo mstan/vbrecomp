@@ -35,6 +35,7 @@ using Thumb=std::array<uint32_t,TW*TH>;
 struct Entry { uint32_t frame; Thumb image; };
 struct Slot { bool exists=false,preview=false; Thumb image{}; std::string date; };
 std::deque<Entry> history;
+uint64_t history_revision=UINT64_MAX;
 std::array<Slot,SLOTS> slots;
 std::array<uint32_t,W*H> panel;
 fs::path directory;
@@ -172,7 +173,7 @@ void vb_state_ui_init(const char* path) {
     directory=base/"states"/content;
     if(vb_netplay_enabled())directory/="online";
 }
-void vb_state_ui_shutdown(void){history.clear();slots={};mode=slot=selected=result=0;status.clear();network_pending=false;}
+void vb_state_ui_shutdown(void){history.clear();history_revision=UINT64_MAX;slots={};mode=slot=selected=result=0;status.clear();network_pending=false;}
 int vb_state_ui_mode(void){return mode;}
 int vb_state_ui_slot(void){return slot;}
 int vb_state_ui_result(void){return result;}
@@ -186,12 +187,16 @@ void vb_state_ui_sync(void) {
             else close();
         }
     }
+    const uint64_t revision=vb_rewind_revision();
+    if(history_revision==revision)return;
+    history_revision=revision;
     history.erase(std::remove_if(history.begin(),history.end(),[](const Entry& e){return !vb_rewind_has(e.frame);}),history.end());
     selected=std::max(0,std::min(selected,(int)history.size()-1));
 }
 void vb_state_ui_record(uint32_t frame) {
     try {
     vb_state_ui_sync();if(!vb_rewind_has(frame))return;
+    history_revision=UINT64_MAX; // Also re-clamp after a failed preview allocation.
     if(!history.empty()&&history.back().frame==frame)history.pop_back();
     history.push_back({frame,capture()});
     } catch(const std::exception&) {fail("Preview allocation failed");}

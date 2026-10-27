@@ -77,6 +77,8 @@ int vb_rewind_to(uint32_t tick);
 unsigned vb_rewind_count(void);
 int vb_rewind_has(uint32_t tick);
 int vb_rewind_enabled(void);
+/* Host-only revision for preview/membership caches; never serialized. */
+uint64_t vb_rewind_revision(void);
 /* A separate owned rbengine ring for network rollback. Local rewind and
  * network history never clear or re-key each other's snapshots. Key T is
  * the complete machine before network tick T. These are private trusted
