@@ -15,7 +15,7 @@ endif()
 # in case someone wants to drop the heartbeat thread on embedded targets.
 option(VBRECOMP_DEBUG_TOOLS "Build the runtime with the TCP debug server + rings" ON)
 option(VBRECOMP_CPUHOOK "Record per-instruction CPU state for oracle comparisons" OFF)
-option(VBRECOMP_NATIVE_READS "Use qualified direct ordinary-memory reads" OFF)
+option(VBRECOMP_NATIVE_READS "Use qualified direct ordinary-memory reads" ON)
 
 # Position-independent code, useful when generated/ ships .o for relocation.
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)

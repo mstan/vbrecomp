@@ -61,7 +61,7 @@ def main():
     k.K32GetModuleFileNameExW.argtypes = [w.HANDLE, w.HMODULE, w.LPWSTR, w.DWORD]
     k.GetThreadTimes.argtypes = [w.HANDLE, c.POINTER(w.FILETIME), c.POINTER(w.FILETIME),
                                 c.POINTER(w.FILETIME), c.POINTER(w.FILETIME)]
-    counts = Counter(); external_addresses = Counter(); errors = 0; module_map = []; thread = None
+    counts = Counter(); executable_addresses = Counter(); external_addresses = Counter(); errors = 0; module_map = []; thread = None
     with (args.out / 'child.stdout').open('wb') as out, (args.out / 'child.stderr').open('wb') as err:
         process = subprocess.Popen(command, cwd=args.out, stdout=out, stderr=err,
                                    creationflags=subprocess.CREATE_NO_WINDOW)
@@ -115,6 +115,7 @@ def main():
                             module=next((m for m in module_map if m[0]<=pc<m[1]),None)
                         name = 'unresolved-address'
                         if module and module[2].lower() == exe.name.lower():
+                            executable_addresses[pc-module[0]] += 1
                             offset = pc - module[0] + preferred
                             index = bisect.bisect_right(addresses, offset) - 1
                             name = entries[index][1] if index >= 0 else 'executable-header'
@@ -137,6 +138,8 @@ def main():
               'exe_sha256': identity, 'symbols_sha256': hashlib.sha256(symbols.encode()).hexdigest(),
               'main_tid': tid, 'sample_errors': errors,
               'samples': sum(counts.values()), 'modules': module_map,
+              'executable_addresses': [{'rva':hex(rva),'samples':value}
+                                       for rva,value in executable_addresses.most_common()],
               'external_addresses': [{'module':n,'rva':hex(rva),'samples':value}
                                      for (n,rva),value in external_addresses.most_common()],
               'functions': [{'name': n, 'samples': value, 'percent': 100 * value / sum(counts.values())}
