@@ -15,6 +15,7 @@ endif()
 # in case someone wants to drop the heartbeat thread on embedded targets.
 option(VBRECOMP_DEBUG_TOOLS "Build the runtime with the TCP debug server + rings" ON)
 option(VBRECOMP_CPUHOOK "Record per-instruction CPU state for oracle comparisons" OFF)
+option(VBRECOMP_NATIVE_READS "Use qualified direct ordinary-memory reads" OFF)
 
 # Position-independent code, useful when generated/ ships .o for relocation.
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
@@ -34,6 +35,14 @@ add_subdirectory(runtime)
 
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(vb-native-memory-read-test runtime/tests/native_memory_read_test.c)
+    target_include_directories(vb-native-memory-read-test PRIVATE runtime/include)
+    if(MSVC)
+        target_compile_options(vb-native-memory-read-test PRIVATE /UNDEBUG)
+    else()
+        target_compile_options(vb-native-memory-read-test PRIVATE -UNDEBUG)
+    endif()
+    add_test(NAME vb-native-memory-read COMMAND vb-native-memory-read-test "${CMAKE_CURRENT_BINARY_DIR}/native-read-fixture.bin")
     add_executable(vb-viewport-jobs-test runtime/tests/viewport_jobs_test.c
         runtime/tests/viewport_scalar_reference.c runtime/src/viewport.c)
     target_include_directories(vb-viewport-jobs-test PRIVATE runtime/include)

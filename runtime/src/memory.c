@@ -25,6 +25,10 @@
 #include "wtrace.h"
 #include "cpu_state.h"
 
+#ifndef VBRECOMP_NATIVE_READS
+#define VBRECOMP_NATIVE_READS 0
+#endif
+
 static CPUState* s_bus_cpu;
 static VbWriteObserver s_write_observer;
 int vb_memory_register_write_observer(VbWriteObserver observer) {
@@ -90,6 +94,8 @@ static void bus_end(uint32_t addr) {
 
 static uint8_t* s_rom = NULL;
 static uint32_t s_rom_size = 0;
+/* Host-derived mapping metadata; contents remain the live canonical arrays. */
+static uint32_t s_rom_read_mask;
 static uint8_t s_cart_ram[65536];
 uint8_t* vb_cart_ram_data(void) { return s_cart_ram; }
 static uint8_t  s_wram[VB_WRAM_SIZE];
@@ -120,6 +126,7 @@ void vb_wram_region_fnv(uint32_t out[VB_WRAM_FNV_REGIONS]) {
 }
 
 int vb_memory_init(const char* rom_path) {
+    s_rom_read_mask=0;
     s_bus_cpu=NULL;s_timer_cycle=s_vip_cycle=s_vsu_cycle=s_input_cycle=0;
     if (!rom_path || !*rom_path) {
         return -1;
@@ -142,6 +149,7 @@ int vb_memory_init(const char* rom_path) {
     }
     fclose(f);
     s_rom_size = (uint32_t)sz;
+    if (s_rom_size>=4 && !(s_rom_size & (s_rom_size-1))) s_rom_read_mask=s_rom_size-1;
     memset(s_wram, 0, sizeof(s_wram));
     memset(s_cart_ram, 0, sizeof(s_cart_ram));
 
@@ -159,6 +167,7 @@ void vb_memory_shutdown(void) {
     free(s_rom);
     s_rom = NULL;
     s_rom_size = 0;
+    s_rom_read_mask = 0;
 }
 
 /* ---- Address classification ---- */
@@ -397,13 +406,44 @@ size_t vb_memory_dump(uint32_t addr, uint8_t* out, size_t len) {
     return len;
 }
 
-uint8_t vb_read8(uint32_t addr) { bus_begin(addr,0);uint8_t result=raw_read8(addr);bus_end(addr);return result; }
+#if VBRECOMP_NATIVE_READS
+/* Ordinary memory never synchronizes devices in bus_begin/bus_end. Resolve
+ * those regions before entering the MMIO service, preserving alignment and
+ * all 27-bit aliases. Byte expressions are portable little-endian loads; a
+ * pointer plus constant offsets also lets host compilers combine the bytes.
+ * Writes retain their original observer/trace and device-ordering contract. */
+static inline const uint8_t* native_read_pointer(uint32_t addr) {
+    switch ((addr>>24)&7) {
+        case 5: return s_wram+(addr&65535);
+        case 6: return s_cart_ram+(addr&65535);
+        case 7: return s_rom_read_mask ? s_rom+(addr&s_rom_read_mask) : NULL;
+        default: return NULL;
+    }
+}
+#endif
+uint8_t vb_read8(uint32_t addr) {
+#if VBRECOMP_NATIVE_READS
+    const uint8_t* p=native_read_pointer(addr);if(p)return p[0];
+#endif
+    bus_begin(addr,0);uint8_t result=raw_read8(addr);bus_end(addr);return result;
+}
 void vb_write8(uint32_t addr,uint8_t value) { bus_begin(addr,1);raw_write8(addr,value);bus_end(addr); }
 
-uint16_t vb_read16(uint32_t addr) { bus_begin(addr,0);uint16_t result=raw_read16(addr);bus_end(addr);return result; }
+uint16_t vb_read16(uint32_t addr) {
+#if VBRECOMP_NATIVE_READS
+    const uint8_t* p=native_read_pointer(addr&~1u);if(p)return (uint16_t)p[0]|((uint16_t)p[1]<<8);
+#endif
+    bus_begin(addr,0);uint16_t result=raw_read16(addr);bus_end(addr);return result;
+}
 void vb_write16(uint32_t addr,uint16_t value) { bus_begin(addr,1);raw_write16(addr,value);bus_end(addr); }
 
-uint32_t vb_read32(uint32_t addr) { bus_begin(addr,0);uint32_t result=raw_read32(addr);bus_end(addr);return result; }
+uint32_t vb_read32(uint32_t addr) {
+#if VBRECOMP_NATIVE_READS
+    const uint8_t* p=native_read_pointer(addr&~3u);
+    if(p)return (uint32_t)p[0]|((uint32_t)p[1]<<8)|((uint32_t)p[2]<<16)|((uint32_t)p[3]<<24);
+#endif
+    bus_begin(addr,0);uint32_t result=raw_read32(addr);bus_end(addr);return result;
+}
 void vb_write32(uint32_t addr,uint32_t value) { bus_begin(addr,1);raw_write32(addr,value);bus_end(addr); }
 
 /* Execution state only: host pointers and diagnostic history stay local. */

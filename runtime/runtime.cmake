@@ -17,6 +17,8 @@ set_source_files_properties("${VB_RUNTIME_DIR}/src/savestate.cpp" PROPERTIES
     COMPILE_DEFINITIONS "VB_STATE_BUILD_ID=\"$<TARGET_PROPERTY:VB_STATE_ID>:$<CONFIG>\"")
 
 function(vb_add_runtime_target TARGET)
+    set_source_files_properties("${VB_RUNTIME_DIR}/src/memory.c" PROPERTIES
+        COMPILE_DEFINITIONS "VBRECOMP_NATIVE_READS=$<BOOL:${VBRECOMP_NATIVE_READS}>")
     set(options NO_GAME_LINKED)
     set(oneValue DEBUG_PORT WINDOW_TITLE GENERATED_DIR GENERATED_MODULE)
     set(multiValue GENERATED_SOURCES)
