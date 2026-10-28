@@ -20,6 +20,23 @@ typedef struct ViewBlock {
 #define VB_DEFER_NATIVE_DRAW 0
 #endif
 static ViewBlock storage[56+VB_DEFER_NATIVE_DRAW];
+#ifndef VB_VERSIONED_CAPTURE
+#define VB_VERSIONED_CAPTURE 0
+#endif
+#if VB_VERSIONED_CAPTURE
+static uint64_t captured_revisions[56+VB_DEFER_NATIVE_DRAW][VB_CAPTURE_REVISION_PAGES];
+static uint8_t captured_revisions_valid[56+VB_DEFER_NATIVE_DRAW];
+#endif
+static uint64_t capture_bytes_copied,capture_pages_reused;
+void vb_viewport_capture_costs(uint64_t* copied,uint64_t* reused) {
+    if(copied)*copied=capture_bytes_copied;
+    if(reused)*reused=capture_pages_reused;
+}
+void vb_viewport_invalidate_capture_revisions(void) {
+#if VB_VERSIONED_CAPTURE
+    memset(captured_revisions_valid,0,sizeof(captured_revisions_valid));
+#endif
+}
 static ViewBlock* blocks[2][28];
 #if VB_DEFER_NATIVE_DRAW
 static ViewBlock* spare=&storage[56];
@@ -63,13 +80,19 @@ static VbViewportScene scene_of(const ViewBlock* block) {
                             block->spt, block->extra, extra_size};
     return scene;
 }
-void vb_viewport_track(void) { ensure_blocks();tracking = 1; }
+void vb_viewport_track(void) {
+    ensure_blocks();tracking = 1;
+#if VB_VERSIONED_CAPTURE
+    vb_vip_track_capture_revisions();
+#endif
+}
 int vb_viewport_track_extra(unsigned size, VbViewportCaptureExtra capture) {
     if (!size || size > VB_VIEWPORT_MAX_EXTRA || !capture || capture_extra) return 0;
     extra_size = size; capture_extra = capture; return 1;
 }
 void vb_viewport_clear_frames(void) {
     ensure_blocks();
+    vb_viewport_invalidate_capture_revisions();
     for (int slot = 0; slot < 2; ++slot)
         for (int row = 0; row < 28; ++row) blocks[slot][row]->valid = 0;
 }
@@ -123,7 +146,29 @@ void vb_viewport_capture(int slot, int row, const uint16_t* dram,
         blocks[slot][row]=b;spare=old;
     }
 #endif
-    memcpy(b->dram, dram, sizeof(b->dram)); memcpy(b->chars, chars, sizeof(b->chars));
+#if VB_VERSIONED_CAPTURE
+    const uint64_t* revisions=vb_vip_capture_revisions(dram,chars);
+    const unsigned bank=(unsigned)(b-storage);
+    if(revisions) {
+        unsigned copied=0,reused=0;
+        for(unsigned page=0;page<VB_CAPTURE_REVISION_PAGES;++page) {
+            if(captured_revisions_valid[bank] && captured_revisions[bank][page]==revisions[page]){++reused;continue;}
+            const unsigned offset=(page<32 ? page:page-32)*4096;
+            uint8_t* destination=(uint8_t*)(page<32 ? b->dram:b->chars)+offset;
+            const uint8_t* source=(const uint8_t*)(page<32 ? dram:chars)+offset;
+            memcpy(destination,source,4096);++copied;
+            captured_revisions[bank][page]=revisions[page];
+        }
+        captured_revisions_valid[bank]=1;
+        capture_bytes_copied+=(uint64_t)copied*4096;capture_pages_reused+=reused;
+    } else {
+        captured_revisions_valid[bank]=0;
+#else
+    {
+#endif
+        memcpy(b->dram, dram, sizeof(b->dram)); memcpy(b->chars, chars, sizeof(b->chars));
+        capture_bytes_copied+=sizeof(b->dram)+sizeof(b->chars);
+    }
     memcpy(b->spt, spt, sizeof(b->spt)); memcpy(b->suppress, suppress, sizeof(b->suppress));
     memcpy(b->gplt, gplt, sizeof(b->gplt)); memcpy(b->jplt, jplt, sizeof(b->jplt));
     if (capture_extra) capture_extra(b->extra, extra_size);

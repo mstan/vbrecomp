@@ -48,6 +48,7 @@
 #include "mod_runtime.h"
 
 #define VIP_WINDOW_SIZE 0x80000u
+#define VIP_CHR_CANONICAL_BASE 0x78000u
 #define VIP_REGISTER_BASE 0x5F800u
 #define VIP_REGISTER_END  0x5F900u
 
@@ -61,6 +62,46 @@
 #define DPCTRL_DISP   0x0002u
 
 static uint8_t s_vip_mem[VIP_WINDOW_SIZE];
+#ifndef VB_VERSIONED_CAPTURE
+#define VB_VERSIONED_CAPTURE 0
+#endif
+#if VB_VERSIONED_CAPTURE
+static int capture_revision_tracking;
+static uint64_t capture_revision_clock=1;
+static uint64_t capture_revisions[VB_CAPTURE_REVISION_PAGES];
+static void capture_versions_reset(void) {
+    vb_viewport_invalidate_capture_revisions();
+    for(unsigned i=0;i<VB_CAPTURE_REVISION_PAGES;++i)capture_revisions[i]=1;
+    capture_revision_clock=1;
+}
+static void capture_version_write(unsigned offset) {
+    if(!capture_revision_tracking)return;
+    unsigned page;
+    if(offset>=0x20000u && offset<0x40000u)page=(offset-0x20000u)>>12;
+    else if(offset>=VIP_CHR_CANONICAL_BASE && offset<VIP_CHR_CANONICAL_BASE+0x8000u)
+        page=32+((offset-VIP_CHR_CANONICAL_BASE)>>12);
+    else return;
+    if(++capture_revision_clock==0){capture_revision_clock=1;vb_viewport_invalidate_capture_revisions();}
+    capture_revisions[page]=capture_revision_clock;
+}
+#else
+static void capture_versions_reset(void) {}
+static void capture_version_write(unsigned offset) {(void)offset;}
+#endif
+void vb_vip_track_capture_revisions(void) {
+#if VB_VERSIONED_CAPTURE
+    capture_revision_tracking=1;
+#endif
+}
+const uint64_t* vb_vip_capture_revisions(const uint16_t* dram,const uint16_t* chars) {
+#if VB_VERSIONED_CAPTURE
+    if(capture_revision_tracking && (const void*)dram==(const void*)(s_vip_mem+0x20000u)
+       && (const void*)chars==(const void*)(s_vip_mem+VIP_CHR_CANONICAL_BASE))return capture_revisions;
+#else
+    (void)dram;(void)chars;
+#endif
+    return NULL;
+}
 
 /* Register-state ground truth (Beetle equivalents in parentheses). */
 static uint16_t s_intpnd;          /* InterruptPending */
@@ -286,7 +327,6 @@ static uint32_t vip_offset(uint32_t addr) {
  * this, a cart that writes char data through the alias window
  * (some carts do; Mario's Tennis uses both) would invisibly miss
  * the renderer's CHR fetch path at 0x78000. */
-#define VIP_CHR_CANONICAL_BASE 0x78000u
 #define VIP_CHR_CANONICAL_SIZE 0x8000u   /* 32 KB CHR_RAM */
 
 static int vip_alias_index(uint32_t offset, uint32_t* out_canonical) {
@@ -381,6 +421,7 @@ void vb_vip_init(void) {
     vb_vip_native_pending=0;
     vb_viewport_clear_frames();
     memset(s_vip_mem, 0, sizeof(s_vip_mem));
+    capture_versions_reset();
     memset(s_source_fb, 0, sizeof(s_source_fb));
     vb_vip_phase_reset();
     vb_wram_hash_reset();
@@ -811,7 +852,8 @@ void vb_vip_write8(uint32_t addr, uint8_t v) {
         vip_write_register16(o & ~1u, merged);
         return;
     }
-    s_vip_mem[vip_route(o)] = v;
+    uint32_t r=vip_route(o);
+    s_vip_mem[r] = v;capture_version_write(r);
 }
 
 void vb_vip_record_cpu_write(uint32_t addr, uint32_t value, unsigned width, uint32_t tag) {
@@ -851,6 +893,7 @@ void vb_vip_write16(uint32_t addr, uint16_t v) {
     uint32_t r = vip_route(o);
     s_vip_mem[r]     = (uint8_t)(v & 0xFFu);
     s_vip_mem[r + 1] = (uint8_t)((v >> 8) & 0xFFu);
+    capture_version_write(r);
 }
 
 void vb_vip_write32(uint32_t addr, uint32_t v) {
@@ -866,6 +909,7 @@ void vb_vip_write32(uint32_t addr, uint32_t v) {
     s_vip_mem[r + 1] = (uint8_t)((v >> 8) & 0xFFu);
     s_vip_mem[r + 2] = (uint8_t)((v >> 16) & 0xFFu);
     s_vip_mem[r + 3] = (uint8_t)((v >> 24) & 0xFFu);
+    capture_version_write(r);
 }
 
 
@@ -1898,6 +1942,7 @@ int vb_vip_state_valid(void) {
     return 1;
 }
 void vb_vip_state_loaded(void) {
+    capture_versions_reset();
     vb_vip_native_rows[0]=vb_vip_native_rows[1]=0;
     vb_vip_native_pending=0;
     /* Discard observation history from the abandoned future, retaining all

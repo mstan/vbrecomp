@@ -972,6 +972,8 @@ int main(int argc, char** argv) {
     VbVipDrawCosts initial_draw_costs{};vb_vip_draw_costs(&initial_draw_costs);
     uint64_t initial_preview_renders=0,initial_preview_pixels=0;
     vb_state_ui_preview_costs(&initial_preview_renders,&initial_preview_pixels);
+    uint64_t initial_capture_bytes=0,initial_reused_capture_pages=0;
+    vb_viewport_capture_costs(&initial_capture_bytes,&initial_reused_capture_pages);
     const auto benchmark_start = std::chrono::steady_clock::now();
     const double benchmark_cpu_start = process_cpu_seconds();
     double benchmark_seconds=0, benchmark_cpu_seconds=0;
@@ -1338,6 +1340,8 @@ int main(int argc, char** argv) {
         VbVipDrawCosts draw_costs{};vb_vip_draw_costs(&draw_costs);
         uint64_t preview_renders=0,preview_pixels=0;
         vb_state_ui_preview_costs(&preview_renders,&preview_pixels);
+        uint64_t capture_bytes=0,reused_capture_pages=0;
+        vb_viewport_capture_costs(&capture_bytes,&reused_capture_pages);
         const int report_bytes=std::printf("VBRECOMP_BENCHMARK {\"frames\":%u,\"seconds\":%.9f,\"fps\":%.3f,"
             "\"process_cpu_seconds\":%.9f,\"cycles\":%llu,\"pc\":%u,\"wram_sha256\":\"%s\","
             "\"native_instructions\":%llu,\"interpreted_instructions\":%llu,\"fallback_instructions\":%llu,"
@@ -1347,6 +1351,7 @@ int main(int argc, char** argv) {
             "\"snapshot_page_allocations\":%llu,\"snapshot_page_bytes_copied\":%llu,"
             "\"snapshot_page_hits\":%llu,\"rewind_page_storage_bytes\":%llu,"
             "\"native_draws_scheduled\":%llu,\"native_draws_materialized\":%llu,\"native_draws_overwritten\":%llu,"
+            "\"viewport_capture_bytes_copied\":%llu,\"viewport_capture_pages_reused\":%llu,"
             "\"workload_scope\":\"%s\"}\n",
             cpu.frame,benchmark_seconds,cpu.frame/benchmark_seconds,benchmark_cpu_seconds,
             (unsigned long long)cpu.cycles,cpu.pc,hash,(unsigned long long)vb_execution.native_instructions,
@@ -1364,6 +1369,8 @@ int main(int argc, char** argv) {
             (unsigned long long)(draw_costs.scheduled-initial_draw_costs.scheduled),
             (unsigned long long)(draw_costs.materialized-initial_draw_costs.materialized),
             (unsigned long long)(draw_costs.overwritten-initial_draw_costs.overwritten),
+            (unsigned long long)(capture_bytes-initial_capture_bytes),
+            (unsigned long long)(reused_capture_pages-initial_reused_capture_pages),
             measure_runtime?"uncapped-full-runtime":"headless-core");
         // The finite-run contract requires a durable result before frontend,
         // audio and allocator teardown. Treat an output error as a failed run.

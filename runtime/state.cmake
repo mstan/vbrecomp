@@ -22,6 +22,7 @@ string(APPEND _vb_identity ";native_reads=${VBRECOMP_NATIVE_READS}")
 string(APPEND _vb_identity ";native_regions=${VBRECOMP_NATIVE_REGIONS}")
 string(APPEND _vb_identity ";native_dispatch=${VBRECOMP_NATIVE_DISPATCH}")
 string(APPEND _vb_identity ";defer_native_draw=${VBRECOMP_DEFER_NATIVE_DRAW}")
+string(APPEND _vb_identity ";versioned_capture=${VBRECOMP_VERSIONED_CAPTURE}")
 string(APPEND _vb_identity ";host_service_cycles=${VBRECOMP_HOST_SERVICE_CYCLES}")
 if(VBRECOMP_NETPLAY)
     file(GLOB_RECURSE _vb_net_identity_files CONFIGURE_DEPENDS

@@ -79,6 +79,8 @@ int vb_viewport_render(int slot, int eye, int width, uint32_t* argb,
 
 /* VIP-owned observer entry points. Palette entries are decoded levels 0..3. */
 void vb_viewport_clear_frames(void);
+/* Diagnostic totals for complete frozen DRAM/CHR captures. */
+void vb_viewport_capture_costs(uint64_t* copied_bytes,uint64_t* reused_pages);
 void vb_viewport_capture(int slot, int block, const uint16_t* dram,
                          const uint16_t* chars, const uint16_t spt[4],
                          const uint8_t gplt[4][4], const uint8_t jplt[4][4],
