@@ -19,7 +19,10 @@ The default relative `VBRECOMP_PGO_DATA=profile-data` writes inside the launched
 process's working directory, including on a training host. Keep one isolated
 training workload and retain its exact source, compiler, generated inputs,
 features, commands and raw files. Relative object output paths avoid a MinGW
-drive-letter path-construction failure found by the compiler probe.
+drive-letter path-construction failure found by the compiler probe. The profile
+prefix uses the host's native path spelling, including backslashes on Windows;
+otherwise GCC fails to strip the build prefix and can create excessively long
+names. A realistic nested generated-object probe verifies this case.
 
 Copy the complete trained folder to the same build tree's `profile-data` and
 configure `USE` without changing sources, generated input or build path. Use
