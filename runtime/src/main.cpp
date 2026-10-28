@@ -971,8 +971,10 @@ int main(int argc, char** argv) {
     const double benchmark_cpu_start = process_cpu_seconds();
     double benchmark_seconds=0, benchmark_cpu_seconds=0;
     size_t benchmark_segment=0;
+    uint64_t host_service_iterations=0;
     vb_watchdog_start();
     while (vb_debug_server_poll() == 0 && !sdl_quit) {
+        ++host_service_iterations;
 #if VB_RUNTIME_HAVE_SDL
         if(s_lobby_requested){return_to_launcher=true;break;}
 #endif
@@ -1029,6 +1031,8 @@ int main(int argc, char** argv) {
             history_frame = cpu.frame;
         }
 #if VB_RUNTIME_HAVE_SDL
+        uint16_t sampled_primary_pad=0;
+        bool input_focused=false;
         if (!headless) {
             bool was_modal=vb_state_ui_mode()!=0,closed_modal=false;
             SDL_Event ev;
@@ -1080,8 +1084,9 @@ int main(int argc, char** argv) {
                     }
                 }
             }
-            const bool focused=(SDL_GetWindowFlags(win)&SDL_WINDOW_INPUT_FOCUS)!=0;
-            const uint16_t physical=focused?(uint16_t)(pad_from_keyboard()|pad_from_gamecontroller(nullptr)):0;
+            input_focused=(SDL_GetWindowFlags(win)&SDL_WINDOW_INPUT_FOCUS)!=0;
+            sampled_primary_pad=input_focused?(uint16_t)(pad_from_keyboard()|pad_from_gamecontroller(nullptr)):0;
+            const uint16_t physical=sampled_primary_pad;
             uint16_t gesture=physical&(VB_PAD_SELECT|VB_PAD_RT|VB_PAD_LT);
             if((can_pause_session() || vb_netplay_state_can_open()) && (gesture&(VB_PAD_SELECT|VB_PAD_RT))==(VB_PAD_SELECT|VB_PAD_RT) && (previous_gesture&(VB_PAD_SELECT|VB_PAD_RT))!=(VB_PAD_SELECT|VB_PAD_RT)) {
 #if defined(RECOMP_LAUNCHER)
@@ -1121,16 +1126,14 @@ int main(int argc, char** argv) {
          * a TCP input override is active. clear_input restores physical input. */
 #if VB_RUNTIME_HAVE_SDL
         if (!headless && benchmark_route.empty() && !vb_debug_server_input_override()) {
-            uint16_t controller_pad = pad_from_gamecontroller(nullptr);
             bool menu_open=vb_state_ui_mode()!=0;
 #if defined(RECOMP_LAUNCHER)
             menu_open=menu_open || (s_runtime_ui && recomp_runtime_ui_is_open(s_runtime_ui));
 #endif
-            const bool focused=(SDL_GetWindowFlags(win)&SDL_WINDOW_INPUT_FOCUS)!=0;
-            const uint16_t local_pad=menu_open || !focused?0:(uint16_t)((pad_from_keyboard() | controller_pad)&~menu_blocked_pad);
+            const uint16_t local_pad=menu_open || !input_focused?0:(uint16_t)(sampled_primary_pad&~menu_blocked_pad);
             if(vb_netplay_enabled())vb_netplay_physical_input(local_pad);else vb_input_set_pad(local_pad);
             VbGameInputs physical{};
-            if(focused && !menu_open)for(unsigned seat=1;seat<vb_host_player_count();++seat)
+            if(input_focused && !menu_open)for(unsigned seat=1;seat<vb_host_player_count();++seat)
                 physical.buttons[seat]=pad_from_keyboard(seat)|s_controllers.read(seat);
             vb_game_host_physical_inputs(&physical);
         }
@@ -1155,7 +1158,20 @@ int main(int argc, char** argv) {
             if(network_result==-1)std::fprintf(stderr,"vb-runtime: %s\n",vb_netplay_error());
             return_to_launcher=vb_netplay_from_lobby();network_exit=network_result==-2?0:8;break;
         }
-        if ((!vb_netplay_enabled() && !vb_machine_step(&cpu, &dispatch_pc, last_frame_cycles + VB_CYCLES_PER_FRAME))
+        uint32_t service_cycles=VBRECOMP_HOST_SERVICE_CYCLES;
+#if VB_RUNTIME_HAVE_SDL
+        if (!headless && service_cycles) {
+            /* A present is a host-service boundary too. Return after the same
+             * first device quantum that reaches it, rather than drifting the
+             * presentation phase by one entire host-service slice. */
+            const uint64_t elapsed=cpu.cycles-last_present_cycles;
+            const uint64_t until_present=elapsed<VB_CYCLES_PER_FRAME
+                ? VB_CYCLES_PER_FRAME-elapsed:1;
+            if (until_present<service_cycles) service_cycles=(uint32_t)until_present;
+        }
+#endif
+        if ((!vb_netplay_enabled() && !vb_machine_run_slice(&cpu, &dispatch_pc,
+                last_frame_cycles + VB_CYCLES_PER_FRAME, service_cycles))
             || (vb_netplay_enabled() && !network_result)) {
             if(!benchmark_frames) std::this_thread::sleep_for(1ms);
             if(!vb_netplay_enabled())continue;
@@ -1312,11 +1328,12 @@ int main(int argc, char** argv) {
         std::printf("VBRECOMP_BENCHMARK {\"frames\":%u,\"seconds\":%.9f,\"fps\":%.3f,"
             "\"process_cpu_seconds\":%.9f,\"cycles\":%llu,\"pc\":%u,\"wram_sha256\":\"%s\","
             "\"native_instructions\":%llu,\"interpreted_instructions\":%llu,\"fallback_instructions\":%llu,"
-            "\"presents\":%llu,\"synthesized_audio_frames\":%llu,\"workload_scope\":\"%s\"}\n",
+            "\"presents\":%llu,\"synthesized_audio_frames\":%llu,\"host_service_iterations\":%llu,\"host_service_cycles\":%u,\"workload_scope\":\"%s\"}\n",
             cpu.frame,benchmark_seconds,cpu.frame/benchmark_seconds,benchmark_cpu_seconds,
             (unsigned long long)cpu.cycles,cpu.pc,hash,(unsigned long long)vb_execution.native_instructions,
             (unsigned long long)vb_execution.interpreted,(unsigned long long)vb_execution.fallback,
             (unsigned long long)present_count,(unsigned long long)vb_vsu_total_frames(),
+            (unsigned long long)host_service_iterations,(unsigned)VBRECOMP_HOST_SERVICE_CYCLES,
             measure_runtime?"uncapped-full-runtime":"headless-core");
     }
     vb_watchdog_stop();

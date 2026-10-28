@@ -3,6 +3,7 @@
 #include "interrupts.h"
 #include "stub_abort.h"
 #include "game_host.h"
+#include "v810_interpreter.h"
 
 int vb_machine_step(CPUState* cpu, uint32_t* dispatch_pc, uint64_t frame_end) {
     /* The debugger may have changed architectural PC while paused. Direct
@@ -31,6 +32,23 @@ int vb_machine_step(CPUState* cpu, uint32_t* dispatch_pc, uint64_t frame_end) {
         vb_stub_abort("dispatcher returned without yielding or halting",cpu->pc,0);
     *dispatch_pc=cpu->pc;
     return 1;
+}
+int vb_machine_run_slice(CPUState* cpu, uint32_t* dispatch_pc,
+                         uint64_t frame_end, uint32_t service_cycles) {
+    if (!service_cycles) return vb_machine_step(cpu,dispatch_pc,frame_end);
+    if (cpu->cycles>=frame_end) return 0;
+    const uint64_t end=frame_end-cpu->cycles>service_cycles
+        ? cpu->cycles+service_cycles:frame_end;
+    int active;
+    do {
+        const uint64_t before=cpu->cycles;
+        /* Preserve the original frame/device deadline. Introducing an extra
+         * service deadline here would change device synchronization points. */
+        active=vb_machine_step(cpu,dispatch_pc,frame_end);
+        if (!active || cpu->halted || vb_execution.stopped || cpu->cycles==before)
+            return active;
+    } while (cpu->cycles<end);
+    return active;
 }
 int vb_machine_run_frame(CPUState* cpu, uint32_t* dispatch_pc, uint64_t* frame_cycles) {
     const uint64_t end=*frame_cycles+397824u;

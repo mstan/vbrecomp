@@ -23,9 +23,13 @@ def main():
     symbols_input = p.add_mutually_exclusive_group(required=True)
     symbols_input.add_argument('--nm', type=Path)
     symbols_input.add_argument('--symbols', type=Path, help='Matching nm output prepared on the build host')
+    p.add_argument('--stackwalker', type=Path, help='Optional separately built x64 Windows DbgHelp helper DLL')
+    p.add_argument('--sample-ms', type=float, default=3.0)
     p.add_argument('command', nargs=argparse.REMAINDER)
     args = p.parse_args()
     command = args.command[1:] if args.command[:1] == ['--'] else args.command
+    if not command or args.sample_ms < 1:
+        p.error('Provide a finite child command and a sample interval of at least 1ms')
     args.out.mkdir(parents=True, exist_ok=True)
     exe = Path(command[0]).resolve()
     identity = hashlib.sha256(exe.read_bytes()).hexdigest()
@@ -61,7 +65,18 @@ def main():
     k.K32GetModuleFileNameExW.argtypes = [w.HANDLE, w.HMODULE, w.LPWSTR, w.DWORD]
     k.GetThreadTimes.argtypes = [w.HANDLE, c.POINTER(w.FILETIME), c.POINTER(w.FILETIME),
                                 c.POINTER(w.FILETIME), c.POINTER(w.FILETIME)]
+    walker = None
+    if args.stackwalker:
+        walker = c.CDLL(str(args.stackwalker.resolve()))
+        walker.vb_profile_begin.argtypes = [w.HANDLE]
+        walker.vb_profile_begin.restype = c.c_int
+        walker.vb_profile_refresh.argtypes = [w.HANDLE]
+        walker.vb_profile_end.argtypes = [w.HANDLE]
+        walker.vb_profile_walk.argtypes = [w.HANDLE, w.HANDLE, c.c_void_p, c.POINTER(c.c_uint64), c.c_uint]
+        walker.vb_profile_walk.restype = c.c_uint
     counts = Counter(); executable_addresses = Counter(); external_addresses = Counter(); errors = 0; module_map = []; thread = None
+    stacks = Counter(); stack_buffer = (c.c_uint64 * 96)(); walker_ready = False
+    suspension_seconds = 0.0; maximum_suspension_seconds = 0.0
     with (args.out / 'child.stdout').open('wb') as out, (args.out / 'child.stderr').open('wb') as err:
         process = subprocess.Popen(command, cwd=args.out, stdout=out, stderr=err,
                                    creationflags=subprocess.CREATE_NO_WINDOW)
@@ -94,6 +109,10 @@ def main():
                         k.K32GetModuleFileNameExW(int(process._handle), handle, name, len(name))
                         module_map.append((info.base, info.base + info.size, Path(name.value).name, name.value))
             refresh_modules()
+            if walker:
+                walker_ready = bool(walker.vb_profile_begin(int(process._handle)))
+                if not walker_ready:
+                    raise RuntimeError('DbgHelp failed to initialize for the owned child')
             last_module_refresh = time.monotonic()
             context_storage = c.create_string_buffer(1232 + 16)
             context_address = (c.addressof(context_storage) + 15) & ~15
@@ -102,7 +121,12 @@ def main():
             while process.poll() is None:
                 if time.monotonic() > deadline: raise TimeoutError('Owned finite workload exceeded 300 seconds')
                 if not module_map: refresh_modules()
-                struct.pack_into('<I', context, 48, 0x100001)
+                if time.monotonic()-last_module_refresh > 1:
+                    refresh_modules(); last_module_refresh = time.monotonic()
+                    if walker: walker.vb_profile_refresh(int(process._handle))
+                # CONTROL + INTEGER registers are required for unwind metadata.
+                struct.pack_into('<I', context, 48, 0x10000b)
+                suspension_started = time.perf_counter()
                 suspended = k.SuspendThread(thread) != 0xffffffff
                 try:
                     if suspended and k.GetThreadContext(thread, context_address):
@@ -123,12 +147,20 @@ def main():
                             name = 'DLL:' + module[2]
                             external_addresses[(module[3],pc-module[0])] += 1
                         counts[name] += 1
+                        if walker:
+                            depth = walker.vb_profile_walk(int(process._handle), thread,
+                                context_address, stack_buffer, len(stack_buffer))
+                            stacks[tuple(stack_buffer[:depth])] += 1
                     else: errors += 1
                 finally:
                     if suspended: k.ResumeThread(thread)
-                time.sleep(.003)
+                    elapsed = time.perf_counter() - suspension_started
+                    suspension_seconds += elapsed
+                    maximum_suspension_seconds = max(maximum_suspension_seconds, elapsed)
+                time.sleep(args.sample_ms / 1000)
             if process.returncode: raise RuntimeError(f'Workload exited {process.returncode}')
         finally:
+            if walker_ready: walker.vb_profile_end(int(process._handle))
             if thread: k.CloseHandle(thread)
             if process.poll() is None:
                 process.terminate(); process.wait(timeout=10)
@@ -137,6 +169,12 @@ def main():
     report = {'scope': 'perturbed main-thread PC samples; not throughput', 'command': command,
               'exe_sha256': identity, 'symbols_sha256': hashlib.sha256(symbols.encode()).hexdigest(),
               'main_tid': tid, 'sample_errors': errors,
+              'stackwalker_sha256': hashlib.sha256(args.stackwalker.read_bytes()).hexdigest() if walker else None,
+              'sample_interval_ms': args.sample_ms,
+              'suspension_seconds': suspension_seconds, 'maximum_suspension_seconds': maximum_suspension_seconds,
+              'stack_scope': 'main-thread wall-clock caller samples, including waits; truncated/unknown frames retained; not CPU-time percentages' if walker else None,
+              'stacks': [{'pcs': [hex(pc) for pc in stack], 'samples': value}
+                         for stack, value in stacks.most_common()],
               'samples': sum(counts.values()), 'modules': module_map,
               'executable_addresses': [{'rva':hex(rva),'samples':value}
                                        for rva,value in executable_addresses.most_common()],
@@ -145,7 +183,7 @@ def main():
               'functions': [{'name': n, 'samples': value, 'percent': 100 * value / sum(counts.values())}
                             for n, value in counts.most_common()]}
     (args.out / 'profile.json').write_text(json.dumps(report, indent=2))
-    print(json.dumps({k: v for k, v in report.items() if k not in ('functions', 'modules')}, indent=2))
+    print(json.dumps({k: v for k, v in report.items() if k not in ('functions', 'modules', 'stacks', 'executable_addresses', 'external_addresses')}, indent=2))
 
 
 if __name__ == '__main__':

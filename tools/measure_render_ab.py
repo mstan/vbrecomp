@@ -36,6 +36,7 @@ def main():
     p.add_argument('--profile-first', action='store_true', help='Retain a diagnostic profile before the fixed uninstrumented A/B series')
     p.add_argument('--nm', type=Path, default=Path('C:/msys64/mingw64/bin/nm.exe'))
     p.add_argument('--symbols', type=Path, help='Matching baseline symbols for profiling on a second host')
+    p.add_argument('--stackwalker', type=Path, help='Optional caller-stack profiler helper; never used for A/B timing')
     args = p.parse_args()
     if args.profile and args.profile_first:p.error('Choose profile-only or profile-first')
     args.out = args.out.resolve()
@@ -111,7 +112,9 @@ def main():
                     command = [sys.executable, str(Path(__file__).with_name('profile_native_windows.py')),
                                '--out', str(directory / 'capture'),
                                '--symbols' if args.symbols else '--nm',
-                               str(args.symbols.resolve()) if args.symbols else str(args.nm), '--', *command]
+                               str(args.symbols.resolve()) if args.symbols else str(args.nm),
+                               *(['--stackwalker', str(args.stackwalker.resolve())] if args.stackwalker else []),
+                               '--', *command]
                 row = dict(label=label, arm=arm, command=command, census_before=before, status='running')
                 report['runs'].append(row); save()
                 launched = time.perf_counter()

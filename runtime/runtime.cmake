@@ -184,6 +184,7 @@ function(vb_add_runtime_target TARGET)
     target_compile_definitions(${TARGET} PRIVATE
         VB_DEFAULT_DEBUG_PORT=${VB_DEBUG_PORT}
         VB_DEFAULT_WINDOW_TITLE="${VB_WINDOW_TITLE}"
+        VBRECOMP_HOST_SERVICE_CYCLES=${VBRECOMP_HOST_SERVICE_CYCLES}
     )
     if(VBRECOMP_NETPLAY)
         target_compile_definitions(${TARGET} PRIVATE VB_RUNTIME_HAVE_NETPLAY=1)
