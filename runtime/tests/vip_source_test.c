@@ -48,6 +48,67 @@ static void unwrapped_layout(const VbViewportScene* scene,int kind,int width,
     for(int i=0;i<1024;++i)layout->object_shift[i]=unwrap_origin;
 }
 static uint8_t extra_marker = 73;
+static int observe_capture;
+static uint8_t observed_capture_byte;
+static void deferred_draw_tests(void) {
+    static uint8_t expected_fb[2][0x6000];
+    static VbSourceTexel expected_source[2][384*8];
+    static uint16_t expected_attr[2][384*8];
+    vb_viewport_track();
+    for(unsigned mode=0;mode<4;++mode)for(unsigned flips=0;flips<4;++flips)for(unsigned slot=0;slot<2;++slot) {
+        vb_vip_native_rows[0]=vb_vip_native_rows[1]=0;
+        vb_vip_native_pending=0;
+        setup(mode,flips<<12,1);s_drawing_fb=slot;tracking=1;
+        unsigned base=slot*0x8000;
+        vip_draw_block_into(0,s_vip_mem+base,s_vip_mem+base+0x10000);
+        for(unsigned eye=0;eye<2;++eye) {
+            memcpy(expected_fb[eye],s_vip_mem+base+eye*0x10000,0x6000);
+            memcpy(expected_source[eye],s_source_fb[slot][eye],sizeof(expected_source[eye]));
+            memcpy(expected_attr[eye],s_attr_fb[slot][eye],sizeof(expected_attr[eye]));
+        }
+        setup(mode,flips<<12,1);s_drawing_fb=slot;
+        vip_draw_block_now(0);assert(vb_vip_native_rows[slot]==1);
+        // Live registers/artwork may change while an already completed draw
+        // waits to be observed. Neither changes the frozen native result.
+        memset(s_vip_mem+0x20000,0x7f,0x20000);
+        memset(s_vip_mem+0x78000,0x3c,0x8000);
+        memset(s_spt,0,sizeof(s_spt));memset(s_obj_suppress,0xff,sizeof(s_obj_suppress));
+        memset(s_gplt_cache,0,sizeof(s_gplt_cache));memset(s_jplt_cache,0,sizeof(s_jplt_cache));s_bkcol=0;
+        assert(vb_vip_read8(0x800000u+base+64*7)==expected_fb[0][64*7]);
+        assert(!vb_vip_native_rows[slot]);
+        for(unsigned eye=0;eye<2;++eye) {
+            assert(!memcmp(expected_fb[eye],s_vip_mem+base+eye*0x10000,0x6000));
+            assert(!memcmp(expected_source[eye],s_source_fb[slot][eye],sizeof(expected_source[eye])));
+            assert(!memcmp(expected_attr[eye],s_attr_fb[slot][eye],sizeof(expected_attr[eye])));
+        }
+    }
+    setup(0,0,0);s_drawing_fb=0;s_display_fb=0;
+    vip_draw_block_now(0);vip_draw_block_now(1);assert(vb_vip_native_rows[0]==3);
+    (void)vb_vip_read16(1);assert(vb_vip_native_rows[0]==2); // aligned halfword, one row
+    vip_draw_block_now(0);(void)vb_vip_read32(1);assert(!vb_vip_native_rows[0]); // two rows
+    vip_draw_block_now(2);vip_draw_block_now(3);
+    const uint64_t overwritten=s_native_overwritten;
+    vip_draw_block_now(2);assert(s_native_overwritten==overwritten+1);
+    const uint32_t address=64*10+4;
+    vb_vip_record_cpu_write(address,3,2,505);assert(!(vb_vip_native_rows[0]&(1u<<2)));
+    vb_vip_write16(address,3);assert(vb_vip_read16(address)==3);
+    assert(s_source_fb[0][0][16*384+10].kind==4 && s_source_fb[0][0][16*384+10].tile_hash==505);
+    assert(vb_vip_native_rows[0]&(1u<<3));
+    (void)vb_vip_source_buffer(0);assert(!vb_vip_native_rows[0]);
+    // A metadata callback sees the preceding native result even while this
+    // row's next capture is being written into the spare immutable bank.
+    setup(0,0,0);s_drawing_fb=0;vip_draw_block_now(0);
+    observe_capture=1;
+    memset(s_vip_mem+0x78000,0xff,0x8000);
+    vip_draw_block_now(0);observe_capture=0;
+    assert(observed_capture_byte==0x77); // Native x=3 levels3,1,3,1 from the old tile.
+    assert(vb_vip_native_rows[0]==1);
+    extern unsigned vb_test_phase_resets,vb_test_hash_resets;
+    unsigned phase=vb_test_phase_resets,hash=vb_test_hash_resets;
+    vb_vip_state_loaded();assert(!vb_vip_native_rows[0] && !vb_vip_native_rows[1] && !vb_vip_native_pending);
+    assert(vb_test_phase_resets==phase+1 && vb_test_hash_resets==hash+1);
+    puts("PASS: deferred native rows match eager frozen inputs, eyes/slots/modes/flips, aliases, partial reads/stores, provenance and overwrite order");
+}
 static void brightness_tests(void) {
     static uint32_t pixels[384 * 224];
     static uint32_t fused[384 * 224];
@@ -97,7 +158,10 @@ static void brightness_tests(void) {
     vb_test_red_warm=0;
     puts("PASS: per-eye column brightness and side-effect-free presentation");
 }
-static void snapshot_extra(uint8_t* bytes, unsigned count) { memset(bytes,extra_marker,count); }
+static void snapshot_extra(uint8_t* bytes, unsigned count) {
+    if(observe_capture)observed_capture_byte=vb_vip_read8(64*3);
+    memset(bytes,extra_marker,count);
+}
 static int extend_background(int x,int y,int* source_x,int* source_y,void* context) {
     (void)context;*source_x=(x%8+8)%8;*source_y=y;return 1;
 }
@@ -335,5 +399,6 @@ int main(void) {
     puts("PASS: native rasterizer and CPU source ownership, both eyes, packed stores and display lifetime");
     viewport_tests();
     brightness_tests();
+    deferred_draw_tests();
     return 0;
 }

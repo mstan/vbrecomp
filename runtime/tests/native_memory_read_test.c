@@ -30,6 +30,8 @@ void vb_irq_init(void) {}
 int vb_irq_highest_pending_level(void) {return 3;}
 void vb_wtrace_record(uint32_t a,uint32_t v,uint8_t w) {(void)a;(void)v;(void)w;abort();}
 void vb_vip_record_cpu_write(uint32_t a,uint32_t v,unsigned w,uint32_t tag) {(void)a;(void)v;(void)w;(void)tag;abort();}
+uint32_t vb_vip_native_pending;
+void vb_vip_materialize_framebuffer(uint32_t a,unsigned w) {(void)a;(void)w;abort();}
 int vb_rom_patch_attach(uint8_t* p,uint32_t n) {(void)p;(void)n;return 1;}
 VB_NORETURN void vb_stub_abort(const char* s,uint32_t pc,uint32_t a) {(void)s;(void)pc;(void)a;abort();}
 

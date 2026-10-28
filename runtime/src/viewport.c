@@ -3,7 +3,9 @@
 #include "viewport.h"
 #include "savestate.h"
 #include "vip.h"
+#include "draw_inputs.h"
 #include <string.h>
+#include <stddef.h>
 
 #ifndef VB_VIEWPORT_TILE_JOBS
 #define VB_VIEWPORT_TILE_JOBS 1
@@ -14,7 +16,19 @@ typedef struct ViewBlock {
     uint8_t gplt[4][4], jplt[4][4], backdrop, valid;
     _Alignas(uint64_t) uint8_t extra[VB_VIEWPORT_MAX_EXTRA];
 } ViewBlock;
-static ViewBlock blocks[2][28];
+#ifndef VB_DEFER_NATIVE_DRAW
+#define VB_DEFER_NATIVE_DRAW 0
+#endif
+static ViewBlock storage[56+VB_DEFER_NATIVE_DRAW];
+static ViewBlock* blocks[2][28];
+#if VB_DEFER_NATIVE_DRAW
+static ViewBlock* spare=&storage[56];
+#endif
+static void ensure_blocks(void) {
+    if(blocks[0][0])return;
+    for(unsigned slot=0;slot<2;++slot)for(unsigned row=0;row<28;++row)
+        blocks[slot][row]=&storage[slot*28+row];
+}
 static int tracking, adaptive, window_width = 1280, window_height = 720;
 static unsigned aspect_n = 16, aspect_d = 9;
 static char identifier[96];
@@ -23,6 +37,12 @@ static VbViewportArrange arrange_scene;
 static void* policy_context;
 static unsigned extra_size;
 static VbViewportCaptureExtra capture_extra;
+int vb_viewport_draw_inputs(int slot,int row,VbVipDrawInputs* out) {
+    if(!out || !tracking || slot<0 || slot>1 || row<0 || row>=28 || !blocks[slot][row]->valid)return 0;
+    const ViewBlock* b=blocks[slot][row];
+    *out=(VbVipDrawInputs){b->dram,b->chars,b->spt,b->suppress,b->gplt,b->jplt,b->backdrop};
+    return 1;
+}
 
 void vb_viewport_state_visit(VbStateVisit visit, void* context) {
     /* Preserve the identical public byte stream while exposing capture-block
@@ -30,7 +50,7 @@ void vb_viewport_state_visit(VbStateVisit visit, void* context) {
      * so unchanged captured banks can share pages independently of preceding
      * scalar fields and the struct's non-page-sized stride. */
     if (tracking) for(unsigned slot=0;slot<2;++slot)
-        for(unsigned row=0;row<28;++row)visit(context,&blocks[slot][row],sizeof(blocks[slot][row]));
+        for(unsigned row=0;row<28;++row)visit(context,blocks[slot][row],sizeof(*blocks[slot][row]));
 }
 
 static int sx(unsigned v, unsigned bits) {
@@ -43,14 +63,15 @@ static VbViewportScene scene_of(const ViewBlock* block) {
                             block->spt, block->extra, extra_size};
     return scene;
 }
-void vb_viewport_track(void) { tracking = 1; }
+void vb_viewport_track(void) { ensure_blocks();tracking = 1; }
 int vb_viewport_track_extra(unsigned size, VbViewportCaptureExtra capture) {
     if (!size || size > VB_VIEWPORT_MAX_EXTRA || !capture || capture_extra) return 0;
     extra_size = size; capture_extra = capture; return 1;
 }
 void vb_viewport_clear_frames(void) {
+    ensure_blocks();
     for (int slot = 0; slot < 2; ++slot)
-        for (int row = 0; row < 28; ++row) blocks[slot][row].valid = 0;
+        for (int row = 0; row < 28; ++row) blocks[slot][row]->valid = 0;
 }
 void vb_viewport_reset(void) {
     identifier[0] = 0; classify_scene = 0; arrange_scene = 0; policy_context = 0;
@@ -73,9 +94,9 @@ void vb_viewport_window(int width, int height) {
 int vb_viewport_width(void) {
     if (!classify_scene) return 384;
     int supported = 0, slot = vb_vip_display_fb() & 1;
-    for (int row = 0; row < 28; ++row) if (!blocks[slot][row].valid) return 384;
+    for (int row = 0; row < 28; ++row) if (!blocks[slot][row]->valid) return 384;
     for (int row = 0; row < 28; ++row) {
-        VbViewportScene scene = scene_of(&blocks[slot][row]);
+        VbViewportScene scene = scene_of(blocks[slot][row]);
         if (classify_scene(&scene, policy_context)) { supported = 1; break; }
     }
     if (!supported) return 384;
@@ -90,7 +111,18 @@ void vb_viewport_capture(int slot, int row, const uint16_t* dram,
                          const uint8_t gplt[4][4], const uint8_t jplt[4][4],
                          unsigned backdrop, const uint16_t suppress[1024]) {
     if (!tracking || slot < 0 || slot > 1 || row < 0 || row >= 28) return;
-    ViewBlock* b = &blocks[slot][row];
+    ViewBlock* b=blocks[slot][row];
+#if VB_DEFER_NATIVE_DRAW
+    if(vb_vip_native_rows[slot]&(1u<<row)) {
+        ViewBlock* old=b;b=spare;
+        // Keep the preceding bank alive through the metadata callback. It
+        // may observe the preceding native row before this event completes.
+        // Only metadata is retained here; DRAM/CHR are copied once below.
+        const size_t metadata=offsetof(ViewBlock,spt);
+        memcpy((uint8_t*)b+metadata,(const uint8_t*)old+metadata,sizeof(*b)-metadata);
+        blocks[slot][row]=b;spare=old;
+    }
+#endif
     memcpy(b->dram, dram, sizeof(b->dram)); memcpy(b->chars, chars, sizeof(b->chars));
     memcpy(b->spt, spt, sizeof(b->spt)); memcpy(b->suppress, suppress, sizeof(b->suppress));
     memcpy(b->gplt, gplt, sizeof(b->gplt)); memcpy(b->jplt, jplt, sizeof(b->jplt));
@@ -323,14 +355,14 @@ int vb_viewport_render(int slot, int eye, int width, uint32_t* argb,
                        uint8_t* levels, uint16_t* worlds, VbSourceTexel* sources) {
     if (slot < 0 || slot > 1 || width < 384 || width > VB_VIEWPORT_MAX_WIDTH
         || (width & 1) || !argb || !levels || !worlds || !sources) return 0;
-    for (int row = 0; row < 28; ++row) if (!blocks[slot][row].valid) return 0;
+    for (int row = 0; row < 28; ++row) if (!blocks[slot][row]->valid) return 0;
     memset(worlds, 0, width * 224 * sizeof(*worlds));
     memset(sources, 0, width * 224 * sizeof(*sources));
     uint32_t palette[96][4];
     int origins[28];
     vb_vip_column_argb(eye, palette);
     for (int row = 0; row < 28; ++row) {
-        const ViewBlock* b = &blocks[slot][row];
+        const ViewBlock* b = blocks[slot][row];
         VbViewportScene scene = scene_of(b);
         int kind = classify_scene ? classify_scene(&scene, policy_context) : 0;
         VbViewportLayout layout = {0};

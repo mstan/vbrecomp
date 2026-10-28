@@ -32,8 +32,9 @@ uint32_t vb_red_lut_map(int value) {
     return 0xff000000u | (r<<16) | (vb_test_red_warm ? ((r*r)/(255u*10u))<<8 : 0);
 }
 UNREACHABLE(vb_vip_phase_record)
-UNREACHABLE(vb_vip_phase_reset)
+unsigned vb_test_phase_resets,vb_test_hash_resets;
+void vb_vip_phase_reset(void){++vb_test_phase_resets;}
 UNREACHABLE(vb_wram_hash_record)
 UNREACHABLE(vb_wram_hash_recording)
-UNREACHABLE(vb_wram_hash_reset)
+void vb_wram_hash_reset(void){++vb_test_hash_resets;}
 UNREACHABLE(vb_wram_region_fnv)

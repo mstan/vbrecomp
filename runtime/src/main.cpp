@@ -969,6 +969,7 @@ int main(int argc, char** argv) {
     vb_state_ui_init(state_file.c_str());
     VbStateCaptureCosts initial_capture_costs{};
     vb_state_capture_costs(&initial_capture_costs);
+    VbVipDrawCosts initial_draw_costs{};vb_vip_draw_costs(&initial_draw_costs);
     uint64_t initial_preview_renders=0,initial_preview_pixels=0;
     vb_state_ui_preview_costs(&initial_preview_renders,&initial_preview_pixels);
     const auto benchmark_start = std::chrono::steady_clock::now();
@@ -1330,6 +1331,7 @@ int main(int argc, char** argv) {
         uint8_t digest[32];char hash[65];vb_sha256_compute(vb_wram_data(),VB_WRAM_SIZE,digest);
         for(unsigned i=0;i<32;++i)std::sprintf(hash+2*i,"%02x",digest[i]);
         VbStateCaptureCosts capture_costs{};vb_state_capture_costs(&capture_costs);
+        VbVipDrawCosts draw_costs{};vb_vip_draw_costs(&draw_costs);
         uint64_t preview_renders=0,preview_pixels=0;
         vb_state_ui_preview_costs(&preview_renders,&preview_pixels);
         std::printf("VBRECOMP_BENCHMARK {\"frames\":%u,\"seconds\":%.9f,\"fps\":%.3f,"
@@ -1339,7 +1341,9 @@ int main(int argc, char** argv) {
             "\"snapshot_allocations\":%llu,\"snapshot_payload_bytes_copied\":%llu,"
             "\"history_preview_renders\":%llu,\"history_preview_pixels\":%llu,"
             "\"snapshot_page_allocations\":%llu,\"snapshot_page_bytes_copied\":%llu,"
-            "\"snapshot_page_hits\":%llu,\"rewind_page_storage_bytes\":%llu,\"workload_scope\":\"%s\"}\n",
+            "\"snapshot_page_hits\":%llu,\"rewind_page_storage_bytes\":%llu,"
+            "\"native_draws_scheduled\":%llu,\"native_draws_materialized\":%llu,\"native_draws_overwritten\":%llu,"
+            "\"workload_scope\":\"%s\"}\n",
             cpu.frame,benchmark_seconds,cpu.frame/benchmark_seconds,benchmark_cpu_seconds,
             (unsigned long long)cpu.cycles,cpu.pc,hash,(unsigned long long)vb_execution.native_instructions,
             (unsigned long long)vb_execution.interpreted,(unsigned long long)vb_execution.fallback,
@@ -1353,6 +1357,9 @@ int main(int argc, char** argv) {
             (unsigned long long)(capture_costs.page_copied_bytes-initial_capture_costs.page_copied_bytes),
             (unsigned long long)(capture_costs.page_hits-initial_capture_costs.page_hits),
             (unsigned long long)capture_costs.rewind_page_bytes,
+            (unsigned long long)(draw_costs.scheduled-initial_draw_costs.scheduled),
+            (unsigned long long)(draw_costs.materialized-initial_draw_costs.materialized),
+            (unsigned long long)(draw_costs.overwritten-initial_draw_costs.overwritten),
             measure_runtime?"uncapped-full-runtime":"headless-core");
     }
     vb_watchdog_stop();

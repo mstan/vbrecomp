@@ -84,6 +84,18 @@ void vb_vip_render_framebuffer(int eye, uint32_t* argb_out);
 /* Decode the actual displayed framebuffer once for color plugins needing both
  * stock pixels and raw levels. Optional levels; identical brightness/LED rules. */
 void vb_vip_render_framebuffer_levels(int eye,uint32_t* argb_out,uint8_t* levels);
+/* Materialize logically completed native rows before a guest/observer access.
+ * Width is an aligned bus access of1,2 or4 bytes. No guest clock advances. */
+extern uint32_t vb_vip_native_pending;
+void vb_vip_materialize_framebuffer(uint32_t addr,unsigned width);
+static inline void vb_vip_prepare_framebuffer(uint32_t addr,unsigned width) {
+    if(vb_vip_native_pending)vb_vip_materialize_framebuffer(addr,width);
+}
+typedef struct VbVipDrawCosts {
+    uint64_t scheduled,materialized,overwritten;
+    uint32_t pending[2];
+} VbVipDrawCosts;
+void vb_vip_draw_costs(VbVipDrawCosts* out);
 
 /* Opt-in present-time full-screen recolor (experiment): same as
  * vb_vip_render_framebuffer but maps each pixel through the per-frame recolor

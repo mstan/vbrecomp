@@ -41,6 +41,10 @@
 #include "recolor.h"
 #include "renderer.h"
 #include "viewport.h"
+#include "draw_inputs.h"
+#ifndef VB_DEFER_NATIVE_DRAW
+#define VB_DEFER_NATIVE_DRAW 0
+#endif
 #include "mod_runtime.h"
 
 #define VIP_WINDOW_SIZE 0x80000u
@@ -336,6 +340,33 @@ static VbSourceTexel s_source_fb[2][2][384 * 224];
 static uint32_t s_source_hash[2048];
 static uint8_t s_source_hashed[2048];
 static uint8_t s_source_map, s_source_kind;
+uint32_t vb_vip_native_rows[2];
+uint32_t vb_vip_native_pending;
+static VbVipDrawInputs s_pending_inputs[2][28],s_draw_inputs;
+static uint8_t s_pending_flags[2][28];
+static int s_draw_texels;
+static uint64_t s_native_scheduled,s_native_materialized,s_native_overwritten;
+static void vip_materialize_block(unsigned slot,unsigned block);
+static void vip_materialize_slot(unsigned slot) {
+    for(unsigned block=0;block<28;++block)
+        if(vb_vip_native_rows[slot]&(1u<<block))vip_materialize_block(slot,block);
+}
+static void vip_materialize_all(void){vip_materialize_slot(0);vip_materialize_slot(1);}
+void vb_vip_materialize_framebuffer(uint32_t addr,unsigned width) {
+    if(!(vb_vip_native_rows[0]|vb_vip_native_rows[1]))return;
+    if(width!=1 && width!=2 && width!=4)return;
+    const uint32_t o=addr&0x7ffffu;
+    for(unsigned byte=0;byte<width;++byte) {
+        unsigned at=o+byte;
+        if(at>=0x20000u || (at&0x7fffu)>=0x6000u)continue;
+        unsigned slot=(at>>15)&1,block=(at&63u)/2;
+        if(block<28 && (vb_vip_native_rows[slot]&(1u<<block)))vip_materialize_block(slot,block);
+    }
+}
+void vb_vip_draw_costs(VbVipDrawCosts* out) {
+    if(out)*out=(VbVipDrawCosts){s_native_scheduled,s_native_materialized,s_native_overwritten,
+        {vb_vip_native_rows[0],vb_vip_native_rows[1]}};
+}
 
 
 /* Per-OAM suppression for matched OBJ tiles: 0 = draw faithfully; otherwise
@@ -346,6 +377,8 @@ static uint16_t s_obj_suppress[1024];
 
 
 void vb_vip_init(void) {
+    vb_vip_native_rows[0]=vb_vip_native_rows[1]=0;
+    vb_vip_native_pending=0;
     vb_viewport_clear_frames();
     memset(s_vip_mem, 0, sizeof(s_vip_mem));
     memset(s_source_fb, 0, sizeof(s_source_fb));
@@ -729,6 +762,7 @@ static uint32_t vip_route(uint32_t offset) {
 }
 
 uint8_t vb_vip_read8(uint32_t addr) {
+    vb_vip_prepare_framebuffer(addr,1);
     uint32_t o = vip_offset(addr);
     if (vip_is_register(o)) {
         uint16_t r = vip_read_register16(o & ~1u);
@@ -738,6 +772,7 @@ uint8_t vb_vip_read8(uint32_t addr) {
 }
 
 uint16_t vb_vip_read16(uint32_t addr) {
+    vb_vip_prepare_framebuffer(addr&~1u,2);
     uint32_t o = vip_offset(addr) & ~1u;
     if (vip_is_register(o)) {
         return vip_read_register16(o);
@@ -748,6 +783,7 @@ uint16_t vb_vip_read16(uint32_t addr) {
 }
 
 uint32_t vb_vip_read32(uint32_t addr) {
+    vb_vip_prepare_framebuffer(addr&~3u,4);
     uint32_t o = vip_offset(addr) & ~3u;
     if (vip_is_register(o)) {
         uint32_t lo = vip_read_register16(o);
@@ -762,6 +798,7 @@ uint32_t vb_vip_read32(uint32_t addr) {
 }
 
 void vb_vip_write8(uint32_t addr, uint8_t v) {
+    vb_vip_prepare_framebuffer(addr,1);
     uint32_t o = vip_offset(addr);
     if (vip_is_register(o)) {
         /* Beetle's WriteRegister is halfword-oriented. Promote the
@@ -778,6 +815,7 @@ void vb_vip_write8(uint32_t addr, uint8_t v) {
 }
 
 void vb_vip_record_cpu_write(uint32_t addr, uint32_t value, unsigned width, uint32_t tag) {
+    vb_vip_prepare_framebuffer(addr,width);
     if (!vb_renderer_tracks_texels()) return;
     uint32_t o = vip_offset(addr);
     if (o >= 0x20000u || (o & 0x7fffu) >= 0x6000u) return;
@@ -804,6 +842,7 @@ void vb_vip_record_cpu_write(uint32_t addr, uint32_t value, unsigned width, uint
 }
 
 void vb_vip_write16(uint32_t addr, uint16_t v) {
+    vb_vip_prepare_framebuffer(addr&~1u,2);
     uint32_t o = vip_offset(addr) & ~1u;
     if (vip_is_register(o)) {
         vip_write_register16(o, v);
@@ -815,6 +854,7 @@ void vb_vip_write16(uint32_t addr, uint16_t v) {
 }
 
 void vb_vip_write32(uint32_t addr, uint32_t v) {
+    vb_vip_prepare_framebuffer(addr&~3u,4);
     uint32_t o = vip_offset(addr) & ~3u;
     if (vip_is_register(o)) {
         vip_write_register16(o,     (uint16_t)(v & 0xFFFFu));
@@ -863,10 +903,10 @@ static inline const uint16_t* chr_u16(void) {
 
 static void source_texel(uint16_t* attribution, int eye, unsigned tile,
                          unsigned u, unsigned v, unsigned x, unsigned y, unsigned raw) {
-    if (!attribution || !vb_renderer_tracks_texels()) return;
+    if (!attribution || !s_draw_texels) return;
     tile &= 2047;
     if (!s_source_hashed[tile]) {
-        s_source_hash[tile] = vb_capture_hash(&chr_u16()[tile * 8]);
+        s_source_hash[tile] = vb_capture_hash(&s_draw_inputs.chars[tile * 8]);
         s_source_hashed[tile] = 1;
     }
     VbSourceTexel* out = &s_source_row[eye][attribution - s_attr_row[eye]];
@@ -898,8 +938,8 @@ static void draw_bg(uint8_t* target, uint16_t* attr_target, uint16_t real_y, int
                     uint16_t dest_x, uint16_t dest_y,
                     uint16_t dest_width, uint16_t dest_height) {
     (void)lr;
-    const uint16_t* chr  = chr_u16();
-    const uint16_t* bgm  = dram_u16();
+    const uint16_t* chr  = s_draw_inputs.chars;
+    const uint16_t* bgm  = s_draw_inputs.dram;
     uint32_t bgmap_base  = (uint32_t)bgmap_base_raw << 12;
     int32_t  start_x, final_x;
     const uint32_t bgsc_overplane = bgm[overplane_char];
@@ -949,14 +989,14 @@ static void draw_bg(uint8_t* target, uint16_t* attr_target, uint16_t real_y, int
             if (bgsc & 0x2000u) {
                 for (int sub = 0; sub < 8; ++sub) {
                     uint32_t v = (pixels >> (14 - sub * 2)) & 3u;
-                    if (v) { target[x + sub] = s_gplt_cache[palette_sel][v];
+                    if (v) { target[x + sub] = s_draw_inputs.gplt[palette_sel][v];
                              if (attr_target) { attr_target[x + sub] = attr_id;
                                  source_texel(attr_target+x+sub, lr, char_no, hflip_xor ^ sub, char_sub_y, source_x_u+sub, (uint32_t)source_y, v); } }
                 }
             } else {
                 for (int sub = 0; sub < 8; ++sub) {
                     uint32_t v = (pixels >> (sub * 2)) & 3u;
-                    if (v) { target[x + sub] = s_gplt_cache[palette_sel][v];
+                    if (v) { target[x + sub] = s_draw_inputs.gplt[palette_sel][v];
                              if (attr_target) { attr_target[x + sub] = attr_id;
                                  source_texel(attr_target+x+sub, lr, char_no, hflip_xor ^ sub, char_sub_y, source_x_u+sub, (uint32_t)source_y, v); } }
                 }
@@ -966,7 +1006,7 @@ static void draw_bg(uint8_t* target, uint16_t* attr_target, uint16_t real_y, int
         } else {
             uint32_t char_sub_x = hflip_xor ^ (source_x_u & 0x7u);
             uint8_t pixel = (uint8_t)((chr[char_no * 8u + char_sub_y] >> (char_sub_x * 2u)) & 0x3u);
-            if (pixel) { target[x] = s_gplt_cache[palette_sel][pixel];
+            if (pixel) { target[x] = s_draw_inputs.gplt[palette_sel][pixel];
                          if (attr_target) { attr_target[x] = attr_id;
                              source_texel(attr_target+x, lr, char_no, char_sub_x, char_sub_y, source_x_u, (uint32_t)source_y, pixel); } }
             source_x++;
@@ -980,8 +1020,8 @@ static void draw_affine(uint8_t* target, uint16_t* attr_target, uint16_t real_y,
                         uint32_t scx, uint32_t scy,
                         uint16_t dest_x, uint16_t dest_y,
                         uint16_t dest_width, uint16_t dest_height) {
-    const uint16_t* chr = chr_u16();
-    const uint16_t* bgm = dram_u16();
+    const uint16_t* chr = s_draw_inputs.chars;
+    const uint16_t* bgm = s_draw_inputs.dram;
     const uint32_t bgmap_xcount  = 1u << scx;
     const uint32_t bgmap_ycount  = 1u << scy;
     const uint32_t source_x_size = 512u * bgmap_xcount;
@@ -1047,7 +1087,7 @@ static void draw_affine(uint8_t* target, uint16_t* attr_target, uint16_t real_y,
             uint32_t char_sub_y = vflip_xor ^ ((source_y >> 9) & 0x7u);
             uint32_t char_sub_x = hflip_xor ^ ((source_x >> 8) & 0xEu);
             uint32_t pixel = (chr[((bgsc & 0x7FFu) * 8u) | char_sub_y] >> char_sub_x) & 0x3u;
-            if (pixel) { target[x] = s_gplt_cache[bgsc >> 14][pixel];
+            if (pixel) { target[x] = s_draw_inputs.gplt[bgsc >> 14][pixel];
                          if (attr_target) { attr_target[x] = s_attr_val;
                              source_texel(attr_target+x, lr, bgsc & 2047u, char_sub_x / 2, char_sub_y, source_x >> 9, source_y >> 9, pixel); } }
             source_x = (uint32_t)((int32_t)source_x + dx);
@@ -1071,7 +1111,7 @@ static void draw_affine(uint8_t* target, uint16_t* attr_target, uint16_t real_y,
             uint32_t char_sub_y = vflip_xor ^ ((source_y >> 9) & 0x7u);
             uint32_t char_sub_x = hflip_xor ^ ((source_x >> 9) & 0x7u);
             uint8_t pixel = (uint8_t)((chr[char_no * 8u + char_sub_y] >> (char_sub_x * 2u)) & 0x3u);
-            if (pixel) { target[x] = s_gplt_cache[palette][pixel];
+            if (pixel) { target[x] = s_draw_inputs.gplt[palette][pixel];
                          if (attr_target) { attr_target[x] = s_attr_val;
                              source_texel(attr_target+x, lr, char_no, char_sub_x, char_sub_y, source_x >> 9, source_y >> 9, pixel); } }
             source_x = (uint32_t)((int32_t)source_x + dx);
@@ -1081,11 +1121,11 @@ static void draw_affine(uint8_t* target, uint16_t* attr_target, uint16_t real_y,
 }
 
 static void draw_obj(uint8_t* fb_lr[2], uint16_t* attr_lr[2], uint16_t y, int lron[2]) {
-    const uint16_t* chr = chr_u16();
-    const uint16_t* bgm = dram_u16();
-    int32_t start_oam = s_spt[s_obj_search_which];
+    const uint16_t* chr = s_draw_inputs.chars;
+    const uint16_t* bgm = s_draw_inputs.dram;
+    int32_t start_oam = s_draw_inputs.spt[s_obj_search_which];
     int32_t end_oam   = s_obj_search_which
-                        ? s_spt[s_obj_search_which - 1] : 1023;
+                        ? s_draw_inputs.spt[s_obj_search_which - 1] : 1023;
     int32_t oam = start_oam;
 
     do {
@@ -1095,10 +1135,10 @@ static void draw_obj(uint8_t* fb_lr[2], uint16_t* attr_lr[2], uint16_t y, int lr
          * resolve pass matched to a replacement, so the present-time RGBA
          * overlay stands in. The (char_no+1) re-check fails safe — if the
          * OAM entry's char changed since resolve, draw the original 2bpp.
-         * s_obj_suppress is all-zero unless VBRECOMP_OVERRIDES is active, so
+         * s_draw_inputs.suppress is all-zero unless VBRECOMP_OVERRIDES is active, so
          * this branch is never taken on a faithful run. */
-        if (s_obj_suppress[oam] &&
-            (uint16_t)((oam_ptr[3] & 0x7FFu) + 1u) == s_obj_suppress[oam]) {
+        if (s_draw_inputs.suppress[oam] &&
+            (uint16_t)((oam_ptr[3] & 0x7FFu) + 1u) == s_draw_inputs.suppress[oam]) {
             continue;
         }
 
@@ -1127,7 +1167,7 @@ static void draw_obj(uint8_t* fb_lr[2], uint16_t* attr_lr[2], uint16_t y, int lr
                 if (oam_ptr[3] & 0x2000u) {
                     tgt += 7; if (atgt) atgt += 7;
                     for (int m = 8; m; m--) {
-                        if (pixels & 3u) { *tgt = s_jplt_cache[palette_sel][pixels & 3u];
+                        if (pixels & 3u) { *tgt = s_draw_inputs.jplt[palette_sel][pixels & 3u];
                                            if (atgt) { *atgt = id;
                                                source_texel(atgt, lr, char_no, 8-m, char_sub_y, 8-m, char_sub_y, pixels & 3u); } }
                         tgt--; if (atgt) atgt--;
@@ -1135,7 +1175,7 @@ static void draw_obj(uint8_t* fb_lr[2], uint16_t* attr_lr[2], uint16_t y, int lr
                     }
                 } else {
                     for (int m = 8; m; m--) {
-                        if (pixels & 3u) { *tgt = s_jplt_cache[palette_sel][pixels & 3u];
+                        if (pixels & 3u) { *tgt = s_draw_inputs.jplt[palette_sel][pixels & 3u];
                                            if (atgt) { *atgt = id;
                                                source_texel(atgt, lr, char_no, 8-m, char_sub_y, 8-m, char_sub_y, pixels & 3u); } }
                         tgt++; if (atgt) atgt++;
@@ -1148,10 +1188,11 @@ static void draw_obj(uint8_t* fb_lr[2], uint16_t* attr_lr[2], uint16_t y, int lr
 }
 
 /* Render one 8-row block (block 0..27) into the back-buffer FBs. */
-static void vip_draw_block_into(uint8_t block_no,
-                                uint8_t* fb_l, uint8_t* fb_r) {
-    vb_viewport_capture(s_drawing_fb & 1, block_no, dram_u16(), chr_u16(),
-                        s_spt, s_gplt_cache, s_jplt_cache, s_bkcol, s_obj_suppress);
+static void vip_draw_block_inputs(uint8_t block_no,unsigned slot,
+        uint8_t* fb_l,uint8_t* fb_r,const VbVipDrawInputs* inputs,
+        int draw_attributes,int draw_texels) {
+    s_draw_inputs=*inputs;s_draw_texels=draw_texels;
+    ++s_native_materialized;
     /* Per-row temp buffer, 512 bytes wide so OBJ pixels with x ∈
      * [-7, 384) land safely. The +8 left-pad mirrors Beetle's
      * `DrawingBuffers[lr][8 + x + 512 * row]`. */
@@ -1159,15 +1200,15 @@ static void vip_draw_block_into(uint8_t block_no,
     const int PAD_LEFT   = 8;
     static uint8_t  s_row_buf[2][8 * 512];
     memset(s_source_hashed, 0, sizeof(s_source_hashed));
-    if (vb_renderer_tracks_texels()) memset(s_source_row, 0, sizeof(s_source_row));
-    const uint16_t* bgm = dram_u16();
+    if (s_draw_texels) memset(s_source_row, 0, sizeof(s_source_row));
+    const uint16_t* bgm = s_draw_inputs.dram;
 
-    uint8_t bkcol = (uint8_t)(s_bkcol & 0x3u);
+    uint8_t bkcol = (uint8_t)(s_draw_inputs.backdrop & 0x3u);
     for (int y = 0; y < 8; y++) {
         memset(&s_row_buf[0][y * ROW_STRIDE], bkcol, ROW_STRIDE);
         memset(&s_row_buf[1][y * ROW_STRIDE], bkcol, ROW_STRIDE);
     }
-    if (s_attr_on) {
+    if (draw_attributes) {
         memset(s_attr_row[0], 0, sizeof(s_attr_row[0]));
         memset(s_attr_row[1], 0, sizeof(s_attr_row[1]));
     }
@@ -1208,8 +1249,8 @@ static void vip_draw_block_into(uint8_t block_no,
                 &s_row_buf[1][PAD_LEFT + y * ROW_STRIDE],
             };
             uint16_t* af[2] = {
-                s_attr_on ? &s_attr_row[0][PAD_LEFT + y * ROW_STRIDE] : NULL,
-                s_attr_on ? &s_attr_row[1][PAD_LEFT + y * ROW_STRIDE] : NULL,
+                draw_attributes ? &s_attr_row[0][PAD_LEFT + y * ROW_STRIDE] : NULL,
+                draw_attributes ? &s_attr_row[1][PAD_LEFT + y * ROW_STRIDE] : NULL,
             };
 
             if (bgm_mode == BGM_OBJ) {
@@ -1277,22 +1318,44 @@ static void vip_draw_block_into(uint8_t block_no,
     /* Pack the parallel attribution scratch into the full-res per-eye
      * attribution buffer for the current drawing FB slot, so the present
      * recolor path can map each displayed pixel back to its source tile. */
-    if (s_attr_on) {
+    if (draw_attributes) {
         for (int lr = 0; lr < 2; lr++) {
             const uint16_t* asrc = s_attr_row[lr];
-            uint16_t* adst = s_attr_fb[s_drawing_fb & 1][lr];
+            uint16_t* adst = s_attr_fb[slot][lr];
             for (int row = 0; row < 8; row++) {
                 int yy = block_no * 8 + row;
                 for (int x = 0; x < 384; x++)
                 {
                     adst[yy * 384 + x] = asrc[PAD_LEFT + x + 512 * row];
-                    if (vb_renderer_tracks_texels())
-                        s_source_fb[s_drawing_fb & 1][lr][yy * 384 + x] =
+                    if (s_draw_texels)
+                        s_source_fb[slot][lr][yy * 384 + x] =
                             s_source_row[lr][PAD_LEFT + x + 512 * row];
                 }
             }
         }
     }
+}
+
+static VbVipDrawInputs vip_live_draw_inputs(void) {
+    return (VbVipDrawInputs){dram_u16(),chr_u16(),s_spt,s_obj_suppress,
+        s_gplt_cache,s_jplt_cache,s_bkcol};
+}
+static void vip_draw_block_into(uint8_t block_no,uint8_t* fb_l,uint8_t* fb_r) {
+    VbVipDrawInputs inputs=vip_live_draw_inputs();
+    vb_viewport_capture(s_drawing_fb&1,block_no,inputs.dram,inputs.chars,
+        inputs.spt,inputs.gplt,inputs.jplt,inputs.backdrop,inputs.suppress);
+    vip_draw_block_inputs(block_no,s_drawing_fb&1,fb_l,fb_r,&inputs,
+        s_attr_on,vb_renderer_tracks_texels());
+}
+static void vip_materialize_block(unsigned slot,unsigned block) {
+    const unsigned bit=1u<<block;
+    if(!(vb_vip_native_rows[slot]&bit))return;
+    vb_vip_native_rows[slot]&=~bit;
+    vb_vip_native_pending=vb_vip_native_rows[0]|vb_vip_native_rows[1];
+    const unsigned base=slot*0x8000u;
+    vip_draw_block_inputs((uint8_t)block,slot,&s_vip_mem[base],&s_vip_mem[base+0x10000u],
+        &s_pending_inputs[slot][block],s_pending_flags[slot][block]&1,
+        (s_pending_flags[slot][block]>>1)&1);
 }
 
 /* Public entry point — called by the column state machine when the
@@ -1303,6 +1366,25 @@ static void vip_draw_block_now(uint8_t block_no) {
      * R drawing FB base = (drawing_fb==0) ? 0x10000 : 0x18000 */
     uint8_t* fb_l = &s_vip_mem[s_drawing_fb ? 0x8000u  : 0x0000u];
     uint8_t* fb_r = &s_vip_mem[s_drawing_fb ? 0x18000u : 0x10000u];
+    const unsigned slot=s_drawing_fb&1,bit=1u<<block_no;
+    ++s_native_scheduled;
+#if VB_DEFER_NATIVE_DRAW
+    /* Freeze at the original hardware event, then reuse that immutable capture
+     * for native reads and expanded output. A later full draw may replace an
+     * unobserved row; partial CPU stores always materialize it first. */
+    VbVipDrawInputs live=vip_live_draw_inputs(),frozen;
+    vb_viewport_capture(slot,block_no,live.dram,live.chars,live.spt,
+        live.gplt,live.jplt,live.backdrop,live.suppress);
+    if(vb_viewport_draw_inputs(slot,block_no,&frozen)) {
+        if(vb_vip_native_rows[slot]&bit)++s_native_overwritten;
+        s_pending_inputs[slot][block_no]=frozen;
+        s_pending_flags[slot][block_no]=(uint8_t)((s_attr_on?1:0)|(vb_renderer_tracks_texels()?2:0));
+        vb_vip_native_rows[slot]|=bit;
+        vb_vip_native_pending=vb_vip_native_rows[0]|vb_vip_native_rows[1];return;
+    }
+#endif
+    vb_vip_native_rows[slot]&=~bit;
+    vb_vip_native_pending=vb_vip_native_rows[0]|vb_vip_native_rows[1];
     vip_draw_block_into(block_no, fb_l, fb_r);
 }
 
@@ -1467,6 +1549,7 @@ static void vip_resolve_overrides(void) {
  * natural (x, y) order and unpack on the fly. */
 static inline void framebuffer_decode(int eye, uint32_t* argb_out,uint8_t* levels) {
     if (!argb_out) return;
+    vip_materialize_slot(s_display_fb&1);
     uint8_t red[96][4];
     uint32_t colors[96][4];
     framebuffer_column_colors(eye, red);
@@ -1524,6 +1607,7 @@ void vb_vip_render_framebuffer_levels(int eye,uint32_t* argb_out,uint8_t* levels
  * faithful red. Kept separate so vb_vip_render_framebuffer stays
  * byte-identical / oracle-safe. */
 void vb_vip_render_framebuffer_recolored(int eye, uint32_t* argb_out) {
+    vip_materialize_slot(s_display_fb&1);
     if (!argb_out) return;
     uint8_t colors[96][4];
     framebuffer_column_colors(eye, colors);
@@ -1639,10 +1723,12 @@ uint64_t vb_vip_cycles(void)            { return s_vip_cycles; }
  * Used by the `attr_hashes` debug command to list on-screen tiles. Attribution
  * is populated only when capture or recolor is active. */
 const uint16_t* vb_vip_attr_buffer(int eye) {
+    vip_materialize_slot(s_display_fb&1);
     return s_attr_fb[s_display_fb & 1][eye ? 1 : 0];
 }
 void vb_vip_copy_levels(int eye, uint8_t* levels) {
     if (!levels) return;
+    vip_materialize_slot(s_display_fb&1);
     const unsigned base = (eye ? 0x10000u : 0u) + (s_display_fb ? 0x8000u : 0u);
     const uint8_t* fb = &s_vip_mem[base];
     for (int y = 0; y < 224; ++y)
@@ -1697,6 +1783,7 @@ int vb_vip_aring_get(int i, uint32_t off, int len, uint32_t* seq, uint32_t* mask
 }
 
 const VbSourceTexel* vb_vip_source_buffer(int eye) {
+    vip_materialize_slot(s_display_fb&1);
     return s_source_fb[s_display_fb & 1][eye != 0];
 }
 
@@ -1753,6 +1840,7 @@ unsigned vb_vip_snapshot(uint32_t* out) {
 
 /* Execution state only: host pointers and diagnostic history stay local. */
 void vb_vip_state_visit(VbStateVisit visit, void* context) {
+    vip_materialize_all();
     visit(context, &s_vip_mem, sizeof(s_vip_mem));
     visit(context, &s_intpnd, sizeof(s_intpnd));
     visit(context, &s_intenb, sizeof(s_intenb));
@@ -1789,6 +1877,7 @@ void vb_vip_state_visit(VbStateVisit visit, void* context) {
     visit(context, &s_vip_frame_seq, sizeof(s_vip_frame_seq));
 }
 void vb_vip_presentation_visit(VbStateVisit visit, void* context) {
+    vip_materialize_all();
     if (s_attr_on) visit(context, s_attr_fb, sizeof(s_attr_fb));
     if (vb_renderer_tracks_texels()) visit(context, s_source_fb, sizeof(s_source_fb));
     visit(context, s_obj_suppress, sizeof(s_obj_suppress));
@@ -1809,6 +1898,8 @@ int vb_vip_state_valid(void) {
     return 1;
 }
 void vb_vip_state_loaded(void) {
+    vb_vip_native_rows[0]=vb_vip_native_rows[1]=0;
+    vb_vip_native_pending=0;
     /* Discard observation history from the abandoned future, retaining all
      * emulated scan state and captured presentation inputs. */
     s_wring_head=s_wring_count=s_aring_head=s_aring_count=0;

@@ -37,6 +37,7 @@ int vb_memory_register_write_observer(VbWriteObserver observer) {
     return 1;
 }
 static void observe_write(uint32_t addr, uint32_t value, unsigned width) {
+    if(((addr>>24)&7u)==0)vb_vip_prepare_framebuffer(addr,width);
     uint32_t tag = s_write_observer && s_bus_cpu
         ? s_write_observer(s_bus_cpu, addr, value, width) : 0;
     if (((addr >> 24) & 7u) == 0)

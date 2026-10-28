@@ -4,6 +4,7 @@
 #include "renderer.h"
 #include "viewport.h"
 #include "state_ui.h"
+#include "vip.h"
 #include <cassert>
 #include <cstdlib>
 #include <cstring>
@@ -16,6 +17,36 @@ Session session{};
 uint64_t presentation=123;
 unsigned loaded;
 unsigned old_sram_value;
+bool draw_observer_active;
+unsigned draw_observed;
+uint32_t draw_observer(const CPUState* cpu,uint32_t addr,uint32_t value,unsigned width) {
+    if(!draw_observer_active)return 0;
+    assert(cpu && cpu->gpr[7]==77 && value==0x03030303 && width==4);
+    unsigned slot=(addr>>15)&1;
+    VbVipDrawCosts costs{};vb_vip_draw_costs(&costs);
+    assert(!(costs.pending[slot]&3)); // Native rows exist before the observer.
+    ++draw_observed;return 777;
+}
+void deferred_bus_test(CPUState& cpu) {
+    assert(vb_memory_register_write_observer(draw_observer));
+    vb_vip_write16(0x3dbe0,0x40); // End world list: backdrop-only native rows.
+    vb_vip_write16(0x5f870,2);vb_vip_write16(0x5f842,2);
+    VbVipDrawCosts costs{};unsigned slot=0;
+    for(unsigned i=0;i<2000;++i) {
+        vb_vip_tick(4480);vb_vip_draw_costs(&costs);
+        if((costs.pending[0]&3)==3){slot=0;break;}
+        if((costs.pending[1]&3)==3){slot=1;break;}
+    }
+    assert((costs.pending[slot]&3)==3);
+    cpu.gpr[7]=77;draw_observer_active=true;
+    vb_write32(0x800000u+slot*0x8000u,0x03030303);
+    draw_observer_active=false;assert(draw_observed==1);
+    if(unsigned(vb_vip_display_fb())!=slot)vb_vip_write16(0x5f842,1);
+    const auto* sources=vb_vip_source_buffer(0);
+    assert(sources[0].kind==4 && sources[0].tile_hash==777 && sources[0].raw==3);
+    vb_vip_init();
+    std::puts("PASS: real bus flushes deferred rows before write observer and CPU provenance");
+}
 int validate(const void* data,size_t size,void*) {
     if(size!=sizeof(Session))return 0;
     Session copy;std::memcpy(&copy,data,size);return copy.actors<=4;
@@ -44,6 +75,7 @@ int main(int argc,char** argv) {
     vb_memory_set_cpu(&cpu);uint32_t pc=cpu.pc;uint64_t frame_cycles=0;
     vb_state_bind(&cpu,&pc,&frame_cycles,nullptr,nullptr,nullptr);
     if(wide_history) {
+        deferred_bus_test(cpu);
         const auto wide=capture();
         assert(wide.size()>16u*1024u*1024u);
         assert(vb_rewind_enable(32));

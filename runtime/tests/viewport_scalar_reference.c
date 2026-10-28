@@ -11,5 +11,6 @@
 #define vb_viewport_window ref_viewport_window
 #define vb_viewport_width ref_viewport_width
 #define vb_viewport_capture ref_viewport_capture
+#define vb_viewport_draw_inputs ref_viewport_draw_inputs
 #define vb_viewport_render ref_viewport_render
 #include "../src/viewport.c"
