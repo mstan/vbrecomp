@@ -69,7 +69,8 @@ def main():
             report['census_initial'] = state
             # Existing cross-engine scripts do not all acquire this older lock.
             query = subprocess.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command',
-                "Get-CimInstance Win32_Process | Where-Object { $_.Name -match '^python' -and $_.CommandLine -match 'measure_[\\w-]+[.]py|benchmark[\\w-]*[.]py|profile_native_windows[.]py|run_pair[.]py|run_ab[\\w-]*[.]py|stress[\\w-]*[.]py' } | Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress"],
+                "Get-CimInstance Win32_Process | Where-Object { $_.ProcessId -ne " + str(os.getpid()) +
+                " -and $_.Name -match '^python' -and $_.CommandLine -match 'measure_[\\w-]+[.]py|benchmark[\\w-]*[.]py|profile_native_windows[.]py|run_pair[.]py|run_ab[\\w-]*[.]py|stress[\\w-]*[.]py' } | Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress"],
                 capture_output=True, text=True, check=True, creationflags=subprocess.CREATE_NO_WINDOW)
             report['other_measurement_scripts'] = query.stdout.strip()
             if busy or query.stdout.strip():
