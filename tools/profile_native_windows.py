@@ -67,7 +67,7 @@ def main():
                                 c.POINTER(w.FILETIME), c.POINTER(w.FILETIME)]
     walker = None
     if args.stackwalker:
-        walker = c.CDLL(str(args.stackwalker.resolve()))
+        walker = c.CDLL(str(args.stackwalker.resolve()), use_last_error=True)
         walker.vb_profile_begin.argtypes = [w.HANDLE]
         walker.vb_profile_begin.restype = c.c_int
         walker.vb_profile_refresh.argtypes = [w.HANDLE]
@@ -77,6 +77,7 @@ def main():
     counts = Counter(); executable_addresses = Counter(); external_addresses = Counter(); errors = 0; module_map = []; thread = None
     stacks = Counter(); stack_buffer = (c.c_uint64 * 96)(); walker_ready = False
     suspension_seconds = 0.0; maximum_suspension_seconds = 0.0
+    initialization_errors = []
     with (args.out / 'child.stdout').open('wb') as out, (args.out / 'child.stderr').open('wb') as err:
         process = subprocess.Popen(command, cwd=args.out, stdout=out, stderr=err,
                                    creationflags=subprocess.CREATE_NO_WINDOW)
@@ -110,9 +111,21 @@ def main():
                         module_map.append((info.base, info.base + info.size, Path(name.value).name, name.value))
             refresh_modules()
             if walker:
-                walker_ready = bool(walker.vb_profile_begin(int(process._handle)))
+                # CreateProcess can return before the loader maps the image.
+                # Retry initialization of this same owned child, never rerun
+                # a workload to hide an initialization or game failure.
+                ready_by = time.monotonic() + 2
+                while process.poll() is None:
+                    refresh_modules()
+                    if module_map:
+                        walker_ready = bool(walker.vb_profile_begin(int(process._handle)))
+                        if walker_ready: break
+                        initialization_errors.append(c.get_last_error())
+                        walker.vb_profile_end(int(process._handle))
+                    if time.monotonic() >= ready_by: break
+                    time.sleep(.01)
                 if not walker_ready:
-                    raise RuntimeError('DbgHelp failed to initialize for the owned child')
+                    raise RuntimeError(f'DbgHelp initialization failed; errors={initialization_errors}, child={process.poll()}, mapped_modules={len(module_map)}')
             last_module_refresh = time.monotonic()
             context_storage = c.create_string_buffer(1232 + 16)
             context_address = (c.addressof(context_storage) + 15) & ~15
@@ -171,6 +184,7 @@ def main():
               'main_tid': tid, 'sample_errors': errors,
               'stackwalker_sha256': hashlib.sha256(args.stackwalker.read_bytes()).hexdigest() if walker else None,
               'sample_interval_ms': args.sample_ms,
+              'stackwalker_initialization_errors': initialization_errors,
               'suspension_seconds': suspension_seconds, 'maximum_suspension_seconds': maximum_suspension_seconds,
               'stack_scope': 'main-thread wall-clock caller samples, including waits; truncated/unknown frames retained; not CPU-time percentages' if walker else None,
               'stacks': [{'pcs': [hex(pc) for pc in stack], 'samples': value}
