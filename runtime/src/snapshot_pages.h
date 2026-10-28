@@ -2,7 +2,8 @@
 #define VB_SNAPSHOT_PAGES_H
 /* Private guest-thread-owned immutable history pages. Public state files keep
  * their contiguous checked format. Sample fingerprints only select a bounded
- * candidate set: equality always requires all bytes to compare equal.
+ * candidate set: unqualified equality always compares every byte. Qualified
+ * immutable source identities may reuse a page with the same nonreused token.
  */
 #include <algorithm>
 #include <array>
@@ -19,6 +20,7 @@ using std::size_t;
 constexpr size_t page_size=4096;
 struct PageCosts {
     uint64_t live_pages=0,peak_pages=0,allocated_pages=0,copied_bytes=0,hits=0,comparison_span_bytes=0;
+    uint64_t version_hits=0;
 };
 struct Page {
     std::shared_ptr<PageCosts> costs;
@@ -38,11 +40,21 @@ class PagePool {
     std::unordered_map<uint64_t,Bucket> index;
     std::shared_ptr<PageCosts> counters=std::make_shared<PageCosts>();
     size_t bucket_limit;
+    struct Version {uint64_t token;std::weak_ptr<const Page> page;};
+    struct AddressHash {
+        size_t operator()(const void* p) const {
+            uint64_t x=static_cast<uint64_t>(reinterpret_cast<std::uintptr_t>(p));
+            x^=x>>33;x*=0xff51afd7ed558ccdull;x^=x>>33;
+            return static_cast<size_t>(x);
+        }
+    };
+    std::unordered_map<const void*,Version,AddressHash> versions;
     static uint64_t word(const uint8_t* p){uint64_t v;std::memcpy(&v,p,8);return v;}
 public:
     explicit PagePool(size_t limit=65536):bucket_limit(std::max(size_t(1),limit)){}
     std::shared_ptr<const PageCosts> costs() const{return counters;}
     size_t indexed_buckets() const{return index.size();}
+    size_t indexed_versions() const{return versions.size();}
     static uint64_t fingerprint(const uint8_t* p,size_t n) {
         uint64_t h=uint64_t(n)*0x9e3779b97f4a7c15ull;
         if(n>=8) {
@@ -84,6 +96,19 @@ public:
         } else bucket.push_back({page,0});
         return page;
     }
+    // The caller owns this stable address and guarantees that a nonzero token
+    // is never reused for changed bytes. Unknown/mutable sources use intern().
+    PageRef intern_versioned(const uint8_t* data,size_t n,uint64_t token) {
+        if(!token || n!=page_size)return intern(data,n);
+        auto found=versions.find(data);
+        if(found!=versions.end() && found->second.token==token) {
+            auto page=found->second.page.lock();
+            if(page && page->size==n){++counters->hits;++counters->version_hits;return page;}
+        }
+        auto page=intern(data,n);
+        if(found==versions.end() && versions.size()>=bucket_limit)versions.erase(versions.begin());
+        versions[data]={token,page};return page;
+    }
 };
 struct Snapshot {
     struct Part {size_t offset;PageRef page;};
@@ -118,6 +143,12 @@ class Builder {
     }
 public:
     explicit Builder(PagePool& p):pool(p){}
+    void append_versioned(const void* bytes,size_t n,uint64_t token) {
+        if(n!=page_size || !token){append(bytes,n);return;}
+        if(!bytes)throw std::invalid_argument("Null versioned history input");
+        flush();snapshot.parts.push_back({snapshot.size,pool.intern_versioned(static_cast<const uint8_t*>(bytes),n,token)});
+        snapshot.size+=n;
+    }
     void append(const void* bytes,size_t n) {
         if(n && !bytes)throw std::invalid_argument("Null history input");
         const auto* in=static_cast<const uint8_t*>(bytes);

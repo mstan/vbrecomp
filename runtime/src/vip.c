@@ -67,22 +67,28 @@ static uint8_t s_vip_mem[VIP_WINDOW_SIZE];
 #endif
 #if VB_VERSIONED_CAPTURE
 static int capture_revision_tracking;
-static uint64_t capture_revision_clock=1;
+static uint64_t capture_revision_clock;
+static int capture_revision_exhausted;
 static uint64_t capture_revisions[VB_CAPTURE_REVISION_PAGES];
+static uint64_t next_capture_revision(void) {
+    if(capture_revision_clock==UINT64_MAX) {
+        capture_revision_exhausted=1;vb_viewport_invalidate_capture_revisions();return 0;
+    }
+    return ++capture_revision_clock;
+}
 static void capture_versions_reset(void) {
     vb_viewport_invalidate_capture_revisions();
-    for(unsigned i=0;i<VB_CAPTURE_REVISION_PAGES;++i)capture_revisions[i]=1;
-    capture_revision_clock=1;
+    const uint64_t token=next_capture_revision();
+    for(unsigned i=0;i<VB_CAPTURE_REVISION_PAGES;++i)capture_revisions[i]=token;
 }
 static void capture_version_write(unsigned offset) {
-    if(!capture_revision_tracking)return;
+    if(!capture_revision_tracking || capture_revision_exhausted)return;
     unsigned page;
     if(offset>=0x20000u && offset<0x40000u)page=(offset-0x20000u)>>12;
     else if(offset>=VIP_CHR_CANONICAL_BASE && offset<VIP_CHR_CANONICAL_BASE+0x8000u)
         page=32+((offset-VIP_CHR_CANONICAL_BASE)>>12);
     else return;
-    if(++capture_revision_clock==0){capture_revision_clock=1;vb_viewport_invalidate_capture_revisions();}
-    capture_revisions[page]=capture_revision_clock;
+    capture_revisions[page]=next_capture_revision();
 }
 #else
 static void capture_versions_reset(void) {}
@@ -95,7 +101,7 @@ void vb_vip_track_capture_revisions(void) {
 }
 const uint64_t* vb_vip_capture_revisions(const uint16_t* dram,const uint16_t* chars) {
 #if VB_VERSIONED_CAPTURE
-    if(capture_revision_tracking && (const void*)dram==(const void*)(s_vip_mem+0x20000u)
+    if(capture_revision_tracking && !capture_revision_exhausted && (const void*)dram==(const void*)(s_vip_mem+0x20000u)
        && (const void*)chars==(const void*)(s_vip_mem+VIP_CHR_CANONICAL_BASE))return capture_revisions;
 #else
     (void)dram;(void)chars;

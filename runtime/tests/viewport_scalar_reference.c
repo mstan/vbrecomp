@@ -1,6 +1,7 @@
 /* Compile the scalar sampling path independently against the same snapshots. */
 #define VB_VIEWPORT_TILE_JOBS 0
 #define vb_viewport_state_visit ref_viewport_state_visit
+#define vb_viewport_state_visit_pages ref_viewport_state_visit_pages
 #define vb_viewport_track ref_viewport_track
 #define vb_viewport_track_extra ref_viewport_track_extra
 #define vb_viewport_clear_frames ref_viewport_clear_frames

@@ -974,6 +974,7 @@ int main(int argc, char** argv) {
     vb_state_ui_preview_costs(&initial_preview_renders,&initial_preview_pixels);
     uint64_t initial_capture_bytes=0,initial_reused_capture_pages=0;
     vb_viewport_capture_costs(&initial_capture_bytes,&initial_reused_capture_pages);
+    const uint64_t initial_history_version_hits=vb_state_history_version_hits();
     const auto benchmark_start = std::chrono::steady_clock::now();
     const double benchmark_cpu_start = process_cpu_seconds();
     double benchmark_seconds=0, benchmark_cpu_seconds=0;
@@ -1360,6 +1361,7 @@ int main(int argc, char** argv) {
             "\"history_preview_renders\":%llu,\"history_preview_pixels\":%llu,"
             "\"snapshot_page_allocations\":%llu,\"snapshot_page_bytes_copied\":%llu,"
             "\"snapshot_page_hits\":%llu,\"rewind_page_storage_bytes\":%llu,"
+            "\"snapshot_version_hits\":%llu,"
             "\"native_draws_scheduled\":%llu,\"native_draws_materialized\":%llu,\"native_draws_overwritten\":%llu,"
             "\"viewport_capture_bytes_copied\":%llu,\"viewport_capture_pages_reused\":%llu,"
             "\"sdl_video_active\":%u,\"sdl_video_dummy\":%u,\"sdl_renderer_flags\":%u,\"sdl_renderer_opengl\":%u,"
@@ -1377,6 +1379,7 @@ int main(int argc, char** argv) {
             (unsigned long long)(capture_costs.page_copied_bytes-initial_capture_costs.page_copied_bytes),
             (unsigned long long)(capture_costs.page_hits-initial_capture_costs.page_hits),
             (unsigned long long)capture_costs.rewind_page_bytes,
+            (unsigned long long)(vb_state_history_version_hits()-initial_history_version_hits),
             (unsigned long long)(draw_costs.scheduled-initial_draw_costs.scheduled),
             (unsigned long long)(draw_costs.materialized-initial_draw_costs.materialized),
             (unsigned long long)(draw_costs.overwritten-initial_draw_costs.overwritten),

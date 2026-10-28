@@ -96,6 +96,28 @@ void vb_viewport_state_visit(VbStateVisit visit, void* context) {
     if (tracking) for(unsigned slot=0;slot<2;++slot)
         for(unsigned row=0;row<28;++row)visit(context,blocks[slot][row],sizeof(*blocks[slot][row]));
 }
+void vb_viewport_state_visit_pages(VbStateVisit visit,VbVersionedStateVisit frozen,void* context) {
+    if(!tracking)return;
+    for(unsigned slot=0;slot<2;++slot)for(unsigned row=0;row<28;++row) {
+        ViewBlock* b=blocks[slot][row];
+#if VB_VERSIONED_CAPTURE
+        const unsigned bank=(unsigned)(b-storage);
+        if(frozen && captured_revisions_valid[bank]) {
+            _Static_assert(offsetof(ViewBlock,spt)==VB_CAPTURE_REVISION_PAGES*4096,"Capture page layout changed");
+            for(unsigned page=0;page<VB_CAPTURE_REVISION_PAGES;++page) {
+                uint8_t* data=(uint8_t*)b+page*4096;
+                const uint64_t token=captured_revisions[bank][page];
+                if(token)frozen(context,data,4096,token);else visit(context,data,4096);
+            }
+            const size_t metadata=offsetof(ViewBlock,spt);
+            visit(context,(uint8_t*)b+metadata,sizeof(*b)-metadata);continue;
+        }
+#else
+        (void)frozen;
+#endif
+        visit(context,b,sizeof(*b));
+    }
+}
 
 static int sx(unsigned v, unsigned bits) {
     unsigned mask = (1u << bits) - 1, sign = 1u << (bits - 1);

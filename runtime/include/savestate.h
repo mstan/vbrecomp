@@ -76,6 +76,7 @@ typedef struct VbStateCaptureCosts {
     uint64_t paged_captures, page_allocations, page_copied_bytes, page_hits, rewind_page_bytes;
 } VbStateCaptureCosts;
 void vb_state_capture_costs(VbStateCaptureCosts* out);
+uint64_t vb_state_history_version_hits(void);
 /* Local history owns immutable pages indexed by tick. */
 int vb_rewind_enable(unsigned depth);
 void vb_rewind_shutdown(void);

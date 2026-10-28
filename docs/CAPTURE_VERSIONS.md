@@ -8,7 +8,8 @@ cover 4 KiB pages of the 128 KiB DRAM and 32 KiB CHR inputs. Every aligned bus
 write to either range, including CHR aliases and byte/halfword/word accesses,
 changes the affected page revision. Device rendering writes framebuffer ranges,
 which are separate from these inputs. State loading and VIP reset invalidate all
-bank keys. Revision wrap also invalidates keys before reusing a clock value.
+bank keys and advance the clock. Tokens are never reused; counter exhaustion
+selects complete-copy fallback for the remainder of the process.
 
 Each physical frozen bank retains its own revision keys, including the spare
 bank used to preserve borrowed rows. A capture copies changed pages and keeps

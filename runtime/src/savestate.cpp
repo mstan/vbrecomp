@@ -4,6 +4,7 @@
 #include "ring_frame.h"
 #include "renderer.h"
 #include "viewport.h"
+#include "draw_inputs.h"
 #include "vb_crc32.h"
 #include "vb_sha256.h"
 #include "mod_runtime.h"
@@ -58,6 +59,9 @@ uint8_t* reset_blob;
 size_t reset_size;
 const char* error = "";
 constexpr size_t header_size = 112, max_size = 64u * 1024u * 1024u;
+#ifndef VB_VERSIONED_HISTORY
+#define VB_VERSIONED_HISTORY 1
+#endif
 struct Stream {
     uint8_t* out;
     const uint8_t* in;
@@ -76,6 +80,10 @@ void field(void* ctx, void* bytes, size_t size) {
     else if(s.page_output)s.page_output->append(bytes,size);
     else if(s.page_input && !s.page_input->read(s.offset,bytes,size))s.valid=false;
     s.offset += size;
+}
+void versioned_field(void* ctx,const void* bytes,size_t size,uint64_t token) {
+    auto& s=*static_cast<Stream*>(ctx);
+    s.page_output->append_versioned(bytes,size,token);s.offset+=size;
 }
 void visit(Stream& s, bool presentation) {
     field(&s, cpu, offsetof(CPUState, read8)); // exclude all host bus pointers
@@ -96,7 +104,12 @@ void visit(Stream& s, bool presentation) {
         field(&s,e.span.bytes,e.span.size);
     }
     if (presentation) {
-        vb_vip_presentation_visit(field, &s); vb_viewport_state_visit(field, &s);
+        vb_vip_presentation_visit(field, &s);
+#if VB_VERSIONED_HISTORY
+        if(s.page_output)vb_viewport_state_visit_pages(field,versioned_field,&s);
+        else
+#endif
+        vb_viewport_state_visit(field, &s);
         for(unsigned i=0;i<extension_count;++i)field(&s,extensions[i].bytes,extensions[i].size);
     }
 }
@@ -197,6 +210,9 @@ void vb_state_capture_costs(VbStateCaptureCosts* out) {
         out->page_allocations=c->allocated_pages;out->page_copied_bytes=c->copied_bytes;
         out->page_hits=c->hits;out->rewind_page_bytes=c->live_pages*sizeof(vb_history::Page);
     }
+}
+uint64_t vb_state_history_version_hits(void) {
+    return rewind_ring ? rewind_ring->pool.costs()->version_hits : 0;
 }
 /* Private memory snapshots are owned immutable blobs, never file input. Their
  * integrity comes from ownership; only the strict public file/blob interface

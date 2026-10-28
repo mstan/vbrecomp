@@ -85,8 +85,41 @@ static void contracts() {
     }
     rbe_snap_ring_destroy(reference);
 }
+static void versioned_contracts() {
+    PagePool pool(8);std::array<uint8_t,page_size> bytes{};
+    auto a=pool.intern_versioned(bytes.data(),bytes.size(),1);
+    auto b=pool.intern_versioned(bytes.data(),bytes.size(),1);assert(a==b);
+    assert(pool.costs()->version_hits==1);
+    bytes[111]=7;auto c=pool.intern_versioned(bytes.data(),bytes.size(),2);
+    assert(c!=a && a->bytes[111]==0 && c->bytes[111]==7);
+    bytes[111]=9;auto mutable_page=pool.intern_versioned(bytes.data(),bytes.size(),0);
+    assert(mutable_page->bytes[111]==9 && c->bytes[111]==7);
+    std::array<std::array<uint8_t,page_size>,16> sources{};
+    std::vector<PageRef> held;
+    for(unsigned i=0;i<sources.size();++i){sources[i].fill(uint8_t(i));held.push_back(pool.intern_versioned(sources[i].data(),page_size,3));}
+    assert(pool.indexed_versions()<=8);
+    for(unsigned i=0;i<sources.size();++i)assert(held[i]->bytes[0]==i);
+    auto cost=pool.costs();a={};b={};c={};mutable_page={};held.clear();assert(cost->live_pages==0);
+    // An expired weak cache entry cannot retain data or defeat fresh ownership.
+    bytes[111]=11;auto fresh=pool.intern_versioned(bytes.data(),page_size,2);assert(fresh->bytes[111]==11);fresh={};
+    bytes[111]=13;fresh=pool.intern_versioned(bytes.data(),page_size,2);assert(fresh->bytes[111]==13);fresh={};
+    uint64_t token=10;uint32_t random=0x810;
+    std::vector<uint8_t> prefix(19,0x5a),suffix(31,0xa5),expected;
+    std::vector<Snapshot> history;std::vector<std::vector<uint8_t>> copies;
+    for(unsigned sample=0;sample<1000;++sample){
+        random=random*1664525u+1013904223u;
+        if(sample%3==0){bytes[random%page_size]^=uint8_t(random>>24);++token;}
+        Builder builder(pool);builder.append(prefix.data(),prefix.size());
+        builder.append_versioned(bytes.data(),bytes.size(),token);builder.append(suffix.data(),suffix.size());
+        expected=prefix;expected.insert(expected.end(),bytes.begin(),bytes.end());expected.insert(expected.end(),suffix.begin(),suffix.end());
+        history.push_back(builder.finish());copies.push_back(expected);verify(history.back(),expected);
+        if(history.size()>17){history.erase(history.begin());copies.erase(copies.begin());}
+        for(unsigned i=0;i<history.size();++i)verify(history[i],copies[i]);
+    }
+    history.clear();assert(cost->live_pages==0);
+}
 int main(int argc,char** argv) {
-    contracts();PagePool pool;std::vector<Snapshot> snapshots;uint64_t logical=0;
+    contracts();versioned_contracts();PagePool pool;std::vector<Snapshot> snapshots;uint64_t logical=0;
     for(int i=1;i<argc;++i) {
         std::ifstream f(std::filesystem::u8path(argv[i]),std::ios::binary);assert(f);
         std::vector<uint8_t> data((std::istreambuf_iterator<char>(f)),{});assert(!data.empty());

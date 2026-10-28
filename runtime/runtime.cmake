@@ -192,6 +192,8 @@ function(vb_add_runtime_target TARGET)
     # identical when comparing host-service policies in one build tree.
     set_property(SOURCE "${VB_RUNTIME_DIR}/src/main.cpp" APPEND PROPERTY
         COMPILE_DEFINITIONS VBRECOMP_HOST_SERVICE_CYCLES=${VBRECOMP_HOST_SERVICE_CYCLES})
+    set_property(SOURCE "${VB_RUNTIME_DIR}/src/savestate.cpp" APPEND PROPERTY
+        COMPILE_DEFINITIONS VB_VERSIONED_HISTORY=$<BOOL:${VBRECOMP_VERSIONED_HISTORY}>)
     # Drawing policy does not affect generated CPU objects or their headers.
     set_property(SOURCE "${VB_RUNTIME_DIR}/src/vip.c" "${VB_RUNTIME_DIR}/src/viewport.c" APPEND PROPERTY
         COMPILE_DEFINITIONS VB_DEFER_NATIVE_DRAW=$<BOOL:${VBRECOMP_DEFER_NATIVE_DRAW}>

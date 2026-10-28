@@ -21,6 +21,7 @@ option(VBRECOMP_NATIVE_DISPATCH "Index exact native PCs and directly enter known
 option(VBRECOMP_DEFER_NATIVE_DRAW "Materialize completed native rows when observed; reuse frozen viewport inputs" ON)
 option(VBRECOMP_VERSIONED_CAPTURE "Copy only changed canonical VIP capture pages" ON)
 option(VBRECOMP_FRAMEBUFFER_BLOCKS "Decode four framebuffer rows per packed-byte read" ON)
+option(VBRECOMP_VERSIONED_HISTORY "Share qualified frozen pages without re-comparing their bytes" ON)
 set(VBRECOMP_HOST_SERVICE_CYCLES 20000 CACHE STRING "Guest cycles between host services; 0 retains one-device-step service")
 if(NOT VBRECOMP_HOST_SERVICE_CYCLES MATCHES "^(0|[1-9][0-9]*)$" OR VBRECOMP_HOST_SERVICE_CYCLES GREATER 20000)
     message(FATAL_ERROR "VBRECOMP_HOST_SERVICE_CYCLES must be between 0 and 20000 (one virtual millisecond)")
