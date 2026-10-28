@@ -47,6 +47,18 @@ void vb_fntrace_set_active_cpu(struct CPUState* cpu);
 
 /* Recorder. Called from the head of each emitted function body. */
 void vb_fntrace_record(uint32_t pc, uint32_t lp);
+/* The release configuration already has no ring. Remove its empty recorder
+ * call at the generated caller, while preserving the public tooling ABI. */
+#ifndef VB_TRACE_RECORDING
+#define VB_TRACE_RECORDING 1
+#endif
+static inline void vb_fntrace_event(uint32_t pc, uint32_t lp) {
+#if VB_TRACE_RECORDING
+    vb_fntrace_record(pc, lp);
+#else
+    (void)pc; (void)lp;
+#endif
+}
 
 void vb_fntrace_reset(void);
 

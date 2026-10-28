@@ -126,6 +126,12 @@ typedef struct CPUState {
  * that aborts loudly via vb_stub_abort(). */
 void vb_dispatch(CPUState* cpu, uint32_t target_pc);
 void vb_dispatch_call(CPUState* cpu, uint32_t target_pc, uint32_t lp);
+/* Generated callers only: native is the exact compiled target_pc entry. */
+void vb_dispatch_call_native(CPUState* cpu, uint32_t target_pc, uint32_t lp,
+                             void (*native)(CPUState*));
+#ifndef VB_NATIVE_DISPATCH
+#define VB_NATIVE_DISPATCH 1
+#endif
 
 /* CRC32 of the cart this recompiler run was generated against.
  * Returned by the generated `<module>_dispatch.c` so main() can refuse

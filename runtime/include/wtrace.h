@@ -59,6 +59,16 @@ void vb_wtrace_set_active_cpu(struct CPUState* cpu);
  * is unconditional — there is no "armed" state, no filter, nothing to
  * configure at probe time. Filtering happens in vb_wtrace_query(). */
 void vb_wtrace_record(uint32_t addr, uint32_t value, uint8_t width);
+#ifndef VB_TRACE_RECORDING
+#define VB_TRACE_RECORDING 1
+#endif
+static inline void vb_wtrace_event(uint32_t addr, uint32_t value, uint8_t width) {
+#if VB_TRACE_RECORDING
+    vb_wtrace_record(addr, value, width);
+#else
+    (void)addr; (void)value; (void)width;
+#endif
+}
 
 /* Manual seq reset. NOT needed for normal operation — the ring is
  * always on. Provided so a long-running session can establish a fresh

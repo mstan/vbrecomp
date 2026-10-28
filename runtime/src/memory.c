@@ -318,7 +318,7 @@ uint32_t raw_read32(uint32_t addr) {
  * is sampled by wtrace from the active CPU pointer.
  */
 void raw_write8(uint32_t addr, uint8_t v) {
-    vb_wtrace_record(addr, (uint32_t)v, 1u);
+    vb_wtrace_event(addr, (uint32_t)v, 1u);
     observe_write(addr, v, 1);
     uint32_t p = fold(addr);
     switch (region_of(p)) {
@@ -343,7 +343,7 @@ void raw_write8(uint32_t addr, uint8_t v) {
 
 void raw_write16(uint32_t addr, uint16_t v) {
     addr &= ~1u;
-    vb_wtrace_record(addr, (uint32_t)v, 2u);
+    vb_wtrace_event(addr, (uint32_t)v, 2u);
     observe_write(addr, v, 2);
     uint32_t p = fold(addr);
     switch (region_of(p)) {
@@ -373,7 +373,7 @@ void raw_write16(uint32_t addr, uint16_t v) {
 
 void raw_write32(uint32_t addr, uint32_t v) {
     addr &= ~3u;
-    vb_wtrace_record(addr, v, 4u);
+    vb_wtrace_event(addr, v, 4u);
     observe_write(addr, v, 4);
     uint32_t p = fold(addr);
     switch (region_of(p)) {

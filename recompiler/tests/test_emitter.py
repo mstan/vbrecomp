@@ -101,7 +101,7 @@ class TestEmitFunctionShape(unittest.TestCase):
         # JMP r31 compiles to `cpu->pc = cpu->gpr[31]; return;` so the
         # outer dispatch_call loop's `cpu->pc == saved_lp` check can
         # detect a clean return.
-        callee_body_start = full.index(_fn_symbol(0x07000060))
+        callee_body_start = full.index("void " + _fn_symbol(0x07000060) + "(CPUState*")
         callee_chunk = full[callee_body_start:full.index("\n}\n", callee_body_start)]
         self.assertIn("cpu->pc = cpu->gpr[31] & 0xFFFFFFFEu;", callee_chunk)
         self.assertIn("return;", callee_chunk)
