@@ -44,6 +44,7 @@ std::string status;
 bool network_pending,network_saving;
 Thumb network_preview;
 uint64_t preview_renders,preview_pixels;
+std::vector<uint32_t> capture_pixels;
 void record_preview_cost(size_t pixels) {++preview_renders;preview_pixels+=pixels;}
 
 FILE* open_file(const fs::path& path,const char* access) {
@@ -87,7 +88,7 @@ void refresh_slots() {
 Thumb capture() {
     int game_width=0,game_height=0;
     if(vb_game_host_video_size(-1,&game_width,&game_height)) {
-        std::vector<uint32_t> pixels(size_t(game_width)*game_height);
+        capture_pixels.assign(size_t(game_width)*game_height,0);auto& pixels=capture_pixels;
         record_preview_cost(pixels.size());
         if(!vb_game_host_video_render(-1,0,pixels.data(),game_width,game_height))
             throw std::runtime_error("Game preview unavailable");
@@ -98,7 +99,7 @@ Thumb capture() {
             image[(y+(TH-h)/2)*TW+x+(TW-w)/2]=pixels[(y*game_height/h)*game_width+x*game_width/w]|0xff000000u;
         return image;
     }
-    const int width=vb_renderer_present_width();std::vector<uint32_t> pixels((size_t)width*224);
+    const int width=vb_renderer_present_width();capture_pixels.assign((size_t)width*224,0);auto& pixels=capture_pixels;
     record_preview_cost(pixels.size());
     if(vb_renderer_active())vb_renderer_present_viewport(0,width,pixels.data());
     else if(vb_recolor_active())vb_vip_render_framebuffer_recolored(0,pixels.data());
@@ -181,7 +182,7 @@ void vb_state_ui_init(const char* path) {
     directory=base/"states"/content;
     if(vb_netplay_enabled())directory/="online";
 }
-void vb_state_ui_shutdown(void){history.clear();history_revision=UINT64_MAX;slots={};mode=slot=selected=result=0;status.clear();network_pending=false;}
+void vb_state_ui_shutdown(void){history.clear();history_revision=UINT64_MAX;slots={};mode=slot=selected=result=0;status.clear();network_pending=false;std::vector<uint32_t>().swap(capture_pixels);}
 int vb_state_ui_mode(void){return mode;}
 int vb_state_ui_slot(void){return slot;}
 int vb_state_ui_result(void){return result;}

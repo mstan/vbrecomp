@@ -22,6 +22,7 @@ int vb_viewport_draw_inputs(int slot,int block,VbVipDrawInputs* out);
 void vb_vip_track_capture_revisions(void);
 const uint64_t* vb_vip_capture_revisions(const uint16_t* dram,const uint16_t* chars);
 void vb_viewport_invalidate_capture_revisions(void);
+int vb_viewport_tile_hash(const uint16_t* chars,unsigned tile,uint32_t* hash);
 #ifdef __cplusplus
 }
 #endif

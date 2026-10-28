@@ -26,6 +26,8 @@ static ViewBlock storage[56+VB_DEFER_NATIVE_DRAW];
 #if VB_VERSIONED_CAPTURE
 static uint64_t captured_revisions[56+VB_DEFER_NATIVE_DRAW][VB_CAPTURE_REVISION_PAGES];
 static uint8_t captured_revisions_valid[56+VB_DEFER_NATIVE_DRAW];
+static uint32_t captured_hashes[56+VB_DEFER_NATIVE_DRAW][2048];
+static uint8_t captured_hash_valid[56+VB_DEFER_NATIVE_DRAW][2048];
 #endif
 static uint64_t capture_bytes_copied,capture_pages_reused;
 void vb_viewport_capture_costs(uint64_t* copied,uint64_t* reused) {
@@ -35,6 +37,31 @@ void vb_viewport_capture_costs(uint64_t* copied,uint64_t* reused) {
 void vb_viewport_invalidate_capture_revisions(void) {
 #if VB_VERSIONED_CAPTURE
     memset(captured_revisions_valid,0,sizeof(captured_revisions_valid));
+    memset(captured_hash_valid,0,sizeof(captured_hash_valid));
+#endif
+}
+static uint32_t captured_tile_hash(const ViewBlock* block,unsigned tile) {
+#if VB_VERSIONED_CAPTURE
+    const unsigned bank=(unsigned)(block-storage);
+    if(captured_hash_valid[bank][tile])return captured_hashes[bank][tile];
+#endif
+    uint32_t hash=2166136261u;
+    const uint8_t* bytes=(const uint8_t*)&block->chars[tile*8];
+    for(unsigned i=0;i<16;++i)hash=(hash^bytes[i])*16777619u;
+#if VB_VERSIONED_CAPTURE
+    captured_hashes[bank][tile]=hash;captured_hash_valid[bank][tile]=1;
+#endif
+    return hash;
+}
+int vb_viewport_tile_hash(const uint16_t* chars,unsigned tile,uint32_t* hash) {
+#if VB_VERSIONED_CAPTURE
+    const uintptr_t address=(uintptr_t)chars,base=(uintptr_t)storage[0].chars;
+    if(tile>=2048 || !hash || address<base)return 0;
+    const uintptr_t bank=(address-base)/sizeof(ViewBlock);
+    if(bank>=sizeof(storage)/sizeof(storage[0]) || chars!=storage[bank].chars)return 0;
+    *hash=captured_tile_hash(&storage[bank],tile);return 1;
+#else
+    (void)chars;(void)tile;(void)hash;return 0;
 #endif
 }
 static ViewBlock* blocks[2][28];
@@ -157,12 +184,14 @@ void vb_viewport_capture(int slot, int row, const uint16_t* dram,
             uint8_t* destination=(uint8_t*)(page<32 ? b->dram:b->chars)+offset;
             const uint8_t* source=(const uint8_t*)(page<32 ? dram:chars)+offset;
             memcpy(destination,source,4096);++copied;
+            if(page>=32)memset(captured_hash_valid[bank]+(page-32)*256,0,256);
             captured_revisions[bank][page]=revisions[page];
         }
         captured_revisions_valid[bank]=1;
         capture_bytes_copied+=(uint64_t)copied*4096;capture_pages_reused+=reused;
     } else {
         captured_revisions_valid[bank]=0;
+        memset(captured_hash_valid[bank],0,sizeof(captured_hash_valid[bank]));
 #else
     {
 #endif
@@ -202,10 +231,7 @@ static void pixel(ViewTarget* target, int x, unsigned tile, unsigned u, unsigned
     target->levels[index] = object ? b->jplt[palette][raw] : b->gplt[palette][raw];
     target->worlds[index] = (uint16_t)(target->world + 1);
     if (!target->hashed[tile]) {
-        const uint8_t* bytes = (const uint8_t*)&b->chars[tile * 8];
-        uint32_t hash = 2166136261u;
-        for (int i = 0; i < 16; ++i) hash = (hash ^ bytes[i]) * 16777619u;
-        target->hashes[tile] = hash; target->hashed[tile] = 1;
+        target->hashes[tile] = captured_tile_hash(b,tile); target->hashed[tile] = 1;
     }
     target->sources[index] = (VbSourceTexel){target->hashes[tile], (uint16_t)source_x,
         (uint16_t)source_y, (uint16_t)tile, (uint8_t)u, (uint8_t)v,
@@ -224,10 +250,7 @@ static void tile_row(ViewTarget* t, int x, unsigned cell, unsigned xx,
     uint16_t bits = t->block->chars[tile * 8 + v];
     if (!bits) return;
     if (!t->hashed[tile]) {
-        const uint8_t* bytes = (const uint8_t*)&t->block->chars[tile * 8];
-        uint32_t h = 2166136261u;
-        for (int i = 0; i < 16; ++i) h = (h ^ bytes[i]) * 16777619u;
-        t->hashes[tile] = h; t->hashed[tile] = 1;
+        t->hashes[tile] = captured_tile_hash(t->block,tile); t->hashed[tile] = 1;
     }
     const uint8_t* palette = t->block->gplt[cell >> 14];
     const VbViewportWorldLayout* rule = &t->layout->worlds[t->world];

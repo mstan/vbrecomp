@@ -23,8 +23,21 @@ of restored frozen bytes. `VBRECOMP_VERSIONED_CAPTURE=OFF` retains complete
 copies. Games that never request viewport tracking do not maintain revisions.
 Diagnostic totals count actual copied bytes and reused pages.
 
+Frozen banks also retain exact CHR tile hashes across native drawing, both eyes
+and repeated viewport presentations (VB13). Copying a changed CHR page clears
+only its tile-hash validity; reset/load and arbitrary-input captures invalidate
+the corresponding complete keys. Hashes are never guessed from a partial key.
+Unowned artwork retains the original hash path. The borrowed old bank retains
+its hashes through rotation. These caches remain outside serialized content.
+
+Thumbnail capture reuses one working vector (VB21), retaining the original
+zero initialization on every capture. Shutdown frees its capacity. It does not
+reuse rendered images or assume that arbitrary renderer callbacks are pure.
+
 Focused tests compare every frozen byte against live canonical inputs, exercise
 all forty pages and four CHR aliases, bank rotation/retained ownership, external
 input mutation, reset/load invalidation and clock wrap. Existing eager/deferred
+rasterizer checks pass; every tile hash is checked against the original byte
+hash after mutations, across retained banks and repeated reads. Existing
 rasterizer checks also pass. Full built-game qualification and per-game matched
 performance remain pending; copied-byte counts alone are not a runtime win.

@@ -4,7 +4,10 @@
 int vb_renderer_tracks_texels(void){return 0;}
 int vb_renderer_tracks_worlds(void){return 0;}
 int vb_renderer_active(void){return 0;}
-uint32_t vb_capture_hash(const uint16_t data[8]){(void)data;assert(0);return 0;}
+uint32_t vb_capture_hash(const uint16_t data[8]){
+    uint32_t h=2166136261u;const uint8_t* p=(const uint8_t*)data;
+    for(unsigned i=0;i<16;++i)h=(h^p[i])*16777619u;return h;
+}
 static void capture(void) {
     vb_viewport_capture(0,0,dram_u16(),chr_u16(),s_spt,s_gplt_cache,s_jplt_cache,s_bkcol,s_obj_suppress);
 }
@@ -12,6 +15,10 @@ static void check_capture(void) {
     VbVipDrawInputs b;assert(vb_viewport_draw_inputs(0,0,&b));
     assert(!memcmp(b.dram,dram_u16(),0x20000));assert(!memcmp(b.chars,chr_u16(),0x8000));
     assert(!memcmp(b.spt,s_spt,sizeof(s_spt)));assert(!memcmp(b.gplt,s_gplt_cache,sizeof(s_gplt_cache)));
+    for(unsigned tile=0;tile<2048;++tile){
+        uint32_t h;assert(vb_viewport_tile_hash(b.chars,tile,&h));assert(h==vb_capture_hash(b.chars+tile*8));
+        assert(vb_viewport_tile_hash(b.chars,tile,&h));assert(h==vb_capture_hash(b.chars+tile*8));
+    }
 }
 int main(void) {
     static uint8_t saved_memory[sizeof(s_vip_mem)],old_dram[0x20000],old_chars[0x8000];
@@ -38,6 +45,7 @@ int main(void) {
     vb_vip_native_rows[0]=1;vb_vip_native_pending=1;
     vb_vip_write16(0x20024,0xBEEF);vb_vip_write16(0x7800A,0x1234);capture();check_capture();
     assert(!memcmp(old.dram,old_dram,sizeof(old_dram)));assert(!memcmp(old.chars,old_chars,sizeof(old_chars)));
+    for(unsigned tile=0;tile<2048;++tile){uint32_t h;assert(vb_viewport_tile_hash(old.chars,tile,&h));assert(h==vb_capture_hash(old.chars+tile*8));}
     vb_vip_native_rows[0]=vb_vip_native_pending=0;
     /* Unsupported/external pointers always copy, and invalidate that bank's key. */
     for(unsigned i=0;i<2;++i){
@@ -51,5 +59,7 @@ int main(void) {
     memcpy(s_vip_mem,saved_memory,sizeof(saved_memory));vb_vip_state_loaded();capture();check_capture();
     capture_revision_clock=UINT64_MAX;vb_vip_write16(0x78000,0x9876);capture();check_capture();
     assert(capture_revision_clock==1);
+    uint32_t h;assert(!vb_viewport_tile_hash(chr_u16(),0,&h));
+    assert(!vb_viewport_tile_hash(old.chars,2048,&h));assert(!vb_viewport_tile_hash(old.chars,0,NULL));
     return 0;
 }

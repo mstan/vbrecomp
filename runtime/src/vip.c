@@ -950,6 +950,9 @@ static void source_texel(uint16_t* attribution, int eye, unsigned tile,
     if (!attribution || !s_draw_texels) return;
     tile &= 2047;
     if (!s_source_hashed[tile]) {
+#if VB_VERSIONED_CAPTURE
+        if(!vb_viewport_tile_hash(s_draw_inputs.chars,tile,&s_source_hash[tile]))
+#endif
         s_source_hash[tile] = vb_capture_hash(&s_draw_inputs.chars[tile * 8]);
         s_source_hashed[tile] = 1;
     }
