@@ -179,6 +179,14 @@ function(vb_add_runtime_target TARGET)
     target_include_directories(${TARGET} PRIVATE
         ${VB_RUNTIME_DIR}/include
     )
+    if(VBRECOMP_LTO_ACTIVE)
+        set_property(TARGET ${TARGET} PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
+        if(CMAKE_C_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+            # Keep a shared stress host usable; GCC's default auto link can
+            # otherwise spawn a worker on every logical processor.
+            target_link_options(${TARGET} PRIVATE -flto=1)
+        endif()
+    endif()
     if(_generated_include)
         target_include_directories(${TARGET} PRIVATE ${_generated_include})
     endif()

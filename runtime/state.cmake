@@ -26,6 +26,7 @@ string(APPEND _vb_identity ";versioned_capture=${VBRECOMP_VERSIONED_CAPTURE}")
 string(APPEND _vb_identity ";framebuffer_blocks=${VBRECOMP_FRAMEBUFFER_BLOCKS}")
 string(APPEND _vb_identity ";versioned_history=${VBRECOMP_VERSIONED_HISTORY}")
 string(APPEND _vb_identity ";stream_shading=${VBRECOMP_STREAM_SHADING}")
+string(APPEND _vb_identity ";lto=${VBRECOMP_LTO_ACTIVE}")
 string(APPEND _vb_identity ";host_service_cycles=${VBRECOMP_HOST_SERVICE_CYCLES}")
 if(VBRECOMP_NETPLAY)
     file(GLOB_RECURSE _vb_net_identity_files CONFIGURE_DEPENDS
