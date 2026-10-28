@@ -114,6 +114,7 @@ uint32_t vb_vip_level_argb(unsigned level);
 void vb_vip_column_argb(int eye, uint32_t colors[96][4]);
 
 /* Debug introspection (TCP vip_state command). */
+/* Observes all logically completed drawing before exposing the full view. */
 const uint8_t* vb_vip_shadow(void);
 size_t         vb_vip_shadow_size(void);
 uint16_t vb_vip_intpnd(void);

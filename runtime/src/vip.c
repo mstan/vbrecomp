@@ -1771,7 +1771,7 @@ int32_t vb_vip_brightness(int v) {
 
 /* ----------------- Introspection ----------------- */
 
-const uint8_t* vb_vip_shadow(void)      { return s_vip_mem; }
+const uint8_t* vb_vip_shadow(void)      { vip_materialize_all();return s_vip_mem; }
 size_t         vb_vip_shadow_size(void) { return sizeof(s_vip_mem); }
 
 uint16_t vb_vip_intpnd(void) { return s_intpnd; }

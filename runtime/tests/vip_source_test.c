@@ -109,6 +109,27 @@ static void deferred_draw_tests(void) {
     assert(vb_test_phase_resets==phase+1 && vb_test_hash_resets==hash+1);
     puts("PASS: deferred native rows match eager frozen inputs, eyes/slots/modes/flips, aliases, partial reads/stores, provenance and overwrite order");
 }
+static int shadow_observation_test(void) {
+    static uint8_t expected[2][0x6000];
+    setup(0,0,0);memset(expected,0,sizeof(expected));
+    vip_draw_block_into(0,expected[0],expected[1]);
+    vip_draw_block_into(1,expected[0],expected[1]);
+    for(unsigned slot=0;slot<2;++slot) {
+        s_drawing_fb=slot;vip_draw_block_now(0);vip_draw_block_now(1);
+        assert(vb_vip_native_rows[slot]==3);
+    }
+    assert(s_vip_mem[64*3]!=expected[0][64*3]);
+    const uint8_t* shadow=vb_vip_shadow();
+    if(vb_vip_native_pending || vb_vip_native_rows[0] || vb_vip_native_rows[1]) {
+        fputs("FAIL: public VIP shadow exposed unmaterialized completed rows\n",stderr);
+        return 0;
+    }
+    assert(shadow==s_vip_mem && vb_vip_shadow_size()==sizeof(s_vip_mem));
+    for(unsigned slot=0;slot<2;++slot)for(unsigned eye=0;eye<2;++eye)
+        assert(!memcmp(shadow+slot*0x8000+eye*0x10000,expected[eye],sizeof(expected[eye])));
+    puts("PASS: public VIP shadow observes all completed rows across both slots and eyes");
+    return 1;
+}
 static void brightness_tests(void) {
     static uint32_t pixels[384 * 224];
     static uint32_t fused[384 * 224];
@@ -413,6 +434,7 @@ int main(void) {
     brightness_tests();
 #if VB_DEFER_NATIVE_DRAW
     deferred_draw_tests();
+    if(!shadow_observation_test())return 1;
 #else
     setup(0,0,0);s_display_fb=s_drawing_fb=0;
     uint64_t materialized=s_native_materialized;
