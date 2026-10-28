@@ -182,6 +182,7 @@ function(vb_add_runtime_target TARGET)
     endif()
 
     target_compile_definitions(${TARGET} PRIVATE
+        VB_NATIVE_REGIONS=$<BOOL:${VBRECOMP_NATIVE_REGIONS}>
         VB_DEFAULT_DEBUG_PORT=${VB_DEBUG_PORT}
         VB_DEFAULT_WINDOW_TITLE="${VB_WINDOW_TITLE}"
     )

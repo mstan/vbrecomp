@@ -77,6 +77,28 @@ int vb_execution_debug_check(CPUState* cpu);
 #ifndef VBRECOMP_INSTRUCTION_DEBUG
 #define VBRECOMP_INSTRUCTION_DEBUG 1
 #endif
+#ifndef VB_NATIVE_REGIONS
+#define VB_NATIVE_REGIONS 1
+#endif
+/* Arithmetic-only generated regions have no guest bus, host callbacks or
+ * exceptions. A whole run is legal only with exact budget/deadline headroom
+ * and no observer inside it. Near a deadline the original instruction path
+ * remains authoritative, including its final-instruction cycle overshoot.
+ */
+static inline int vb_execution_region_ready(const CPUState* cpu,
+        uint32_t first, uint32_t last, unsigned count, unsigned cycles) {
+    if(cpu->step_budget<count || cpu->cycles>cpu->cycle_deadline ||
+       cpu->cycle_deadline-cpu->cycles<cycles)return 0;
+#if VBRECOMP_INSTRUCTION_DEBUG
+    if(vb_execution.stepping || vb_execution.breakpoint_enabled)return 0;
+#endif
+#ifdef VB_SIMULATION_POINTS
+    if(vb_simulation_points_enabled && !vb_simulation_region_clear(first,last))return 0;
+#else
+    (void)first;(void)last;
+#endif
+    return 1;
+}
 static inline int vb_execution_before(CPUState* cpu) {
 #if VBRECOMP_INSTRUCTION_DEBUG
     if((vb_execution.stepping || vb_execution.breakpoint_enabled) && vb_execution_debug_check(cpu))return 1;

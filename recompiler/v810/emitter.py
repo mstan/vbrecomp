@@ -47,6 +47,7 @@ Control flow:
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 from .analysis import (
@@ -655,8 +656,73 @@ def _collect_leaders(rom: RomImage, fn: FunctionRange) -> Set[int]:
     return linear_pcs
 
 
+_REGION_OPS = frozenset((0, 1, 2, 3, 4, 5, 7, 8, 10, 12, 13, 14, 15,
+                        16, 17, 18, 19, 20, 21, 23, 40, 41, 44, 45, 46, 47))
+
+
+def _pure_regions(rom: RomImage, fn: FunctionRange):
+    """Bounded, linear arithmetic runs with no bus, exceptions or callbacks.
+
+    All instruction labels and the original path remain available. A branch or
+    arbitrary resume into the middle uses that path until the next run begins.
+    """
+    regions = {}
+    pending = []
+    def flush():
+        if len(pending) >= 3:
+            regions[pending[0].pc] = tuple(pending)
+        pending.clear()
+    pc = fn.start_pc
+    while pc < fn.end_pc:
+        ins = rom.decode_at_va(pc)
+        if ins is None:
+            break
+        if ins.opcode6 in _REGION_OPS:
+            pending.append(ins)
+            if len(pending) == 12:
+                flush()
+        else:
+            flush()
+        pc += max(ins.size, 2)
+    flush()
+    return regions
+
+
+def _emit_pure_region(instructions):
+    """Materialize architectural fields only after an unobservable pure run."""
+    body = "\n".join(_emit_straight_line(ins) for ins in instructions)
+    registers = sorted(set(re.findall(r"cpu->gpr\[(\d+)\]", body)), key=int)
+    flags = sorted(set(re.findall(r"cpu->(psw_\w+)", body)))
+    for reg in registers:
+        body = body.replace(f"cpu->gpr[{reg}]", f"_vr{reg}")
+    for flag in flags:
+        body = body.replace(f"cpu->{flag}", f"_v{flag}")
+    first, last = instructions[0], instructions[-1]
+    cycles = sum(instr_base_cycles(ins) for ins in instructions)
+    out = ["#if VB_NATIVE_REGIONS && !defined(VB_CPUHOOK_ENABLE)",
+           f"    if (vb_execution_region_ready(cpu, 0x{first.pc:08X}u, "
+           f"0x{last.pc:08X}u, {len(instructions)}, {cycles})) {{"]
+    for reg in registers:
+        out.append(f"        uint32_t _vr{reg}=cpu->gpr[{reg}];")
+    for flag in flags:
+        out.append(f"        uint8_t _v{flag}=cpu->{flag};")
+    out.extend("        " + line for line in body.splitlines())
+    for reg in registers:
+        out.append(f"        cpu->gpr[{reg}]=_vr{reg};")
+    for flag in flags:
+        out.append(f"        cpu->{flag}=_v{flag};")
+    pipeline = -1 if last.opcode6 in (8, 10) else 0
+    out.extend([f"        cpu->cycles += {cycles};",
+                f"        cpu->step_budget -= {len(instructions)};",
+                f"        vb_execution.native_instructions += {len(instructions)};",
+                f"        cpu->pc=0x{last.pc:08X}u;",
+                f"        cpu->pipeline_class={pipeline}; cpu->bus_tail_cycles=0;",
+                f"        goto region_end_{first.pc:08X};", "    }", "#endif"])
+    return out
+
+
 def emit_function(rom: RomImage, fn: FunctionRange,
-                  fn_entries: Set[int]) -> str:
+                  fn_entries: Set[int], *, native_regions: bool = True) -> str:
     """Emit the C source of one recompiled function.
 
     The function body opens with a routing switch over every basic-
@@ -672,6 +738,8 @@ def emit_function(rom: RomImage, fn: FunctionRange,
     leaders = _collect_leaders(rom, fn)
     sorted_leaders = sorted(leaders)
     pc = fn.start_pc
+    regions = _pure_regions(rom, fn) if native_regions else {}
+    region_ends = {run[-1].pc: start for start, run in regions.items()}
 
     lines: List[str] = []
     lines.append(f"/* {_fn_symbol(fn.start_pc)}: "
@@ -702,6 +770,8 @@ def emit_function(rom: RomImage, fn: FunctionRange,
     while pc < fn.end_pc:
         if pc in leaders:
             lines.append(f"{_bb_label(pc)}:;")
+            if pc in regions:
+                lines.extend(_emit_pure_region(regions[pc]))
             # Every instruction PC is a leader so deadlines, debugger stops,
             # and fallback handoffs resume without repeating guest effects.
             lines.append(f"    if (cpu->step_budget == 0 "
@@ -761,6 +831,8 @@ def emit_function(rom: RomImage, fn: FunctionRange,
                 # branch).
                 pass
 
+        if pc in region_ends:
+            lines.append(f"region_end_{region_ends[pc]:08X}:;")
         pc = pc + ins.size
 
     # End of the function's byte range without an explicit terminator —

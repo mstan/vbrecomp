@@ -7,6 +7,12 @@ const VbSimulationPoint* vb_simulation_points[256];
 static VbSimulationPoint points[32];
 static unsigned count;
 static int applying;
+int vb_simulation_region_clear(uint32_t first,uint32_t last) {
+    unsigned i;
+    if(last<first)return 0;
+    for(i=0;i<count;++i)if(points[i].pc>=first && points[i].pc<=last)return 0;
+    return 1;
+}
 int vb_simulation_point_register(uint32_t pc,uint16_t word,VbSimulationCallback callback,void* context) {
     const unsigned bucket=(pc>>1)&255;
     const VbSimulationPoint* previous;

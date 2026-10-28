@@ -23,6 +23,10 @@ void vb_simulation_points_clear(void);
 extern int vb_simulation_points_enabled;
 extern const VbSimulationPoint* vb_simulation_points[256];
 int vb_simulation_point_apply(CPUState*,const VbSimulationPoint*);
+/* Guest-thread query: callbacks cannot be added/enabled halfway through a
+ * pure generated region because it contains no external calls. Inclusive PC
+ * bounds preserve exact aliases and registration/enable/clear semantics. */
+int vb_simulation_region_clear(uint32_t first,uint32_t last);
 static inline int vb_simulation_before(CPUState* cpu) {
     if(vb_simulation_points_enabled) {
         const VbSimulationPoint* point=vb_simulation_points[(cpu->pc>>1)&255];
