@@ -81,6 +81,12 @@ def main():
             import ctypes
             kernel = ctypes.WinDLL('kernel32', use_last_error=True)
             kernel.SetProcessAffinityMask.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+            class MemoryCounters(ctypes.Structure):
+                _fields_=[('cb',ctypes.c_ulong),('faults',ctypes.c_ulong)]+[
+                    (name,ctypes.c_size_t) for name in ('peak_ws','ws','peak_paged_pool','paged_pool',
+                        'peak_nonpaged_pool','nonpaged_pool','pagefile','peak_pagefile','private')]
+            kernel.K32GetProcessMemoryInfo.argtypes=[ctypes.c_void_p,ctypes.POINTER(MemoryCounters),ctypes.c_ulong]
+            kernel.K32GetProcessMemoryInfo.restype=ctypes.c_int
             env = {k: v for k, v in os.environ.items() if not k.startswith('VBRECOMP_')}
             env.update(SDL_AUDIODRIVER='dummy', SDL_VIDEODRIVER='dummy')
             expected = None
@@ -125,7 +131,23 @@ def main():
                     if not profiling and not kernel.SetProcessAffinityMask(int(child._handle), mask):
                         child.terminate(); child.wait(); raise ctypes.WinError(ctypes.get_last_error())
                     try:
-                        code = child.wait(timeout=300)
+                        deadline=time.perf_counter()+(330 if profiling else 300)
+                        memory=dict(scope='Owned runtime process; OS peak working set/pagefile fields and 100ms sampled PrivateUsage',
+                                    samples=0,peak_working_set_bytes=0,peak_pagefile_usage_bytes=0,sampled_peak_private_usage_bytes=0)
+                        while True:
+                            if not profiling:
+                                counters=MemoryCounters();counters.cb=ctypes.sizeof(counters)
+                                if kernel.K32GetProcessMemoryInfo(int(child._handle),ctypes.byref(counters),counters.cb):
+                                    memory['samples']+=1
+                                    memory['peak_working_set_bytes']=max(memory['peak_working_set_bytes'],counters.peak_ws)
+                                    memory['peak_pagefile_usage_bytes']=max(memory['peak_pagefile_usage_bytes'],counters.peak_pagefile)
+                                    memory['sampled_peak_private_usage_bytes']=max(memory['sampled_peak_private_usage_bytes'],counters.private)
+                            remaining=deadline-time.perf_counter()
+                            if remaining<=0:raise subprocess.TimeoutExpired(command,330 if profiling else 300)
+                            try:
+                                code=child.wait(timeout=min(.1,remaining));break
+                            except subprocess.TimeoutExpired:pass
+                        if not profiling:row['process_memory']=memory
                     except subprocess.TimeoutExpired:
                         child.terminate(); child.wait(); raise
                 row['exit_code'] = code
