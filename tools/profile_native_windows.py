@@ -182,6 +182,7 @@ def main():
     report = {'scope': 'perturbed main-thread PC samples; not throughput', 'command': command,
               'exe_sha256': identity, 'symbols_sha256': hashlib.sha256(symbols.encode()).hexdigest(),
               'main_tid': tid, 'sample_errors': errors,
+              'process_id': process.pid,
               'stackwalker_sha256': hashlib.sha256(args.stackwalker.read_bytes()).hexdigest() if walker else None,
               'sample_interval_ms': args.sample_ms,
               'stackwalker_initialization_errors': initialization_errors,

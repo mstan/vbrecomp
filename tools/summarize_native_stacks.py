@@ -15,9 +15,10 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('profile', type=Path)
     p.add_argument('out', type=Path)
+    p.add_argument('--executable', type=Path, help='Local copy of the same hashed executable for a retained remote profile')
     a = p.parse_args()
     source = json.loads(a.profile.read_text())
-    exe = Path(source['command'][0])
+    exe = a.executable or Path(source['command'][0])
     import hashlib
     raw = exe.read_bytes()
     if hashlib.sha256(raw).hexdigest() != source['exe_sha256']:
