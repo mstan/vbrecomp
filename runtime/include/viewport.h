@@ -66,6 +66,12 @@ int vb_viewport_track_extra(unsigned size, VbViewportCaptureExtra capture);
 int vb_viewport_register(const char* id, unsigned numerator, unsigned denominator,
                          int adaptive, VbViewportClassify classify,
                          VbViewportArrange arrange, void* context);
+/* Extra provider promise: callbacks observe scene/policy inputs only, never
+ * partially produced framebuffer/source output. Enables interleaved row work
+ * when the independently registered color renderer is pixel-local too. */
+int vb_viewport_register_row_local(const char*,unsigned,unsigned,int,
+                                  VbViewportClassify,VbViewportArrange,void*);
+int vb_viewport_can_stream_rows(void);
 void vb_viewport_reset(void); /* Selection only; keep already captured frames. */
 int vb_viewport_active(void);
 const char* vb_viewport_id(void);
@@ -76,6 +82,9 @@ int vb_viewport_width(void); /* Native width for unclassified/title/menu scenes.
  * width=384 bypasses layout transforms and proves native snapshot fidelity. */
 int vb_viewport_render(int slot, int eye, int width, uint32_t* argb,
                        uint8_t* levels, uint16_t* worlds, VbSourceTexel* sources);
+/* Requires both documented local-pixel and row-local provider contracts. */
+int vb_viewport_render_local_pixels(int,int,int,uint32_t*,uint8_t*,uint16_t*,
+                                   VbSourceTexel*,VbRenderCallback,void*);
 
 /* VIP-owned observer entry points. Palette entries are decoded levels 0..3. */
 void vb_viewport_clear_frames(void);

@@ -41,6 +41,12 @@ typedef void (*VbRenderCallback)(const VbRenderFrame*, uint32_t* argb, void* con
  * plugin's renderer. Register from activation; unregister from reset callback.
  */
 int vb_renderer_register(const char* id, VbRenderCallback render, void* context);
+/* Additional opt-in contract: each output depends only on that pixel's stock,
+ * levels/source/world metadata and stable provider data. The callback accepts
+ * dense batches (height=1), independent of absolute output position/extent.
+ * No frame-wide inspection or observable per-call side effects; transparent
+ * memoization is allowed. Legacy registration keeps the full-frame contract. */
+int vb_renderer_register_local_pixels(const char*,VbRenderCallback,void*);
 /* Game startup declares this once so enabling a renderer while paused has
  * attribution for the already displayed frame, even if mods started disabled. */
 void vb_renderer_track_worlds(void);

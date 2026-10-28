@@ -13,6 +13,7 @@ void ref_viewport_capture(int,int,const uint16_t*,const uint16_t*,const uint16_t
     const uint8_t (*)[4],const uint8_t (*)[4],unsigned,const uint16_t*);
 int ref_viewport_render(int,int,int,uint32_t*,uint8_t*,uint16_t*,VbSourceTexel*);
 int vb_vip_display_fb(void) { return 0; }
+uint32_t vb_vip_frame_seq(void) {return 71;}
 void vb_vip_column_argb(int eye,uint32_t colors[96][4]) {
     for(unsigned g=0;g<96;++g)for(unsigned i=0;i<4;++i)
         colors[g][i]=0xff000000u|((g*17+i*53+eye*7)&255)<<16;
@@ -38,8 +39,22 @@ static void arrange(const VbViewportScene* s,int kind,int width,VbViewportLayout
         if(scene%3==1)l->worlds[w].outside_cell=cell;
     }
 }
+static unsigned shaded_rows;
+static uint32_t shade_value(uint32_t stock,unsigned level,unsigned world,const VbSourceTexel* source) {
+    return stock^((source->tile_hash*1664525u+world*17u+level)&0xffffffu);
+}
+static void shade(const VbRenderFrame* frame,uint32_t* out,void* context) {
+    assert(context==&shaded_rows && frame->height==1 && frame->frame_seq==71);
+    assert(frame->stock_argb!=out && frame->sources && frame->worlds && frame->levels);
+    for(int x=0;x<frame->width;++x) {
+        const uint32_t stock=frame->stock_argb[x];assert(out[x]==stock);
+        out[x]=shade_value(stock,frame->levels[x],frame->worlds[x],frame->sources+x);
+        assert(frame->stock_argb[x]==stock);
+    }
+    ++shaded_rows;
+}
 int main(void) {
-    enum {MAX=796*224};
+    enum {MAX=VB_VIEWPORT_MAX_WIDTH*224};
     uint32_t* a=malloc(MAX*4),*b=malloc(MAX*4);
     uint8_t* al=malloc(MAX),*bl=malloc(MAX);
     uint16_t* aw=malloc(MAX*2),*bw=malloc(MAX*2);
@@ -48,6 +63,12 @@ int main(void) {
     assert(a&&b&&al&&bl&&aw&&bw&&as&&bs&&dram&&chars);
     vb_viewport_track();ref_viewport_track();
     assert(vb_viewport_register("jobs",32,9,0,classify,arrange,0));
+    assert(!vb_viewport_can_stream_rows());
+    assert(!vb_viewport_register_row_local("collision",32,9,0,classify,arrange,0));
+    assert(!vb_viewport_can_stream_rows());
+    assert(!vb_viewport_render_local_pixels(0,0,384,a,al,aw,as,shade,&shaded_rows));
+    vb_viewport_reset();
+    assert(vb_viewport_register_row_local("jobs.local",32,9,0,classify,arrange,0));
     assert(ref_viewport_register("scalar",32,9,0,classify,arrange,0));
     for(scene=0;scene<48;++scene) {
         for(int i=0;i<65536;++i)dram[i]=(uint16_t)random_value();
@@ -70,16 +91,24 @@ int main(void) {
             ref_viewport_capture(0,row,dram,chars,spt,(const uint8_t (*)[4])gplt,
                 (const uint8_t (*)[4])jplt,scene&3,suppress);
         }
-        const int widths[]={384,398,522,796};
-        for(unsigned k=0;k<4;++k)for(int eye=0;eye<2;++eye) {
+        const int widths[]={384,398,522,796,VB_VIEWPORT_MAX_WIDTH};
+        for(unsigned k=0;k<5;++k)for(int eye=0;eye<2;++eye) {
+            if(k==4 && scene)continue;
             int width=widths[k];size_t n=(size_t)width*224;
             assert(vb_viewport_render(0,eye,width,a,al,aw,as));
             assert(ref_viewport_render(0,eye,width,b,bl,bw,bs));
             assert(!memcmp(a,b,n*4));assert(!memcmp(al,bl,n));
             assert(!memcmp(aw,bw,n*2));assert(!memcmp(as,bs,n*sizeof(*as)));
+            for(size_t i=0;i<n;++i)a[i]=shade_value(a[i],al[i],aw[i],as+i);
+            memset(b,0x51,n*4);memset(bl,0x52,n);memset(bw,0x53,n*2);memset(bs,0x54,n*sizeof(*bs));
+            shaded_rows=0;
+            assert(vb_viewport_render_local_pixels(0,eye,width,b,bl,bw,bs,shade,&shaded_rows));
+            assert(shaded_rows==224);
+            assert(!memcmp(a,b,n*4));assert(!memcmp(al,bl,n));
+            assert(!memcmp(aw,bw,n*2));assert(!memcmp(as,bs,n*sizeof(*as)));
         }
     }
     free(a);free(b);free(al);free(bl);free(aw);free(bw);free(as);free(bs);free(dram);free(chars);
-    puts("PASS: 384 scalar/job comparisons, both eyes and four output planes; block mutations, wraps, flips, HBias, affine and arbitrary outside callbacks");
+    puts("PASS: 386 scalar/job/streamed comparisons, both eyes and all output planes; mutations, wraps, flips, HBias, affine, outside callbacks and maximum width");
     return 0;
 }

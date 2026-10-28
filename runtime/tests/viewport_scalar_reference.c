@@ -7,6 +7,8 @@
 #define vb_viewport_clear_frames ref_viewport_clear_frames
 #define vb_viewport_reset ref_viewport_reset
 #define vb_viewport_register ref_viewport_register
+#define vb_viewport_register_row_local ref_viewport_register_row_local
+#define vb_viewport_can_stream_rows ref_viewport_can_stream_rows
 #define vb_viewport_active ref_viewport_active
 #define vb_viewport_id ref_viewport_id
 #define vb_viewport_window ref_viewport_window
@@ -17,4 +19,5 @@
 #define vb_viewport_invalidate_capture_revisions ref_viewport_invalidate_capture_revisions
 #define vb_viewport_tile_hash ref_viewport_tile_hash
 #define vb_viewport_render ref_viewport_render
+#define vb_viewport_render_local_pixels ref_viewport_render_local_pixels
 #include "../src/viewport.c"
