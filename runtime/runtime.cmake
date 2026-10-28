@@ -179,6 +179,8 @@ function(vb_add_runtime_target TARGET)
     target_include_directories(${TARGET} PRIVATE
         ${VB_RUNTIME_DIR}/include
     )
+    target_compile_options(${TARGET} PRIVATE ${VBRECOMP_PGO_COMPILE_OPTIONS})
+    target_link_options(${TARGET} PRIVATE ${VBRECOMP_PGO_LINK_OPTIONS})
     if(VBRECOMP_LTO_ACTIVE)
         set_property(TARGET ${TARGET} PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
         if(CMAKE_C_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
