@@ -38,6 +38,5 @@ Focused tests compare every frozen byte against live canonical inputs, exercise
 all forty pages and four CHR aliases, bank rotation/retained ownership, external
 input mutation, reset/load invalidation and clock wrap. Existing eager/deferred
 rasterizer checks pass; every tile hash is checked against the original byte
-hash after mutations, across retained banks and repeated reads. Existing
-rasterizer checks also pass. Full built-game qualification and per-game matched
+hash after mutations, across retained banks and repeated reads. Full built-game qualification and per-game matched
 performance remain pending; copied-byte counts alone are not a runtime win.

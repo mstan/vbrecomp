@@ -1612,6 +1612,36 @@ static inline void framebuffer_decode(int eye, uint32_t* argb_out,uint8_t* level
         base = s_display_fb ? 0x18000u : 0x10000u;  /* R */
     }
     const uint8_t* fb = &s_vip_mem[base];
+#ifndef VB_FRAMEBUFFER_BLOCKS
+#define VB_FRAMEBUFFER_BLOCKS 1
+#endif
+#if VB_FRAMEBUFFER_BLOCKS
+    /* One packed byte supplies four vertical pixels. Keep four output rows
+     * live while walking columns, rather than decoding that byte four times.
+     * Preserve the old write order for overlapping output buffers. */
+    int overlap=0;
+    if(levels) {
+        const uintptr_t a=(uintptr_t)argb_out,b=(uintptr_t)levels;
+        overlap=a<=b ? b-a<384u*224u*sizeof(*argb_out) : a-b<384u*224u;
+    }
+    if(!overlap) {
+        for(unsigned y=0;y<224;y+=4) {
+            uint32_t* r0=argb_out+y*384;
+            uint32_t* r1=r0+384;uint32_t* r2=r1+384;uint32_t* r3=r2+384;
+            for(unsigned x=0;x<384;++x) {
+                const unsigned byte=fb[x*64+y/4];
+                const unsigned v0=byte&3,v1=(byte>>2)&3,v2=(byte>>4)&3,v3=byte>>6;
+                const uint32_t* c=colors[x>>2];
+                r0[x]=c[v0];r1[x]=c[v1];r2[x]=c[v2];r3[x]=c[v3];
+                if(levels) {
+                    uint8_t* p=levels+y*384+x;
+                    p[0]=(uint8_t)v0;p[384]=(uint8_t)v1;p[768]=(uint8_t)v2;p[1152]=(uint8_t)v3;
+                }
+            }
+        }
+        return;
+    }
+#endif
     for (int y = 0; y < 224; y++) {
         int block      = y >> 3;            /* 0..27 */
         int row_in_blk = y & 7;             /* 0..7 */

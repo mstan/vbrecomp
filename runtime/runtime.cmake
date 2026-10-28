@@ -196,6 +196,8 @@ function(vb_add_runtime_target TARGET)
     set_property(SOURCE "${VB_RUNTIME_DIR}/src/vip.c" "${VB_RUNTIME_DIR}/src/viewport.c" APPEND PROPERTY
         COMPILE_DEFINITIONS VB_DEFER_NATIVE_DRAW=$<BOOL:${VBRECOMP_DEFER_NATIVE_DRAW}>
         VB_VERSIONED_CAPTURE=$<BOOL:${VBRECOMP_VERSIONED_CAPTURE}>)
+    set_property(SOURCE "${VB_RUNTIME_DIR}/src/vip.c" APPEND PROPERTY
+        COMPILE_DEFINITIONS VB_FRAMEBUFFER_BLOCKS=$<BOOL:${VBRECOMP_FRAMEBUFFER_BLOCKS}>)
     if(VBRECOMP_NETPLAY)
         target_compile_definitions(${TARGET} PRIVATE VB_RUNTIME_HAVE_NETPLAY=1)
         target_link_libraries(${TARGET} PRIVATE recomp_net)

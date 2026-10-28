@@ -153,6 +153,18 @@ static void brightness_tests(void) {
             unsigned r=(column[x/4][level]>>16)&255;
             assert(pixels[y*384+x]==(0xff000000u|(r<<16)|(((r*r)/(255u*10u))<<8)));
         }
+        static uint32_t aliased[384*224*5/4+8],expected_alias[384*224*5/4+8];
+        const unsigned ao[4]={0,0,0,16},lo[4]={0,4,384*224*4-4,0};
+        for(unsigned sample=0;sample<4;++sample){
+            memset(aliased,0xa5,sizeof(aliased));memset(expected_alias,0xa5,sizeof(expected_alias));
+            uint32_t* actual_argb=(uint32_t*)((uint8_t*)aliased+ao[sample]);
+            uint8_t* actual_levels=(uint8_t*)aliased+lo[sample];
+            uint32_t* expected_argb=(uint32_t*)((uint8_t*)expected_alias+ao[sample]);
+            uint8_t* expected_levels=(uint8_t*)expected_alias+lo[sample];
+            for(unsigned i=0;i<384*224;++i){expected_argb[i]=pixels[i];expected_levels[i]=original_levels[i];}
+            vb_vip_render_framebuffer_levels(eye,actual_argb,actual_levels);
+            assert(!memcmp(aliased,expected_alias,sizeof(aliased)));
+        }
         assert(s_brt_repeat==7 && !memcmp(saved,s_brt_cache,sizeof(saved)));
     }
     vb_test_red_warm=0;
