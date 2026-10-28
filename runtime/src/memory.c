@@ -28,6 +28,9 @@
 #ifndef VBRECOMP_NATIVE_READS
 #define VBRECOMP_NATIVE_READS 0
 #endif
+#ifndef VBRECOMP_NATIVE_WRITES
+#define VBRECOMP_NATIVE_WRITES 0
+#endif
 
 static CPUState* s_bus_cpu;
 static VbWriteObserver s_write_observer;
@@ -427,13 +430,35 @@ static inline const uint8_t* native_read_pointer(uint32_t addr) {
     }
 }
 #endif
+#if VBRECOMP_NATIVE_WRITES
+/* Ordinary stores have no bus synchronization/deadline effects. Resolve their
+ * live canonical destination once and retain the complete pre-store trace and
+ * observer contract, including the original aligned virtual address. No title
+ * filtering or callback purity declaration is needed. Device and invalid writes
+ * keep the original bus path. The byte stores are portable on every host. */
+static inline uint8_t* native_write_pointer(uint32_t addr,uint32_t value,unsigned width) {
+    unsigned region=(addr>>24)&7u;
+    uint8_t* p=region==5 ? s_wram+(addr&65535u)
+              :region==6 ? s_cart_ram+(addr&65535u):NULL;
+    if(p) {
+        vb_wtrace_event(addr,value,(uint8_t)width);
+        if(s_write_observer && s_bus_cpu)s_write_observer(s_bus_cpu,addr,value,width);
+    }
+    return p;
+}
+#endif
 uint8_t vb_read8(uint32_t addr) {
 #if VBRECOMP_NATIVE_READS
     const uint8_t* p=native_read_pointer(addr);if(p)return p[0];
 #endif
     bus_begin(addr,0);uint8_t result=raw_read8(addr);bus_end(addr);return result;
 }
-void vb_write8(uint32_t addr,uint8_t value) { bus_begin(addr,1);raw_write8(addr,value);bus_end(addr); }
+void vb_write8(uint32_t addr,uint8_t value) {
+#if VBRECOMP_NATIVE_WRITES
+    uint8_t* p=native_write_pointer(addr,value,1);if(p){p[0]=value;return;}
+#endif
+    bus_begin(addr,1);raw_write8(addr,value);bus_end(addr);
+}
 
 uint16_t vb_read16(uint32_t addr) {
 #if VBRECOMP_NATIVE_READS
@@ -441,7 +466,13 @@ uint16_t vb_read16(uint32_t addr) {
 #endif
     bus_begin(addr,0);uint16_t result=raw_read16(addr);bus_end(addr);return result;
 }
-void vb_write16(uint32_t addr,uint16_t value) { bus_begin(addr,1);raw_write16(addr,value);bus_end(addr); }
+void vb_write16(uint32_t addr,uint16_t value) {
+#if VBRECOMP_NATIVE_WRITES
+    uint8_t* p=native_write_pointer(addr&~1u,value,2);
+    if(p){p[0]=(uint8_t)value;p[1]=(uint8_t)(value>>8);return;}
+#endif
+    bus_begin(addr,1);raw_write16(addr,value);bus_end(addr);
+}
 
 uint32_t vb_read32(uint32_t addr) {
 #if VBRECOMP_NATIVE_READS
@@ -450,7 +481,13 @@ uint32_t vb_read32(uint32_t addr) {
 #endif
     bus_begin(addr,0);uint32_t result=raw_read32(addr);bus_end(addr);return result;
 }
-void vb_write32(uint32_t addr,uint32_t value) { bus_begin(addr,1);raw_write32(addr,value);bus_end(addr); }
+void vb_write32(uint32_t addr,uint32_t value) {
+#if VBRECOMP_NATIVE_WRITES
+    uint8_t* p=native_write_pointer(addr&~3u,value,4);
+    if(p){p[0]=(uint8_t)value;p[1]=(uint8_t)(value>>8);p[2]=(uint8_t)(value>>16);p[3]=(uint8_t)(value>>24);return;}
+#endif
+    bus_begin(addr,1);raw_write32(addr,value);bus_end(addr);
+}
 
 /* Execution state only: host pointers and diagnostic history stay local. */
 void vb_memory_state_visit(VbStateVisit visit, void* context) {
