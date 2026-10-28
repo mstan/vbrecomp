@@ -1465,7 +1465,7 @@ static void vip_resolve_overrides(void) {
  * The 2bpp framebuffer stores 4 pixels per byte in the column-major
  * arrangement documented at the renderer top. We walk pixels in the
  * natural (x, y) order and unpack on the fly. */
-void vb_vip_render_framebuffer(int eye, uint32_t* argb_out) {
+static inline void framebuffer_decode(int eye, uint32_t* argb_out,uint8_t* levels) {
     if (!argb_out) return;
     uint8_t red[96][4];
     uint32_t colors[96][4];
@@ -1505,8 +1505,15 @@ void vb_vip_render_framebuffer(int eye, uint32_t* argb_out) {
              * This never feeds the verify path (raw `r` stays the
              * oracle); see red_lut.h. */
             argb_out[y * 384 + x] = colors[x >> 2][v];
+            if(levels)levels[y * 384 + x]=(uint8_t)v;
         }
     }
+}
+void vb_vip_render_framebuffer(int eye,uint32_t* argb_out) {
+    framebuffer_decode(eye,argb_out,NULL);
+}
+void vb_vip_render_framebuffer_levels(int eye,uint32_t* argb_out,uint8_t* levels) {
+    framebuffer_decode(eye,argb_out,levels);
 }
 
 /* Present-time full-screen recolor (experiment, opt-in). Same FB unpack as

@@ -81,6 +81,9 @@ void     vb_vip_write32(uint32_t addr, uint32_t v);
  * eye's four-column CT repeat groups, then the LED gamma mapping to
  * red-on-black ARGB. Presentation does not change live scan state. */
 void vb_vip_render_framebuffer(int eye, uint32_t* argb_out);
+/* Decode the actual displayed framebuffer once for color plugins needing both
+ * stock pixels and raw levels. Optional levels; identical brightness/LED rules. */
+void vb_vip_render_framebuffer_levels(int eye,uint32_t* argb_out,uint8_t* levels);
 
 /* Opt-in present-time full-screen recolor (experiment): same as
  * vb_vip_render_framebuffer but maps each pixel through the per-frame recolor

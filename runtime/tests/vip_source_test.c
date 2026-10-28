@@ -50,6 +50,8 @@ static void unwrapped_layout(const VbViewportScene* scene,int kind,int width,
 static uint8_t extra_marker = 73;
 static void brightness_tests(void) {
     static uint32_t pixels[384 * 224];
+    static uint32_t fused[384 * 224];
+    static uint8_t levels[384 * 224],original_levels[384 * 224];
     memset(s_vip_mem,0,sizeof(s_vip_mem));
     s_display_fb=0;
     s_brta=16;s_brtb=32;s_brtc=0;s_rest=0;s_brt_repeat=7;
@@ -79,6 +81,12 @@ static void brightness_tests(void) {
         }
         uint32_t column[96][4];vb_vip_column_argb(eye,column);
         vb_vip_render_framebuffer(eye,pixels);
+        vb_vip_copy_levels(eye,original_levels);
+        vb_vip_render_framebuffer_levels(eye,fused,levels);
+        assert(!memcmp(pixels,fused,sizeof(pixels)));
+        assert(!memcmp(levels,original_levels,sizeof(levels)));
+        vb_vip_render_framebuffer_levels(eye,fused,NULL);
+        assert(!memcmp(pixels,fused,sizeof(pixels)));
         for(unsigned y=0;y<224;++y)for(unsigned x=0;x<384;++x) {
             unsigned level=(s_vip_mem[base+x*64+y/4]>>((y%4)*2))&3;
             unsigned r=(column[x/4][level]>>16)&255;

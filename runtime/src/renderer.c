@@ -35,10 +35,9 @@ void vb_renderer_present(int eye, uint32_t* argb) {
     static uint32_t stock[VB_RENDER_PIXELS];
     static uint8_t levels[VB_RENDER_PIXELS];
     if (!argb) return;
-    vb_vip_render_framebuffer(eye, argb);
-    if (!s_render) return;
+    if (!s_render) { vb_vip_render_framebuffer(eye,argb); return; }
+    vb_vip_render_framebuffer_levels(eye,argb,levels);
     memcpy(stock, argb, sizeof(stock));
-    vb_vip_copy_levels(eye, levels);
     const VbRenderFrame frame = {
         vb_vip_frame_seq(), eye != 0, stock, levels, vb_vip_attr_buffer(eye),
         vb_renderer_tracks_texels() ? vb_vip_source_buffer(eye) : 0,
@@ -55,10 +54,11 @@ int vb_renderer_present_width(void) { return vb_viewport_width(); }
 int vb_renderer_present_viewport(int eye, int width, uint32_t* argb) {
     if (!argb) return 0;
     if (width == VB_RENDER_WIDTH) { vb_renderer_present(eye, argb); return 1; }
+    uint32_t* stock=s_render ? view_stock:argb;
     if (!vb_viewport_active() || !vb_viewport_render(vb_vip_display_fb() & 1,
-        eye, width, view_stock, view_levels, view_worlds, view_sources)) return 0;
-    memcpy(argb, view_stock, width * VB_RENDER_HEIGHT * sizeof(*argb));
+        eye, width, stock, view_levels, view_worlds, view_sources)) return 0;
     if (s_render) {
+        memcpy(argb, stock, width * VB_RENDER_HEIGHT * sizeof(*argb));
         const VbRenderFrame frame = {vb_vip_frame_seq(), eye != 0, view_stock,
             view_levels, view_worlds, view_sources, width, VB_RENDER_HEIGHT};
         s_render(&frame, argb, s_context);
