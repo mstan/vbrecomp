@@ -1342,6 +1342,16 @@ int main(int argc, char** argv) {
         vb_state_ui_preview_costs(&preview_renders,&preview_pixels);
         uint64_t capture_bytes=0,reused_capture_pages=0;
         vb_viewport_capture_costs(&capture_bytes,&reused_capture_pages);
+        unsigned video_active=0,video_dummy=0,renderer_flags=0,renderer_opengl=0;
+#if VB_RUNTIME_HAVE_SDL
+        const char* video_driver=SDL_GetCurrentVideoDriver();
+        video_active=video_driver!=nullptr;video_dummy=video_driver && !std::strcmp(video_driver,"dummy");
+        SDL_RendererInfo renderer_info{};
+        if(ren && SDL_GetRendererInfo(ren,&renderer_info)==0) {
+            renderer_flags=(unsigned)renderer_info.flags;
+            renderer_opengl=renderer_info.name && !std::strcmp(renderer_info.name,"opengl");
+        }
+#endif
         const int report_bytes=std::printf("VBRECOMP_BENCHMARK {\"frames\":%u,\"seconds\":%.9f,\"fps\":%.3f,"
             "\"process_cpu_seconds\":%.9f,\"cycles\":%llu,\"pc\":%u,\"wram_sha256\":\"%s\","
             "\"native_instructions\":%llu,\"interpreted_instructions\":%llu,\"fallback_instructions\":%llu,"
@@ -1352,6 +1362,7 @@ int main(int argc, char** argv) {
             "\"snapshot_page_hits\":%llu,\"rewind_page_storage_bytes\":%llu,"
             "\"native_draws_scheduled\":%llu,\"native_draws_materialized\":%llu,\"native_draws_overwritten\":%llu,"
             "\"viewport_capture_bytes_copied\":%llu,\"viewport_capture_pages_reused\":%llu,"
+            "\"sdl_video_active\":%u,\"sdl_video_dummy\":%u,\"sdl_renderer_flags\":%u,\"sdl_renderer_opengl\":%u,"
             "\"workload_scope\":\"%s\"}\n",
             cpu.frame,benchmark_seconds,cpu.frame/benchmark_seconds,benchmark_cpu_seconds,
             (unsigned long long)cpu.cycles,cpu.pc,hash,(unsigned long long)vb_execution.native_instructions,
@@ -1371,6 +1382,7 @@ int main(int argc, char** argv) {
             (unsigned long long)(draw_costs.overwritten-initial_draw_costs.overwritten),
             (unsigned long long)(capture_bytes-initial_capture_bytes),
             (unsigned long long)(reused_capture_pages-initial_reused_capture_pages),
+            video_active,video_dummy,renderer_flags,renderer_opengl,
             measure_runtime?"uncapped-full-runtime":"headless-core");
         // The finite-run contract requires a durable result before frontend,
         // audio and allocator teardown. Treat an output error as a failed run.
