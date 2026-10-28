@@ -88,9 +88,49 @@ static void compare(int which,uint64_t begin,uint64_t end) {
     assert(reference.sync_count==large.sync_count);
     assert(!memcmp(reference.trace,large.trace,reference.sync_count*sizeof(uint64_t)));
 }
+typedef struct FrameResult {
+    CPUState cpu;
+    uint64_t presents[32],snapshots[32];
+    unsigned present_count;
+} FrameResult;
+static FrameResult frames(uint32_t service_cycles) {
+    FrameResult result={0};scenario=0;next_event=11;
+    sync_count=deliveries=event_count=0;pending=0;
+    memset(&vb_execution,0,sizeof(vb_execution));
+    result.cpu.pc=0x100;uint32_t pc=result.cpu.pc;
+    uint64_t frame_start=0,last_present=0;unsigned history_frame=UINT32_MAX;
+    /* Incommensurate device, instruction, frame and service periods expose
+     * presentation phase drift if a slice omits the presentation boundary. */
+    while (result.cpu.frame<20) {
+        if (result.cpu.cycles-frame_start>=113) {
+            frame_start+=113;++result.cpu.frame;
+        }
+        if (result.cpu.frame==20) break;
+        if (history_frame!=result.cpu.frame) {
+            history_frame=result.cpu.frame;
+            result.snapshots[history_frame]=result.cpu.cycles;
+        }
+        uint32_t quota=service_cycles;
+        if (quota) {
+            const uint64_t elapsed=result.cpu.cycles-last_present;
+            const uint64_t until=elapsed<113?113-elapsed:1;
+            if (until<quota) quota=(uint32_t)until;
+        }
+        vb_machine_run_slice(&result.cpu,&pc,frame_start+113,quota);
+        if (result.cpu.cycles-last_present>=113) {
+            last_present=result.cpu.cycles;
+            assert(result.present_count<32);
+            result.presents[result.present_count++]=last_present;
+        }
+    }
+    return result;
+}
 int main(void) {
     for (int which=0;which<4;++which) compare(which,0,1200);
     compare(0,UINT64_MAX-111,UINT64_MAX-32);
+    const FrameResult reference=frames(0),candidate=frames(20),large=frames(20000);
+    assert(!memcmp(&reference,&candidate,sizeof(reference)));
+    assert(!memcmp(&reference,&large,sizeof(reference)));
     /* A zero-cycle redirect must return to its host, rather than spin or
      * execute the redirected target before the caller can observe it. */
     CPUState cpu={0};cpu.pc=0x100;scenario=3;next_event=11;
