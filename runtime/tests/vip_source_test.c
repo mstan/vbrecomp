@@ -399,6 +399,15 @@ int main(void) {
     puts("PASS: native rasterizer and CPU source ownership, both eyes, packed stores and display lifetime");
     viewport_tests();
     brightness_tests();
+#if VB_DEFER_NATIVE_DRAW
     deferred_draw_tests();
+#else
+    setup(0,0,0);s_display_fb=s_drawing_fb=0;
+    uint64_t materialized=s_native_materialized;
+    vip_draw_block_now(0);
+    assert(!vb_vip_native_pending && s_native_materialized==materialized+1);
+    assert(vb_vip_read8(64*3)==0x77);
+    puts("PASS: eager native drawing control executes immediately with viewport tracking enabled");
+#endif
     return 0;
 }
