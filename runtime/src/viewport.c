@@ -25,7 +25,12 @@ static unsigned extra_size;
 static VbViewportCaptureExtra capture_extra;
 
 void vb_viewport_state_visit(VbStateVisit visit, void* context) {
-    if (tracking) visit(context, blocks, sizeof(blocks));
+    /* Preserve the identical public byte stream while exposing capture-block
+     * boundaries to private immutable history. Every row starts with DRAM,
+     * so unchanged captured banks can share pages independently of preceding
+     * scalar fields and the struct's non-page-sized stride. */
+    if (tracking) for(unsigned slot=0;slot<2;++slot)
+        for(unsigned row=0;row<28;++row)visit(context,&blocks[slot][row],sizeof(blocks[slot][row]));
 }
 
 static int sx(unsigned v, unsigned bits) {

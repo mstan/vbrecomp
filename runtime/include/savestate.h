@@ -73,9 +73,10 @@ const uint8_t* vb_state_content_id(void);
  * Snapshot payload copies are counted once after successful allocation. */
 typedef struct VbStateCaptureCosts {
     uint64_t allocations, payload_bytes;
+    uint64_t paged_captures, page_allocations, page_copied_bytes, page_hits, rewind_page_bytes;
 } VbStateCaptureCosts;
 void vb_state_capture_costs(VbStateCaptureCosts* out);
-/* Local history uses rbengine's owned, tick-keyed snapshot ring. */
+/* Local history owns immutable pages indexed by tick. */
 int vb_rewind_enable(unsigned depth);
 void vb_rewind_shutdown(void);
 int vb_rewind_record(uint32_t tick);
@@ -85,7 +86,7 @@ int vb_rewind_has(uint32_t tick);
 int vb_rewind_enabled(void);
 /* Host-only revision for preview/membership caches; never serialized. */
 uint64_t vb_rewind_revision(void);
-/* A separate owned rbengine ring for network rollback. Local rewind and
+/* A separate owned page ring for network rollback. Local rewind and
  * network history never clear or re-key each other's snapshots. Key T is
  * the complete machine before network tick T. These are private trusted
  * captures; external files still pass the strict public restore API. */

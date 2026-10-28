@@ -1337,7 +1337,9 @@ int main(int argc, char** argv) {
             "\"native_instructions\":%llu,\"interpreted_instructions\":%llu,\"fallback_instructions\":%llu,"
             "\"presents\":%llu,\"synthesized_audio_frames\":%llu,\"host_service_iterations\":%llu,\"host_service_cycles\":%u,"
             "\"snapshot_allocations\":%llu,\"snapshot_payload_bytes_copied\":%llu,"
-            "\"history_preview_renders\":%llu,\"history_preview_pixels\":%llu,\"workload_scope\":\"%s\"}\n",
+            "\"history_preview_renders\":%llu,\"history_preview_pixels\":%llu,"
+            "\"snapshot_page_allocations\":%llu,\"snapshot_page_bytes_copied\":%llu,"
+            "\"snapshot_page_hits\":%llu,\"rewind_page_storage_bytes\":%llu,\"workload_scope\":\"%s\"}\n",
             cpu.frame,benchmark_seconds,cpu.frame/benchmark_seconds,benchmark_cpu_seconds,
             (unsigned long long)cpu.cycles,cpu.pc,hash,(unsigned long long)vb_execution.native_instructions,
             (unsigned long long)vb_execution.interpreted,(unsigned long long)vb_execution.fallback,
@@ -1347,6 +1349,10 @@ int main(int argc, char** argv) {
             (unsigned long long)(capture_costs.payload_bytes-initial_capture_costs.payload_bytes),
             (unsigned long long)(preview_renders-initial_preview_renders),
             (unsigned long long)(preview_pixels-initial_preview_pixels),
+            (unsigned long long)(capture_costs.page_allocations-initial_capture_costs.page_allocations),
+            (unsigned long long)(capture_costs.page_copied_bytes-initial_capture_costs.page_copied_bytes),
+            (unsigned long long)(capture_costs.page_hits-initial_capture_costs.page_hits),
+            (unsigned long long)capture_costs.rewind_page_bytes,
             measure_runtime?"uncapped-full-runtime":"headless-core");
     }
     vb_watchdog_stop();

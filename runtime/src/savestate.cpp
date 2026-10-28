@@ -7,7 +7,7 @@
 #include "vb_crc32.h"
 #include "vb_sha256.h"
 #include "mod_runtime.h"
-#include "retcomm_rbengine/snap_ring.h"
+#include "snapshot_pages.h"
 #include <cstring>
 #include <cstdio>
 #include <cstdlib>
@@ -39,10 +39,10 @@ unsigned audio_guard_depth;
 const uint8_t* previous_sram;
 uint64_t generation;
 uint8_t content[32];
-RbeSnapRing* rewind_ring;
+vb_history::Ring* rewind_ring;
 uint64_t rewind_revision;
 VbStateCaptureCosts capture_costs;
-void clear_rewind() {rbe_snap_ring_clear(rewind_ring);++rewind_revision;}
+void clear_rewind() {if(rewind_ring)rewind_ring->clear();++rewind_revision;}
 struct Extension { char id[96]; void* bytes; size_t size; };
 Extension extensions[16];
 unsigned extension_count;
@@ -64,12 +64,17 @@ struct Stream {
     size_t offset;
     const uint8_t* inspect = nullptr;
     bool valid = true;
+    vb_history::Builder* page_output = nullptr;
+    const vb_history::Snapshot* page_input = nullptr;
+    const vb_history::Snapshot* page_inspect = nullptr;
 };
 void field(void* ctx, void* bytes, size_t size) {
     auto& s = *static_cast<Stream*>(ctx);
     if (s.out) {
         std::memcpy(s.out + s.offset, bytes, size);
     } else if (s.in) std::memcpy(bytes, s.in + s.offset, size);
+    else if(s.page_output)s.page_output->append(bytes,size);
+    else if(s.page_input && !s.page_input->read(s.offset,bytes,size))s.valid=false;
     s.offset += size;
 }
 void visit(Stream& s, bool presentation) {
@@ -83,6 +88,11 @@ void visit(Stream& s, bool presentation) {
     for(unsigned i=0;i<simulation_extension_count;++i) {
         const auto& e=simulation_extensions[i];
         if(s.inspect && !e.validate(s.inspect+s.offset,e.span.size,e.context))s.valid=false;
+        if(s.page_inspect) {
+            std::vector<uint8_t> candidate(e.span.size);
+            if(!s.page_inspect->read(s.offset,candidate.data(),candidate.size())
+               || !e.validate(candidate.data(),candidate.size(),e.context))s.valid=false;
+        }
         field(&s,e.span.bytes,e.span.size);
     }
     if (presentation) {
@@ -179,7 +189,15 @@ uint64_t vb_state_generation(void) { return generation; }
 const uint8_t* vb_state_previous_sram(void){return previous_sram;}
 const char* vb_state_build_id(void) { return VB_STATE_BUILD_ID; }
 const uint8_t* vb_state_content_id(void) { return content; }
-void vb_state_capture_costs(VbStateCaptureCosts* out) { if(out)*out=capture_costs; }
+void vb_state_capture_costs(VbStateCaptureCosts* out) {
+    if(!out)return;
+    *out=capture_costs;
+    if(rewind_ring) {
+        const auto c=rewind_ring->pool.costs();
+        out->page_allocations=c->allocated_pages;out->page_copied_bytes=c->copied_bytes;
+        out->page_hits=c->hits;out->rewind_page_bytes=c->live_pages*sizeof(vb_history::Page);
+    }
+}
 /* Private memory snapshots are owned immutable blobs, never file input. Their
  * integrity comes from ownership; only the strict public file/blob interface
  * accepts external data and requires a payload CRC. */
@@ -210,8 +228,33 @@ static int capture_impl(uint8_t** data, size_t* size, int presentation, bool tru
 int vb_state_capture(uint8_t** data, size_t* size, int presentation) {
     return capture_impl(data,size,presentation,false);
 }
+static int capture_pages(vb_history::PagePool& pool,vb_history::Snapshot& result) {
+    if(!cpu){error="Snapshot host is not bound";return 0;}
+    try {
+        Stream count{nullptr,nullptr,header_size};visit(count,true);
+        if(count.offset>max_size){error="Snapshot exceeds limit";return 0;}
+        std::array<uint8_t,header_size> header{};
+        std::memcpy(header.data(),"VBSTATE1",8);put32(header.data()+8,(uint32_t)count.offset);
+        put32(header.data()+12,3u);build_hash(header.data()+16);
+        std::memcpy(header.data()+48,content,32);put32(header.data()+84,0x01020304u);
+        uint8_t features[32];feature_hash(features);std::memcpy(header.data()+88,features,24);
+        vb_history::Builder builder(pool);builder.append(header.data(),header.size());
+        Stream output{nullptr,nullptr,header_size};output.page_output=&builder;visit(output,true);
+        result=builder.finish();
+        if(result.size!=count.offset){error="Snapshot layout changed during capture";return 0;}
+        ++capture_costs.paged_captures;
+        error="";return 1;
+    } catch(const std::bad_alloc&){error="Snapshot allocation failed";return 0;}
+}
 static int restore_impl(const uint8_t* data, size_t size, bool trusted, bool keep_history,
-                        bool inspect_only=false,int (*policy)(void*)=nullptr,void* context=nullptr) {
+                        bool inspect_only=false,int (*policy)(void*)=nullptr,void* context=nullptr,
+                        const vb_history::Snapshot* pages=nullptr) {
+    std::array<uint8_t,header_size> page_header;
+    if(pages) {
+        if(!trusted || pages->size!=size){error="Invalid private snapshot source";return 0;}
+        if(!pages->read(0,page_header.data(),page_header.size())){error="Invalid private snapshot";return 0;}
+        data=page_header.data();
+    }
     uint8_t build[32];build_hash(build);
     uint8_t features[32];feature_hash(features);
     if(!cpu || !data || size<header_size || size>max_size || std::memcmp(data,"VBSTATE1",8)
@@ -223,7 +266,8 @@ static int restore_impl(const uint8_t* data, size_t size, bool trusted, bool kee
     }
     Stream count{nullptr,nullptr,header_size};visit(count,true);
     if(count.offset!=size) {error="Snapshot layout does not match active features";return 0;}
-    Stream inspect{nullptr,nullptr,header_size,data};visit(inspect,true);
+    Stream inspect{nullptr,nullptr,header_size,pages?nullptr:data};
+    inspect.page_inspect=pages;visit(inspect,true);
     if(!inspect.valid) {error="Snapshot contains invalid game simulation state";return 0;}
     // Keep the original state until every range validator accepts the loaded
     // scalars. No guest instruction, device tick or output callback runs here.
@@ -232,9 +276,9 @@ static int restore_impl(const uint8_t* data, size_t size, bool trusted, bool kee
     AudioGuard guard;
     std::array<uint8_t,65536> old_sram;
     std::memcpy(old_sram.data(),vb_cart_ram_data(),old_sram.size());
-    Stream load{nullptr,data,header_size};visit(load,true);
+    Stream load{nullptr,pages?nullptr:data,header_size};load.page_input=pages;visit(load,true);
     bool accepted=false;
-    try {accepted=valid() && (!policy || policy(context));}
+    try {accepted=load.valid && valid() && (!policy || policy(context));}
     catch(...) {
         Stream undo{nullptr,backup,header_size};visit(undo,true);std::free(backup);throw;
     }
@@ -331,61 +375,72 @@ uint32_t vb_state_digest(void) {
 }
 int vb_rewind_enable(unsigned depth) {
     if(depth<2 || depth>512)return 0;
-    uint8_t* sample=nullptr;size_t size=0;
-    if(!vb_state_capture(&sample,&size,1))return 0;
-    std::free(sample);
+    if(!cpu){error="Snapshot host is not bound";return 0;}
+    Stream count{nullptr,nullptr,header_size};visit(count,true);const size_t size=count.offset;
+    if(size>max_size){error="Snapshot exceeds limit";return 0;}
     /* Full stereo attribution + viewport snapshots exceed 16 MiB. Preserve
      * the default 32 entries with those supported features, still bounded. */
     if(size>640u*1024u*1024u/depth) {
         error="Rewind history exceeds 640 MiB; reduce the frame count";return 0;
     }
-    RbeSnapRing* next=rbe_snap_ring_create(depth);if(!next)return 0;
-    vb_rewind_shutdown();rewind_ring=next;return 1;
+    try {
+        auto next=std::make_unique<vb_history::Ring>(depth);
+        vb_rewind_shutdown();rewind_ring=next.release();return 1;
+    } catch(const std::bad_alloc&){error="Snapshot allocation failed";return 0;}
 }
-void vb_rewind_shutdown(void){if(rewind_ring)++rewind_revision;rbe_snap_ring_destroy(rewind_ring);rewind_ring=nullptr;}
+void vb_rewind_shutdown(void){if(rewind_ring)++rewind_revision;delete rewind_ring;rewind_ring=nullptr;}
+static int store_pages(vb_history::Ring& ring,uint32_t tick) {
+    try {
+        vb_history::Snapshot snapshot;if(!capture_pages(ring.pool,snapshot))return 0;
+        ring.store(tick,std::move(snapshot));return 1;
+    } catch(const std::bad_alloc&){error="Snapshot allocation failed";return 0;}
+}
+static int load_pages(const vb_history::Snapshot* snapshot) {
+    if(!snapshot)return 0;
+    try {return restore_impl(nullptr,snapshot->size,true,true,false,nullptr,nullptr,snapshot);}
+    catch(const std::bad_alloc&){error="Snapshot allocation failed";return 0;}
+}
 int vb_rewind_record(uint32_t tick) {
     if(!rewind_ring)return 1;
-    uint8_t* blob=nullptr;size_t size=0;if(!capture_impl(&blob,&size,1,true))return 0;
-    if(!rbe_snap_ring_store(rewind_ring,tick,blob,size)){std::free(blob);return 0;}++rewind_revision;return 1;
+    if(!store_pages(*rewind_ring,tick))return 0;
+    ++rewind_revision;return 1;
 }
 int vb_rewind_to(uint32_t tick) {
     if(!rewind_ring){error="Rewind is disabled";return 0;}
-    size_t size=0;const uint8_t* blob=rbe_snap_ring_peek(rewind_ring,tick,&size);
+    const auto* blob=rewind_ring->peek(tick);
     if(!blob){error="Requested rewind frame is no longer available";return 0;}
-    if(!restore_impl(blob,size,true,true))return 0;
-    rbe_snap_ring_drop_after(rewind_ring,tick);++rewind_revision;return 1;
+    if(!load_pages(blob))return 0;
+    rewind_ring->drop_after(tick);++rewind_revision;return 1;
 }
-unsigned vb_rewind_count(void){return rbe_snap_ring_count(rewind_ring);}
-int vb_rewind_has(uint32_t tick){return rbe_snap_ring_has(rewind_ring,tick);}
+unsigned vb_rewind_count(void){return rewind_ring?rewind_ring->count():0;}
+int vb_rewind_has(uint32_t tick){return rewind_ring && rewind_ring->peek(tick);}
 int vb_rewind_enabled(void){return rewind_ring!=nullptr;}
 uint64_t vb_rewind_revision(void){return rewind_revision;}
-struct VbRollbackHistory {RbeSnapRing* ring;};
+struct VbRollbackHistory {vb_history::Ring ring;explicit VbRollbackHistory(unsigned depth):ring(depth){}};
 VbRollbackHistory* vb_rollback_history_create(unsigned depth) {
     if(depth<2 || depth>512)return nullptr;
-    uint8_t* sample=nullptr;size_t size=0;
-    if(!capture_impl(&sample,&size,1,true))return nullptr;
-    std::free(sample);
+    if(!cpu){error="Snapshot host is not bound";return nullptr;}
+    Stream count{nullptr,nullptr,header_size};visit(count,true);const size_t size=count.offset;
+    if(size>max_size){error="Snapshot exceeds limit";return nullptr;}
     if(size>512u*1024u*1024u/depth){error="Rollback history exceeds 512 MiB";return nullptr;}
-    auto* history=new(std::nothrow) VbRollbackHistory{rbe_snap_ring_create(depth)};
-    if(history && !history->ring){delete history;return nullptr;}return history;
+    try {return new VbRollbackHistory(depth);}
+    catch(const std::bad_alloc&){error="Snapshot allocation failed";return nullptr;}
 }
 void vb_rollback_history_destroy(VbRollbackHistory* h) {
-    if(h){rbe_snap_ring_destroy(h->ring);delete h;}
+    delete h;
 }
 int vb_rollback_history_save(VbRollbackHistory* h,uint32_t tick) {
     if(!h)return 0;
-    uint8_t* blob=nullptr;size_t size=0;if(!capture_impl(&blob,&size,1,true))return 0;
-    if(!rbe_snap_ring_store(h->ring,tick,blob,size)){std::free(blob);return 0;}return 1;
+    return store_pages(h->ring,tick);
 }
 int vb_rollback_history_load(VbRollbackHistory* h,uint32_t tick) {
     if(!h)return 0;
-    size_t size=0;const auto* blob=rbe_snap_ring_peek(h->ring,tick,&size);
-    return blob && restore_impl(blob,size,true,true);
+    return load_pages(h->ring.peek(tick));
 }
-int vb_rollback_history_has(const VbRollbackHistory* h,uint32_t tick){return h && rbe_snap_ring_has(h->ring,tick);}
+int vb_rollback_history_has(const VbRollbackHistory* h,uint32_t tick){return h && h->ring.peek(tick);}
 int vb_rollback_history_oldest(const VbRollbackHistory* h,uint32_t* tick) {
-    if(!h || !tick || !rbe_snap_ring_count(h->ring))return 0;
-    *tick=rbe_snap_ring_oldest_tick(h->ring);return 1;
+    if(!h || !tick || !h->ring.count())return 0;
+    *tick=h->ring.oldest();return 1;
 }
-void vb_rollback_history_drop_after(VbRollbackHistory* h,uint32_t tick){if(h)rbe_snap_ring_drop_after(h->ring,tick);}
+void vb_rollback_history_drop_after(VbRollbackHistory* h,uint32_t tick){if(h)h->ring.drop_after(tick);}
 }
