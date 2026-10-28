@@ -15,7 +15,8 @@ file(GLOB _vb_identity_files CONFIGURE_DEPENDS
     "${VB_RUNTIME_DIR}/src/*.c" "${VB_RUNTIME_DIR}/src/*.cpp"
     "${VB_RUNTIME_DIR}/src/*.h" "${VB_RUNTIME_DIR}/src/*.inc"
     "${VB_RUNTIME_DIR}/include/*.h" "${VB_RUNTIME_DIR}/include/blip/*.h")
-list(APPEND _vb_identity_files "${VB_RUNTIME_DIR}/../cmake/CompilerProfiles.cmake")
+get_filename_component(_vb_profile_policy "${VB_RUNTIME_DIR}/../cmake/CompilerProfiles.cmake" ABSOLUTE)
+list(APPEND _vb_identity_files "${_vb_profile_policy}")
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${_vb_identity_files})
 set(_vb_identity "${CMAKE_SYSTEM_NAME};${CMAKE_SYSTEM_PROCESSOR};${CMAKE_SIZEOF_VOID_P};${CMAKE_C_COMPILER_ID};${CMAKE_C_COMPILER_VERSION};${CMAKE_C_FLAGS};${CMAKE_C_FLAGS_RELEASE};${CMAKE_CXX_COMPILER_ID};${CMAKE_CXX_COMPILER_VERSION};${CMAKE_CXX_FLAGS};${CMAKE_CXX_FLAGS_RELEASE};${CMAKE_BUILD_TYPE};${VBRECOMP_CPUHOOK};${VBRECOMP_DEBUG_TOOLS}")
 string(APPEND _vb_identity ";netplay=${VBRECOMP_NETPLAY};ice=${RNET_ENABLE_ICE}")
