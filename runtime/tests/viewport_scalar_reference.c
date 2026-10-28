@@ -12,5 +12,8 @@
 #define vb_viewport_width ref_viewport_width
 #define vb_viewport_capture ref_viewport_capture
 #define vb_viewport_draw_inputs ref_viewport_draw_inputs
+#define vb_viewport_capture_costs ref_viewport_capture_costs
+#define vb_viewport_invalidate_capture_revisions ref_viewport_invalidate_capture_revisions
+#define vb_viewport_tile_hash ref_viewport_tile_hash
 #define vb_viewport_render ref_viewport_render
 #include "../src/viewport.c"
