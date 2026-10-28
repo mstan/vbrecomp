@@ -21,6 +21,8 @@ int vb_state_ui_result(void); /* 0 idle, 1 success, -1 rejected */
 unsigned vb_state_ui_history_count(void);
 uint32_t vb_state_ui_selected_frame(void);
 void vb_state_ui_record(uint32_t frame);
+/* Guest-thread-only host attribution; these are not serialized UI state. */
+void vb_state_ui_preview_costs(uint64_t* renders, uint64_t* pixels);
 void vb_state_ui_sync(void);
 const uint32_t* vb_state_ui_render(int* width, int* height);
 #ifdef __cplusplus

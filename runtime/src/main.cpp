@@ -967,6 +967,10 @@ int main(int argc, char** argv) {
         vb_host_config.rewind_interval=(int)rewind_interval;
     }
     vb_state_ui_init(state_file.c_str());
+    VbStateCaptureCosts initial_capture_costs{};
+    vb_state_capture_costs(&initial_capture_costs);
+    uint64_t initial_preview_renders=0,initial_preview_pixels=0;
+    vb_state_ui_preview_costs(&initial_preview_renders,&initial_preview_pixels);
     const auto benchmark_start = std::chrono::steady_clock::now();
     const double benchmark_cpu_start = process_cpu_seconds();
     double benchmark_seconds=0, benchmark_cpu_seconds=0;
@@ -1325,15 +1329,24 @@ int main(int argc, char** argv) {
         if(cpu.frame!=benchmark_frames || benchmark_seconds<=0) return 7;
         uint8_t digest[32];char hash[65];vb_sha256_compute(vb_wram_data(),VB_WRAM_SIZE,digest);
         for(unsigned i=0;i<32;++i)std::sprintf(hash+2*i,"%02x",digest[i]);
+        VbStateCaptureCosts capture_costs{};vb_state_capture_costs(&capture_costs);
+        uint64_t preview_renders=0,preview_pixels=0;
+        vb_state_ui_preview_costs(&preview_renders,&preview_pixels);
         std::printf("VBRECOMP_BENCHMARK {\"frames\":%u,\"seconds\":%.9f,\"fps\":%.3f,"
             "\"process_cpu_seconds\":%.9f,\"cycles\":%llu,\"pc\":%u,\"wram_sha256\":\"%s\","
             "\"native_instructions\":%llu,\"interpreted_instructions\":%llu,\"fallback_instructions\":%llu,"
-            "\"presents\":%llu,\"synthesized_audio_frames\":%llu,\"host_service_iterations\":%llu,\"host_service_cycles\":%u,\"workload_scope\":\"%s\"}\n",
+            "\"presents\":%llu,\"synthesized_audio_frames\":%llu,\"host_service_iterations\":%llu,\"host_service_cycles\":%u,"
+            "\"snapshot_allocations\":%llu,\"snapshot_payload_bytes_copied\":%llu,"
+            "\"history_preview_renders\":%llu,\"history_preview_pixels\":%llu,\"workload_scope\":\"%s\"}\n",
             cpu.frame,benchmark_seconds,cpu.frame/benchmark_seconds,benchmark_cpu_seconds,
             (unsigned long long)cpu.cycles,cpu.pc,hash,(unsigned long long)vb_execution.native_instructions,
             (unsigned long long)vb_execution.interpreted,(unsigned long long)vb_execution.fallback,
             (unsigned long long)present_count,(unsigned long long)vb_vsu_total_frames(),
             (unsigned long long)host_service_iterations,(unsigned)VBRECOMP_HOST_SERVICE_CYCLES,
+            (unsigned long long)(capture_costs.allocations-initial_capture_costs.allocations),
+            (unsigned long long)(capture_costs.payload_bytes-initial_capture_costs.payload_bytes),
+            (unsigned long long)(preview_renders-initial_preview_renders),
+            (unsigned long long)(preview_pixels-initial_preview_pixels),
             measure_runtime?"uncapped-full-runtime":"headless-core");
     }
     vb_watchdog_stop();

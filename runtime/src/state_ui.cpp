@@ -43,6 +43,8 @@ int mode,slot,selected,result;
 std::string status;
 bool network_pending,network_saving;
 Thumb network_preview;
+uint64_t preview_renders,preview_pixels;
+void record_preview_cost(size_t pixels) {++preview_renders;preview_pixels+=pixels;}
 
 FILE* open_file(const fs::path& path,const char* access) {
 #ifdef _WIN32
@@ -86,6 +88,7 @@ Thumb capture() {
     int game_width=0,game_height=0;
     if(vb_game_host_video_size(-1,&game_width,&game_height)) {
         std::vector<uint32_t> pixels(size_t(game_width)*game_height);
+        record_preview_cost(pixels.size());
         if(!vb_game_host_video_render(-1,0,pixels.data(),game_width,game_height))
             throw std::runtime_error("Game preview unavailable");
         const double scale=std::min(double(TW)/game_width,double(TH)/game_height);
@@ -96,6 +99,7 @@ Thumb capture() {
         return image;
     }
     const int width=vb_renderer_present_width();std::vector<uint32_t> pixels((size_t)width*224);
+    record_preview_cost(pixels.size());
     if(vb_renderer_active())vb_renderer_present_viewport(0,width,pixels.data());
     else if(vb_recolor_active())vb_vip_render_framebuffer_recolored(0,pixels.data());
     else vb_vip_render_framebuffer(0,pixels.data());
@@ -166,6 +170,10 @@ void submit(bool save) {
 }
 }
 extern "C" {
+void vb_state_ui_preview_costs(uint64_t* renders,uint64_t* pixels) {
+    if(renders)*renders=preview_renders;
+    if(pixels)*pixels=preview_pixels;
+}
 void vb_state_ui_init(const char* path) {
     vb_state_ui_shutdown();
     auto base=fs::absolute(fs::u8path(path)).parent_path();

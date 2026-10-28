@@ -41,6 +41,7 @@ uint64_t generation;
 uint8_t content[32];
 RbeSnapRing* rewind_ring;
 uint64_t rewind_revision;
+VbStateCaptureCosts capture_costs;
 void clear_rewind() {rbe_snap_ring_clear(rewind_ring);++rewind_revision;}
 struct Extension { char id[96]; void* bytes; size_t size; };
 Extension extensions[16];
@@ -178,6 +179,7 @@ uint64_t vb_state_generation(void) { return generation; }
 const uint8_t* vb_state_previous_sram(void){return previous_sram;}
 const char* vb_state_build_id(void) { return VB_STATE_BUILD_ID; }
 const uint8_t* vb_state_content_id(void) { return content; }
+void vb_state_capture_costs(VbStateCaptureCosts* out) { if(out)*out=capture_costs; }
 /* Private memory snapshots are owned immutable blobs, never file input. Their
  * integrity comes from ownership; only the strict public file/blob interface
  * accepts external data and requires a payload CRC. */
@@ -194,6 +196,7 @@ static int capture_impl(uint8_t** data, size_t* size, int presentation, bool tru
         if(!allocated) {error="Snapshot allocation failed";return 0;}
         std::memset(allocated,0,header_size);
         Stream output{allocated,nullptr,header_size};visit(output,presentation!=0);
+        ++capture_costs.allocations;capture_costs.payload_bytes+=count.offset-header_size;
         std::memcpy(allocated,"VBSTATE1",8);
         put32(allocated+8,(uint32_t)count.offset);
         put32(allocated+12,(presentation?1u:0u)|(trusted?2u:0u));

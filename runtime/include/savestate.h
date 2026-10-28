@@ -69,6 +69,12 @@ const uint8_t* vb_state_previous_sram(void);
 const char* vb_state_error(void);
 const char* vb_state_build_id(void);
 const uint8_t* vb_state_content_id(void);
+/* Host-only attribution counters, excluded from serialized execution state.
+ * Snapshot payload copies are counted once after successful allocation. */
+typedef struct VbStateCaptureCosts {
+    uint64_t allocations, payload_bytes;
+} VbStateCaptureCosts;
+void vb_state_capture_costs(VbStateCaptureCosts* out);
 /* Local history uses rbengine's owned, tick-keyed snapshot ring. */
 int vb_rewind_enable(unsigned depth);
 void vb_rewind_shutdown(void);
