@@ -1327,14 +1327,18 @@ int main(int argc, char** argv) {
 
     vb_watchdog_stop();
     if (benchmark_frames) {
-        if(cpu.frame!=benchmark_frames || benchmark_seconds<=0) return 7;
+        if(cpu.frame!=benchmark_frames || benchmark_seconds<=0) {
+            std::fprintf(stderr,"Finite runtime stopped before completion: frame=%u target=%u seconds=%.9f\n",
+                cpu.frame,benchmark_frames,benchmark_seconds);
+            return 7;
+        }
         uint8_t digest[32];char hash[65];vb_sha256_compute(vb_wram_data(),VB_WRAM_SIZE,digest);
         for(unsigned i=0;i<32;++i)std::sprintf(hash+2*i,"%02x",digest[i]);
         VbStateCaptureCosts capture_costs{};vb_state_capture_costs(&capture_costs);
         VbVipDrawCosts draw_costs{};vb_vip_draw_costs(&draw_costs);
         uint64_t preview_renders=0,preview_pixels=0;
         vb_state_ui_preview_costs(&preview_renders,&preview_pixels);
-        std::printf("VBRECOMP_BENCHMARK {\"frames\":%u,\"seconds\":%.9f,\"fps\":%.3f,"
+        const int report_bytes=std::printf("VBRECOMP_BENCHMARK {\"frames\":%u,\"seconds\":%.9f,\"fps\":%.3f,"
             "\"process_cpu_seconds\":%.9f,\"cycles\":%llu,\"pc\":%u,\"wram_sha256\":\"%s\","
             "\"native_instructions\":%llu,\"interpreted_instructions\":%llu,\"fallback_instructions\":%llu,"
             "\"presents\":%llu,\"synthesized_audio_frames\":%llu,\"host_service_iterations\":%llu,\"host_service_cycles\":%u,"
@@ -1361,6 +1365,12 @@ int main(int argc, char** argv) {
             (unsigned long long)(draw_costs.materialized-initial_draw_costs.materialized),
             (unsigned long long)(draw_costs.overwritten-initial_draw_costs.overwritten),
             measure_runtime?"uncapped-full-runtime":"headless-core");
+        // The finite-run contract requires a durable result before frontend,
+        // audio and allocator teardown. Treat an output error as a failed run.
+        if(report_bytes<0 || std::fflush(stdout)!=0) {
+            std::fputs("Finite runtime report could not be written.\n",stderr);
+            return 9;
+        }
     }
     vb_watchdog_stop();
     vb_netplay_stop();
