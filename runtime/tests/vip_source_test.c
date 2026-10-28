@@ -1,6 +1,10 @@
 /* Exercise the real rasterizer with synthetic CHR; no game ROM required. */
 #include <assert.h>
 #include <stdio.h>
+#include <stdlib.h>
+#ifdef VB_TEST_COMPACT_SOURCE
+#define VB_COMPACT_PROVENANCE 1
+#endif
 #include "../src/vip.c"
 static int tracking=1;
 int vb_renderer_tracks_texels(void) {return tracking;}
@@ -14,6 +18,9 @@ static uint8_t left[0x6000],right[0x6000],baseline[0x6000],baseline_right[0x6000
 static void setup(unsigned mode,unsigned flips,int diagonal) {
     memset(s_vip_mem,0,sizeof(s_vip_mem));
     memset(s_source_fb,0,sizeof(s_source_fb));
+#if VB_COMPACT_PROVENANCE
+    source_invalidate();
+#endif
     memset(s_attr_fb,0,sizeof(s_attr_fb));
     s_attr_on=1;s_drawing_fb=0;s_display_fb=1;s_bkcol=2;
     for(int p=0;p<4;++p)for(int v=0;v<4;++v)s_gplt_cache[p][v]=s_jplt_cache[p][v]=(uint8_t)v;
@@ -32,6 +39,9 @@ static void setup(unsigned mode,unsigned flips,int diagonal) {
         s_spt[3]=1;s_spt[2]=0;
         uint16_t* o=&bgm[(0x1e000+8)/2];o[0]=3;o[1]=0xc001;o[2]=0;o[3]=1|flips;
     }
+    /* Synthetic setup writes canonical arrays directly rather than using the
+     * guest bus; invalidate derived capture caches after those fixture edits. */
+    capture_versions_reset();
 }
 static int viewport_scene(const VbViewportScene* scene, void* context) {
     (void)scene; (void)context; return 1;
@@ -357,6 +367,49 @@ static void viewport_tests(void) {
     puts("PASS: VIP viewport replay, source identity, both eyes, edge recovery, snapshot lifetime and aspect sizing");
 }
 
+#if VB_COMPACT_PROVENANCE
+typedef struct SourceIO {uint8_t* bytes;size_t offset;unsigned pages;int reading;} SourceIO;
+static void source_field(void* context,void* bytes,size_t n) {
+    SourceIO* s=context;
+    if(s->bytes){if(s->reading)memcpy(bytes,s->bytes+s->offset,n);else memcpy(s->bytes+s->offset,bytes,n);}
+    s->offset+=n;
+}
+static void source_page(void* context,const void* bytes,size_t n,uint64_t token) {
+    SourceIO* s=context;assert(n==4096 && token);++s->pages;source_field(context,(void*)bytes,n);
+}
+static void compact_state_test(void) {
+    vip_materialize_all();tracking=1;s_attr_on=1;
+    for(unsigned slot=0;slot<2;++slot)for(unsigned eye=0;eye<2;++eye)for(unsigned i=0;i<384*224;++i) {
+        VbSourceTexel v={0};v.tile_hash=i*2654435761u+slot*31+eye;v.x=(uint16_t)(i*23);v.y=(uint16_t)(i*47);
+        v.kind=i%5;v.raw=i&3;v.world=i%33;
+        if(v.kind<3){v.tile=i&2047;v.u=i&7;v.v=(i>>3)&7;v.map=(i>>7)&15;}
+        else{v.tile=(uint16_t)i;v.map=255;if(v.kind==3){v.u=(uint8_t)v.x;v.v=(uint8_t)v.y;}}
+        s_source_fb[slot][eye][i]=v;
+    }
+    void* expected=malloc(sizeof(s_source_fb));assert(expected);memcpy(expected,s_source_fb,sizeof(s_source_fb));
+    source_invalidate();
+    const size_t capacity=sizeof(s_attr_fb)+sizeof(packed_source_fb)+sizeof(s_obj_suppress);
+    uint8_t* blob=malloc(capacity);assert(blob);SourceIO saved={blob,0,0,0};
+    vb_vip_presentation_visit(source_field,&saved);assert(saved.offset==capacity);
+    uint64_t tokens[2][2][28][SOURCE_BLOCK_PAGES];memcpy(tokens,source_tokens,sizeof(tokens));
+    SourceIO page_check={0};vb_vip_presentation_visit_pages(source_field,source_page,&page_check);
+    assert(page_check.pages==1008 && page_check.offset==capacity && !memcmp(tokens,source_tokens,sizeof(tokens)));
+    s_source_fb[0][0][0].tile_hash^=1;SOURCE_CHANGED(0,0,0);
+    page_check=(SourceIO){0};vb_vip_presentation_visit_pages(source_field,source_page,&page_check);
+    assert(source_tokens[0][0][0][0]!=tokens[0][0][0][0]);
+    for(unsigned i=1;i<1008;++i)assert(((uint64_t*)source_tokens)[i]==((uint64_t*)tokens)[i]);
+    const uint64_t before_load=capture_revision_clock;
+    SourceIO load={blob,0,0,1};vb_vip_presentation_visit(source_field,&load);source_state_loaded();
+    assert(load.offset==capacity && !memcmp(expected,s_source_fb,sizeof(s_source_fb)));
+    page_check=(SourceIO){0};vb_vip_presentation_visit_pages(source_field,source_page,&page_check);
+    for(unsigned i=0;i<1008;++i)assert(((uint64_t*)source_tokens)[i]>before_load);
+    capture_revision_clock=UINT64_MAX;source_invalidate();
+    page_check=(SourceIO){0};vb_vip_presentation_visit_pages(source_field,source_page,&page_check);
+    assert(!page_check.pages && page_check.offset==capacity);
+    free(blob);free(expected);
+    puts("PASS: compact native presentation roundtrip, exact changed-page revisions, no reuse after load and hash fallback at exhaustion");
+}
+#endif
 int main(void) {
     for(unsigned mode=0;mode<4;++mode)for(unsigned flip=0;flip<4;++flip)for(int diagonal=0;diagonal<2;++diagonal) {
         setup(mode,flip<<12,diagonal);
@@ -442,6 +495,9 @@ int main(void) {
     assert(!vb_vip_native_pending && s_native_materialized==materialized+1);
     assert(vb_vip_read8(64*3)==0x77);
     puts("PASS: eager native drawing control executes immediately with viewport tracking enabled");
+#endif
+#if VB_COMPACT_PROVENANCE
+    compact_state_test();
 #endif
     return 0;
 }

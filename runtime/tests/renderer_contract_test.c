@@ -1,6 +1,7 @@
 #include "renderer.h"
 #include "viewport.h"
 #include "vip.h"
+#include "../src/source_codec.h"
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
@@ -10,6 +11,7 @@
 
 static unsigned legacy_calls,fused_calls,callback_calls;
 static unsigned local_calls,streamed_calls;
+static unsigned viewport_epoch;
 static int viewport_local;
 static uint32_t* viewport_destination;
 static uint16_t worlds[VB_VIEWPORT_MAX_WIDTH*224];
@@ -28,7 +30,7 @@ void vb_viewport_reset(void){viewport_local=0;}
 int vb_viewport_can_stream_rows(void){return viewport_local;}
 int vb_viewport_render(int slot,int eye,int width,uint32_t* out,uint8_t* levels,uint16_t* ws,VbSourceTexel* ss){
     assert(slot==1);viewport_destination=out;
-    for(unsigned i=0;i<(unsigned)width*224;++i){out[i]=pixel(i,eye);levels[i]=i&3;ws[i]=i%33;ss[i].tile_hash=i;}
+    for(unsigned i=0;i<(unsigned)width*224;++i){unsigned n=i+viewport_epoch;out[i]=pixel(n,eye);levels[i]=n&3;ws[i]=n%33;ss[i].tile_hash=n;}
     return 1;
 }
 int vb_viewport_render_local_pixels(int slot,int eye,int width,uint32_t* out,uint8_t* levels,
@@ -38,10 +40,23 @@ int vb_viewport_render_local_pixels(int slot,int eye,int width,uint32_t* out,uin
     for(unsigned y=0;y<224;++y) {
         unsigned at=y*width;
         for(int x=0;x<width;++x) {
-            unsigned i=at+x;out[i]=stock[x]=pixel(i,eye);levels[i]=i&3;ws[i]=i%33;ss[i].tile_hash=i;
+            unsigned i=at+x,n=i+viewport_epoch;out[i]=stock[x]=pixel(n,eye);levels[i]=n&3;ws[i]=n%33;ss[i].tile_hash=n;
         }
         VbRenderFrame row={47,eye,stock,levels+at,ws+at,ss+at,width,1};
         callback(&row,out+at,context);
+    }
+    return 1;
+}
+int vb_viewport_render_packed_sources(int slot,int eye,int width,uint32_t* out,uint8_t* levels,
+    uint16_t* ws,VbSourceTexel* ss,VbPackedSourceTexel* packed,VbSourceTexel* full,VbRenderCallback callback,void* context) {
+    assert(slot==1 && viewport_local);++streamed_calls;viewport_destination=out;
+    uint32_t stock[VB_VIEWPORT_MAX_WIDTH];
+    for(unsigned y=0;y<224;++y) {
+        unsigned at=(y%8)*width,screen=y*width;
+        for(int x=0;x<width;++x){unsigned n=screen+x+viewport_epoch;out[screen+x]=stock[x]=pixel(n,eye);levels[at+x]=n&3;ws[at+x]=n%33;ss[at+x]=(VbSourceTexel){0};ss[at+x].tile_hash=n;}
+        VbRenderFrame row={47,eye,stock,levels+at,ws+at,ss+at,width,1};callback(&row,out+screen,context);
+        if(full)memcpy(full+screen,ss+at,width*sizeof(*full));
+        else for(int x=0;x<width;++x)packed[screen+x]=vb_source_pack(ss[at+x]);
     }
     return 1;
 }
@@ -73,7 +88,22 @@ static void render(const VbRenderFrame* frame,uint32_t* out,void* context){
     for(unsigned i=0;i<n;++i)assert(frame->stock_argb[i]==pixel(i,frame->eye));
     ++callback_calls;
 }
-int main(void){
+int main(int argc,char** argv){
+    (void)argv;
+    if(argc>1) {
+        vb_renderer_track_texels();viewport_local=1;
+        assert(vb_renderer_register_local_pixels("compact-first",render_local,&local_calls));
+        assert(vb_renderer_present_viewport(0,512,output));
+        unsigned calls=local_calls;viewport_epoch=1000;
+        const VbSourceTexel* held=vb_renderer_present_sources(0,512);
+        assert(local_calls==calls);
+        for(unsigned i=0;i<512*224;++i)assert(held[i].tile_hash==i);
+        assert(vb_renderer_present_viewport(1,398,output));
+        assert(held==vb_renderer_present_sources(1,398));
+        for(unsigned i=0;i<398*224;++i)assert(held[i].tile_hash==i+1000);
+        assert(held[398*224+5].tile_hash==398*224+5);
+        puts("PASS: delayed source materialization preserves last frame without callback replay; published pointer and old tails stay live");return 0;
+    }
     vb_renderer_track_texels();
     for(int eye=0;eye<2;++eye){
         vb_renderer_present(eye,output);

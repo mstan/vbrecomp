@@ -1,6 +1,7 @@
 #include "renderer.h"
 #include "vip.h"
 #include "viewport.h"
+#include "source_codec.h"
 #include <string.h>
 
 static VbRenderCallback s_render;
@@ -12,6 +13,9 @@ static int s_local_pixels;
 static uint32_t native_stock[VB_RENDER_PIXELS];
 #ifndef VB_STREAM_SHADING
 #define VB_STREAM_SHADING 1
+#endif
+#ifndef VB_COMPACT_PROVENANCE
+#define VB_COMPACT_PROVENANCE 0
 #endif
 void vb_renderer_track_texels(void) { s_track_texels = s_track_worlds = 1; }
 int vb_renderer_tracks_texels(void) { return s_track_texels; }
@@ -80,13 +84,41 @@ static uint32_t view_stock[VB_VIEWPORT_MAX_WIDTH * VB_RENDER_HEIGHT];
 static uint8_t view_levels[VB_VIEWPORT_MAX_WIDTH * VB_RENDER_HEIGHT];
 static uint16_t view_worlds[VB_VIEWPORT_MAX_WIDTH * VB_RENDER_HEIGHT];
 static VbSourceTexel view_sources[VB_VIEWPORT_MAX_WIDTH * VB_RENDER_HEIGHT];
+#if VB_COMPACT_PROVENANCE
+static VbPackedSourceTexel packed_view_sources[VB_VIEWPORT_MAX_WIDTH*VB_RENDER_HEIGHT];
+static VbSourceTexel row_sources[VB_VIEWPORT_MAX_WIDTH*8];
+static uint8_t row_levels[VB_VIEWPORT_MAX_WIDTH*8];
+static uint16_t row_worlds[VB_VIEWPORT_MAX_WIDTH*8];
+/* A full source pointer, once published, remains live as it did previously.
+ * Last-present compact records retain exact data even if guest state changes
+ * before the first getter. Compatibility materialization never replays guests
+ * or calls arbitrary providers/shaders a second time. */
+static int view_sources_published,view_sources_compact;
+static void require_full_view_sources(void) {
+    if(!view_sources_published && view_sources_compact)
+        for(unsigned i=0;i<VB_VIEWPORT_MAX_WIDTH*VB_RENDER_HEIGHT;++i)view_sources[i]=vb_source_unpack(packed_view_sources[i]);
+    view_sources_published=1;view_sources_compact=0;
+}
+#endif
 int vb_renderer_present_width(void) { return vb_viewport_width(); }
 int vb_renderer_present_viewport(int eye, int width, uint32_t* argb) {
     if (!argb) return 0;
     if (width == VB_RENDER_WIDTH) { vb_renderer_present(eye, argb); return 1; }
-    if(VB_STREAM_SHADING && s_render && s_local_pixels && vb_viewport_active() && vb_viewport_can_stream_rows())
+    if(VB_STREAM_SHADING && s_render && s_local_pixels && vb_viewport_active() && vb_viewport_can_stream_rows()) {
+#if VB_COMPACT_PROVENANCE
+        int result=vb_viewport_render_packed_sources(vb_vip_display_fb()&1,eye,width,argb,
+            row_levels,row_worlds,row_sources,view_sources_published?0:packed_view_sources,
+            view_sources_published?view_sources:0,s_render,s_context);
+        if(result)view_sources_compact=!view_sources_published;
+        return result;
+#else
         return vb_viewport_render_local_pixels(vb_vip_display_fb()&1,eye,width,argb,
             view_levels,view_worlds,view_sources,s_render,s_context);
+#endif
+    }
+#if VB_COMPACT_PROVENANCE
+    require_full_view_sources();
+#endif
     uint32_t* stock=s_render ? view_stock:argb;
     if (!vb_viewport_active() || !vb_viewport_render(vb_vip_display_fb() & 1,
         eye, width, stock, view_levels, view_worlds, view_sources)) return 0;
@@ -99,5 +131,8 @@ int vb_renderer_present_viewport(int eye, int width, uint32_t* argb) {
     return 1;
 }
 const VbSourceTexel* vb_renderer_present_sources(int eye, int width) {
+#if VB_COMPACT_PROVENANCE
+    if(width!=VB_RENDER_WIDTH)require_full_view_sources();
+#endif
     return width == VB_RENDER_WIDTH ? vb_vip_source_buffer(eye) : view_sources;
 }

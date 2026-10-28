@@ -20,4 +20,5 @@
 #define vb_viewport_tile_hash ref_viewport_tile_hash
 #define vb_viewport_render ref_viewport_render
 #define vb_viewport_render_local_pixels ref_viewport_render_local_pixels
+#define vb_viewport_render_packed_sources ref_viewport_render_packed_sources
 #include "../src/viewport.c"
