@@ -27,7 +27,6 @@ int vb_viewport_tile_hash(const uint16_t* chars,unsigned tile,uint32_t* hash);
 /* Capture only. Tokens belong to stable canonical frozen-bank addresses and
  * are not serialized. A normal visitor remains the complete fallback. */
 typedef void (*VbVersionedStateVisit)(void*,const void*,size_t,uint64_t);
-void vb_vip_presentation_visit_pages(VbStateVisit,VbVersionedStateVisit,void*);
 void vb_viewport_state_visit_pages(VbStateVisit,VbVersionedStateVisit,void*);
 #ifdef __cplusplus
 }

@@ -17,8 +17,6 @@ set_source_files_properties("${VB_RUNTIME_DIR}/src/savestate.cpp" PROPERTIES
     COMPILE_DEFINITIONS "VB_STATE_BUILD_ID=\"$<TARGET_PROPERTY:VB_STATE_ID>:$<CONFIG>\"")
 
 function(vb_add_runtime_target TARGET)
-    set_source_files_properties("${VB_RUNTIME_DIR}/src/vip.c" PROPERTIES
-        COMPILE_DEFINITIONS "VB_COMPACT_PROVENANCE=$<BOOL:${VBRECOMP_COMPACT_PROVENANCE}>")
     set_source_files_properties("${VB_RUNTIME_DIR}/src/renderer.c" PROPERTIES
         COMPILE_DEFINITIONS "VB_STREAM_SHADING=$<BOOL:${VBRECOMP_STREAM_SHADING}>")
     set_source_files_properties("${VB_RUNTIME_DIR}/src/memory.c" PROPERTIES

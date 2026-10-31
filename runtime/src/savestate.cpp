@@ -104,11 +104,7 @@ void visit(Stream& s, bool presentation) {
         field(&s,e.span.bytes,e.span.size);
     }
     if (presentation) {
-#if VB_VERSIONED_HISTORY
-        vb_vip_presentation_visit_pages(field,s.page_output?versioned_field:nullptr,&s);
-#else
-        vb_vip_presentation_visit(field,&s);
-#endif
+        vb_vip_presentation_visit(field, &s);
 #if VB_VERSIONED_HISTORY
         if(s.page_output)vb_viewport_state_visit_pages(field,versioned_field,&s);
         else

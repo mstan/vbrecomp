@@ -1,8 +1,4 @@
 #include "savestate.h"
-#include "source_codec.h"
-#ifndef VB_COMPACT_PROVENANCE
-#define VB_COMPACT_PROVENANCE 0
-#endif
 /* vip.c — Virtual Image Processor.
  *
  * The VIP exposes its character RAM, BG cell maps, OBJ tables, world
@@ -387,49 +383,6 @@ static uint16_t s_attr_val;                   /* world+1 of the world being draw
 static uint16_t s_attr_row[2][8 * 512];
 static VbSourceTexel s_source_row[2][8 * 512];
 static VbSourceTexel s_source_fb[2][2][384 * 224];
-#if VB_COMPACT_PROVENANCE
-enum {SOURCE_BLOCK_TEXELS=384*8,SOURCE_BLOCK_PAGES=9};
-static VbPackedSourceTexel packed_source_fb[2][2][384*224];
-static uint32_t source_dirty[2][2];
-static uint64_t source_tokens[2][2][28][SOURCE_BLOCK_PAGES];
-static void source_invalidate(void) {
-    memset(source_tokens,0,sizeof(source_tokens));
-    for(unsigned slot=0;slot<2;++slot)for(unsigned eye=0;eye<2;++eye)source_dirty[slot][eye]=(1u<<28)-1;
-}
-static void source_flush(void) {
-    static VbPackedSourceTexel block[SOURCE_BLOCK_TEXELS];
-    _Static_assert(sizeof(block)==SOURCE_BLOCK_PAGES*4096,"Provenance block page boundaries changed");
-    for(unsigned slot=0;slot<2;++slot)for(unsigned eye=0;eye<2;++eye) {
-        uint32_t dirty=source_dirty[slot][eye];
-        for(unsigned row=0;row<28;++row)if(dirty&(1u<<row)) {
-            const VbSourceTexel* in=s_source_fb[slot][eye]+row*SOURCE_BLOCK_TEXELS;
-            for(unsigned i=0;i<SOURCE_BLOCK_TEXELS;++i)block[i]=vb_source_pack(in[i]);
-            uint8_t* out=(uint8_t*)(packed_source_fb[slot][eye]+row*SOURCE_BLOCK_TEXELS);
-            for(unsigned page=0;page<SOURCE_BLOCK_PAGES;++page) {
-                const uint8_t* bytes=(const uint8_t*)block+page*4096;
-                uint64_t* token=&source_tokens[slot][eye][row][page];
-                if(!*token || memcmp(out+page*4096,bytes,4096)) {
-                    memcpy(out+page*4096,bytes,4096);
-#if VB_VERSIONED_CAPTURE
-                    *token=next_capture_revision();
-#else
-                    *token=0;
-#endif
-                }
-            }
-        }
-        source_dirty[slot][eye]=0;
-    }
-}
-static void source_state_loaded(void) {
-    if(vb_renderer_tracks_texels())for(unsigned slot=0;slot<2;++slot)for(unsigned eye=0;eye<2;++eye)
-        for(unsigned i=0;i<384*224;++i)s_source_fb[slot][eye][i]=vb_source_unpack(packed_source_fb[slot][eye][i]);
-    source_invalidate();
-}
-#define SOURCE_CHANGED(slot,eye,row) (source_dirty[slot][eye]|=1u<<(row))
-#else
-#define SOURCE_CHANGED(slot,eye,row) ((void)0)
-#endif
 static uint32_t s_source_hash[2048];
 static uint8_t s_source_hashed[2048];
 static uint8_t s_source_map, s_source_kind;
@@ -476,9 +429,6 @@ void vb_vip_init(void) {
     memset(s_vip_mem, 0, sizeof(s_vip_mem));
     capture_versions_reset();
     memset(s_source_fb, 0, sizeof(s_source_fb));
-#if VB_COMPACT_PROVENANCE
-    source_invalidate();
-#endif
     vb_vip_phase_reset();
     vb_wram_hash_reset();
     /* Beetle VIP_Power (vip.c:399). */
@@ -935,7 +885,6 @@ void vb_vip_record_cpu_write(uint32_t addr, uint32_t value, unsigned width, uint
                 source.map = 255; source.kind = 4; source.raw = pixel;
             }
             s_source_fb[slot][eye][i] = source;
-            SOURCE_CHANGED(slot,eye,y/8);
         }
     }
 }
@@ -1436,7 +1385,6 @@ static void vip_draw_block_inputs(uint8_t block_no,unsigned slot,
                             s_source_row[lr][PAD_LEFT + x + 512 * row];
                 }
             }
-            if(s_draw_texels)SOURCE_CHANGED(slot,lr,block_no);
         }
     }
 }
@@ -2012,25 +1960,9 @@ void vb_vip_state_visit(VbStateVisit visit, void* context) {
     visit(context, &s_vip_frame_seq, sizeof(s_vip_frame_seq));
 }
 void vb_vip_presentation_visit(VbStateVisit visit, void* context) {
-    vb_vip_presentation_visit_pages(visit,0,context);
-}
-void vb_vip_presentation_visit_pages(VbStateVisit visit,VbVersionedStateVisit frozen,void* context) {
     vip_materialize_all();
     if (s_attr_on) visit(context, s_attr_fb, sizeof(s_attr_fb));
-    if (vb_renderer_tracks_texels()) {
-#if VB_COMPACT_PROVENANCE
-        source_flush();
-        if(frozen)for(unsigned slot=0;slot<2;++slot)for(unsigned eye=0;eye<2;++eye)
-            for(unsigned row=0;row<28;++row)for(unsigned page=0;page<SOURCE_BLOCK_PAGES;++page) {
-                uint8_t* bytes=(uint8_t*)(packed_source_fb[slot][eye]+row*SOURCE_BLOCK_TEXELS)+page*4096;
-                uint64_t token=source_tokens[slot][eye][row][page];
-                if(token)frozen(context,bytes,4096,token);else visit(context,bytes,4096);
-            }
-        else visit(context,packed_source_fb,sizeof(packed_source_fb));
-#else
-        (void)frozen;visit(context,s_source_fb,sizeof(s_source_fb));
-#endif
-    }
+    if (vb_renderer_tracks_texels()) visit(context, s_source_fb, sizeof(s_source_fb));
     visit(context, s_obj_suppress, sizeof(s_obj_suppress));
 }
 int vb_vip_state_valid(void) {
@@ -2049,9 +1981,6 @@ int vb_vip_state_valid(void) {
     return 1;
 }
 void vb_vip_state_loaded(void) {
-#if VB_COMPACT_PROVENANCE
-    source_state_loaded();
-#endif
     capture_versions_reset();
     vb_vip_native_rows[0]=vb_vip_native_rows[1]=0;
     vb_vip_native_pending=0;
