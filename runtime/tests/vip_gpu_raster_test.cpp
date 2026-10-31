@@ -2,6 +2,7 @@
  * actual GPU pixels to the existing portable VIP jobs at native density. */
 #include "../src/vip_gpu_raster.h"
 #include "viewport.h"
+#include "red_lut.h"
 #include <SDL.h>
 #include <cassert>
 #include <cstdio>
@@ -13,12 +14,13 @@ uint32_t vb_vip_frame_seq(void){return 1;}
 uint32_t vb_vip_raster_bitmap_rows(int){return 0;}
 const uint8_t* vb_vip_raster_bitmap(int,int,uint64_t*){return nullptr;}
 void vb_vip_column_argb(int eye,uint32_t colors[96][4]) {
-    for(unsigned x=0;x<96;++x)for(unsigned v=0;v<4;++v)colors[x][v]=0xff000000u|((x*13+v*37+eye*17)&255)<<16|v*51<<8|v*29;
+    for(unsigned x=0;x<96;++x)for(unsigned v=0;v<4;++v)colors[x][v]=0xff000000u|((x*13+v*37+eye*17)&255)<<16;
 }
 }
 static unsigned seed=0x27f1aa31;
 static unsigned random_value(){seed^=seed<<13;seed^=seed>>17;seed^=seed<<5;return seed;}
-int main() {
+int main(int argc,char** argv) {
+    const bool palette_only=argc==2 && !std::strcmp(argv[1],"--palette-only");assert(argc==1 || palette_only);
     assert(SDL_Init(SDL_INIT_VIDEO)==0);
     SDL_Window* window=SDL_CreateWindow("Hidden VIP raster readback",0,0,768,448,SDL_WINDOW_OPENGL|SDL_WINDOW_HIDDEN);assert(window);
     VbVipGpuRaster gpu;
@@ -33,7 +35,7 @@ int main() {
     std::vector<uint8_t> reference_levels(384*224);
     std::vector<uint16_t> reference_worlds(384*224);std::vector<VbSourceTexel> reference_sources(384*224);
     vb_viewport_track();
-    for(unsigned scene=0;scene<6;++scene) {
+    for(unsigned scene=0;scene<(palette_only?1u:6u);++scene) {
         for(auto& v:dram)v=(uint16_t)random_value();for(auto& v:chars)v=(uint16_t)random_value();
         for(auto& v:bitmap)v=(uint8_t)random_value();
         for(int p=0;p<4;++p)for(int i=0;i<4;++i){gplt[p][i]=random_value()&3;jplt[p][i]=random_value()&3;}
@@ -51,7 +53,10 @@ int main() {
         for(int eye=0;eye<2;++eye) {
             assert(vb_vip_raster_prepare(frame.banks,eye,bitmap_rows,jobs[eye].data(),VB_VIP_RASTER_JOB_LIMIT,&frame.counts[eye]));
             frame.jobs[eye]=jobs[eye].data();frame.bitmaps[eye]=bitmap.data();frame.bitmap_revision[eye]=0;
-            vb_vip_column_argb(eye,frame.colors[eye]);
+            frame.stock_colors(eye);
+            uint32_t raw[96][4];vb_vip_column_argb(eye,raw);
+            for(unsigned x=0;x<96;++x)for(unsigned v=0;v<4;++v)assert(frame.colors[eye][x][v]==vb_red_lut_map((raw[x][v]>>16)&255));
+            if(vb_red_lut_active_kind()==VB_SCREEN_LED_WARM)assert(vb_red_lut_map(255)==0xffff1900u);
             assert(vb_vip_raster_cpu(frame.banks,frame.jobs[eye],frame.counts[eye],eye,bitmap.data(),levels.data()));
             if(scene!=5){
                 assert(vb_viewport_render(0,eye,384,reference.data(),reference_levels.data(),reference_worlds.data(),reference_sources.data()));
@@ -62,10 +67,10 @@ int main() {
         }
         // Full requested densities use the same frame/jobs and bounded tile;
         // no CPU enhanced framebuffer is created or uploaded.
-        assert(gpu.present(frame,true,scene==0?16:scene==1?32:scene==2?64:1,768,448,false));
+        assert(gpu.present(frame,true,palette_only?1:scene==0?16:scene==1?32:scene==2?64:1,768,448,false));
     }
-    auto costs=gpu.costs();assert(costs.frames==6);
+    auto costs=gpu.costs();assert(costs.frames==(palette_only?1u:6u));
     std::printf("VIP_GPU_COMPONENT frames=%llu upload_bytes=%llu timed_frames=%llu gpu_ns=%llu timer_pending=%llu\n",(unsigned long long)costs.frames,(unsigned long long)costs.upload_bytes,(unsigned long long)costs.timed_frames,(unsigned long long)costs.gpu_nanoseconds,(unsigned long long)costs.timer_pending);
     gpu.reset();SDL_DestroyWindow(window);SDL_Quit();
-    std::puts("PASS: native GPU/portable VIP job pixels, normal/HBias/affine/OBJ/bitmap, both eyes; bounded16/32/64x presentation");
+    std::puts(palette_only?"PASS: active display LUT matches CPU/native GPU pixels in both eyes":"PASS: native GPU/portable VIP job pixels, normal/HBias/affine/OBJ/bitmap, both eyes; bounded16/32/64x presentation");
 }

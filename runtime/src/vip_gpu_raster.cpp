@@ -1,10 +1,16 @@
 #include "vip_gpu_raster.h"
 #include "vip.h"
+#include "red_lut.h"
 #include <algorithm>
 #include <array>
 #include <cstdio>
 #include <cstring>
 #include <vector>
+void VbVipGpuFrame::stock_colors(int eye) {
+    if((unsigned)eye>1)return;
+    vb_vip_column_argb(eye,colors[eye]);
+    for(auto& column:colors[eye])for(auto& pixel:column)pixel=vb_red_lut_map((pixel>>16)&255);
+}
 #ifndef VB_RUNTIME_HAVE_SDL
 #define VB_RUNTIME_HAVE_SDL 0
 #endif
@@ -255,7 +261,7 @@ bool VbVipGpuRaster::present_current(SDL_Window* window,int slot,bool stereo,uns
     for(int eye=0;eye<(stereo?2:1);++eye) {
         if(s.jobs[eye].size()!=VB_VIP_RASTER_JOB_LIMIT)s.jobs[eye].resize(VB_VIP_RASTER_JOB_LIMIT);
         if(!vb_vip_raster_prepare(frame.banks,eye,bitmap_rows,s.jobs[eye].data(),VB_VIP_RASTER_JOB_LIMIT,&frame.counts[eye]))return false;
-        frame.jobs[eye]=s.jobs[eye].data();vb_vip_column_argb(eye,frame.colors[eye]);
+        frame.jobs[eye]=s.jobs[eye].data();frame.stock_colors(eye);
         if(bitmap_rows)frame.bitmaps[eye]=vb_vip_raster_bitmap(slot,eye,&frame.bitmap_revision[eye]);
     }
     return present(frame,stereo,scale,width,height,vsync);

@@ -10,6 +10,7 @@ struct VbVipGpuFrame {
     const uint8_t* bitmaps[2]{};
     uint64_t bitmap_revision[2]{};
     uint32_t colors[2][96][4]{};
+    void stock_colors(int eye); /* Same active display LUT as CPU framebuffer decode. */
 };
 /* Owns an independent GL context. Never changes SDL renderer GL/cache state.
  * Sources/jobs are consumed synchronously by upload; GPU work owns resident

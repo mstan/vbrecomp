@@ -194,7 +194,7 @@ if(BUILD_TESTING)
     find_package(SDL2 QUIET)
     if(SDL2_FOUND)
         add_executable(vb-vip-gpu-raster-test runtime/tests/vip_gpu_raster_test.cpp
-            runtime/src/vip_gpu_raster.cpp runtime/src/vip_raster.c runtime/src/viewport.c)
+            runtime/src/vip_gpu_raster.cpp runtime/src/vip_raster.c runtime/src/viewport.c runtime/src/red_lut.c)
         target_include_directories(vb-vip-gpu-raster-test PRIVATE runtime/include ${SDL2_INCLUDE_DIRS})
         target_compile_definitions(vb-vip-gpu-raster-test PRIVATE SDL_MAIN_HANDLED VB_RUNTIME_HAVE_SDL=1)
         target_link_libraries(vb-vip-gpu-raster-test PRIVATE SDL2::SDL2)
