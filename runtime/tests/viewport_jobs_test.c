@@ -2,7 +2,6 @@
  * Snapshots vary between eight-row blocks; all four output planes must agree.
  */
 #include "viewport.h"
-#include "../src/source_codec.h"
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -60,11 +59,8 @@ int main(void) {
     uint8_t* al=malloc(MAX),*bl=malloc(MAX);
     uint16_t* aw=malloc(MAX*2),*bw=malloc(MAX*2);
     VbSourceTexel* as=malloc(MAX*sizeof(*as)),*bs=malloc(MAX*sizeof(*bs));
-    VbPackedSourceTexel* packed=malloc(MAX*sizeof(*packed));
-    uint8_t row_l[8*VB_VIEWPORT_MAX_WIDTH];uint16_t row_w[8*VB_VIEWPORT_MAX_WIDTH];
-    VbSourceTexel* row_s=malloc(8*VB_VIEWPORT_MAX_WIDTH*sizeof(*row_s));
     uint16_t* dram=malloc(131072),*chars=malloc(32768),spt[4]={127,255,511,1023},suppress[1024]={0};
-    assert(a&&b&&al&&bl&&aw&&bw&&as&&bs&&dram&&chars&&packed&&row_s);
+    assert(a&&b&&al&&bl&&aw&&bw&&as&&bs&&dram&&chars);
     vb_viewport_track();ref_viewport_track();
     assert(vb_viewport_register("jobs",32,9,0,classify,arrange,0));
     assert(!vb_viewport_can_stream_rows());
@@ -110,17 +106,9 @@ int main(void) {
             assert(shaded_rows==224);
             assert(!memcmp(a,b,n*4));assert(!memcmp(al,bl,n));
             assert(!memcmp(aw,bw,n*2));assert(!memcmp(as,bs,n*sizeof(*as)));
-            shaded_rows=0;
-            assert(vb_viewport_render_packed_sources(0,eye,width,b,row_l,row_w,row_s,packed,0,shade,&shaded_rows));
-            assert(shaded_rows==224 && !memcmp(a,b,n*4));
-            for(size_t i=0;i<n;++i){VbSourceTexel value=vb_source_unpack(packed[i]);assert(!memcmp(as+i,&value,sizeof(value)));}
-            shaded_rows=0;
-            assert(vb_viewport_render_packed_sources(0,eye,width,b,row_l,row_w,row_s,0,bs,shade,&shaded_rows));
-            assert(shaded_rows==224 && !memcmp(a,b,n*4) && !memcmp(as,bs,n*sizeof(*as)));
         }
     }
     free(a);free(b);free(al);free(bl);free(aw);free(bw);free(as);free(bs);free(dram);free(chars);
-    free(packed);free(row_s);
     puts("PASS: 386 scalar/job/streamed comparisons, both eyes and all output planes; mutations, wraps, flips, HBias, affine, outside callbacks and maximum width");
     return 0;
 }

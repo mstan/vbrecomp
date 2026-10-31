@@ -4,7 +4,6 @@
 #include "savestate.h"
 #include "vip.h"
 #include "draw_inputs.h"
-#include "source_codec.h"
 #include <string.h>
 #include <stddef.h>
 
@@ -239,7 +238,7 @@ void vb_viewport_capture(int slot, int row, const uint16_t* dram,
 typedef struct ViewTarget {
     const ViewBlock* block;
     const VbViewportLayout* layout;
-    int width, margin, eye, world, kind, map, y, row_base;
+    int width, margin, eye, world, kind, map, y;
     uint8_t* levels;
     uint16_t* worlds;
     VbSourceTexel* sources;
@@ -259,7 +258,7 @@ static void pixel(ViewTarget* target, int x, unsigned tile, unsigned u, unsigned
              ? rule->right_shift : rule->center_shift;
     x += target->margin;
     if (x < 0 || x >= target->width) return;
-    unsigned index = (target->y-target->row_base) * target->width + x;
+    unsigned index = target->y * target->width + x;
     target->levels[index] = object ? b->jplt[palette][raw] : b->gplt[palette][raw];
     target->worlds[index] = (uint16_t)(target->world + 1);
     if (!target->hashed[tile]) {
@@ -287,7 +286,7 @@ static void tile_row(ViewTarget* t, int x, unsigned cell, unsigned xx,
     const uint8_t* palette = t->block->gplt[cell >> 14];
     const VbViewportWorldLayout* rule = &t->layout->worlds[t->world];
     int transform = t->y >= rule->top && t->y < rule->bottom;
-    unsigned row = (t->y-t->row_base) * t->width;
+    unsigned row = t->y * t->width;
     for (unsigned i = 0; i < count; ++i) {
         unsigned u = ((xx + i) & 7) ^ flip, raw = (bits >> (u * 2)) & 3;
         if (!raw) continue;
@@ -442,7 +441,7 @@ static void extra_sprites(ViewTarget* t) {
                 unsigned raw = (artwork[v] >> (u * 2)) & 3;
                 int x = sprite->x + (int)col * 8 + ((cell & 0x2000) ? 7 - (int)u : (int)u) + t->margin;
                 if (!raw || x < 0 || x >= t->width) continue;
-                unsigned at = (t->y-t->row_base) * t->width + x;
+                unsigned at = t->y * t->width + x;
                 t->levels[at] = t->block->jplt[cell >> 14][raw];
                 t->worlds[at] = t->world + 1;
                 t->sources[at] = (VbSourceTexel){hash, u, v, tile, u, v, 255, 3, raw, t->world + 1};
@@ -453,7 +452,7 @@ static void extra_sprites(ViewTarget* t) {
 
 static int render_view(int slot, int eye, int width, uint32_t* argb,
                        uint8_t* levels, uint16_t* worlds, VbSourceTexel* sources,
-                       VbRenderCallback shade,void* context,VbPackedSourceTexel* packed,VbSourceTexel* full_view) {
+                       VbRenderCallback shade,void* context) {
     if (slot < 0 || slot > 1 || width < 384 || width > VB_VIEWPORT_MAX_WIDTH
         || (width & 1) || !argb || !levels || !worlds || !sources) return 0;
     for (int row = 0; row < 28; ++row) if (!blocks[slot][row]->valid) return 0;
@@ -466,9 +465,8 @@ static int render_view(int slot, int eye, int width, uint32_t* argb,
     vb_vip_column_argb(eye, palette);
     const uint32_t frame_seq=shade?vb_vip_frame_seq():0;
     for (int row = 0; row < 28; ++row) {
-        const int row_base=(packed||full_view)?row*8:0;
         if(shade) {
-            const unsigned at=(unsigned)(row*8-row_base)*width;
+            const unsigned at=(unsigned)row*8*width;
             memset(worlds+at,0,8*width*sizeof(*worlds));
             memset(sources+at,0,8*width*sizeof(*sources));
         }
@@ -480,10 +478,9 @@ static int render_view(int slot, int eye, int width, uint32_t* argb,
         ViewTarget target = {0};
         target.block = b; target.layout = &layout; target.width = width;
         target.margin = (width - 384) / 2 + layout.camera_shift_x; target.eye = eye != 0;
-        target.row_base=row_base;
         origins[row] = target.margin;
         target.levels = levels; target.worlds = worlds; target.sources = sources;
-        memset(levels + (row * 8-row_base) * width, b->backdrop, 8 * width);
+        memset(levels + row * 8 * width, b->backdrop, 8 * width);
         int group = 3;
         for (int world = 31; world >= 0; --world) {
             const uint16_t* w = scene.worlds + world * 16;
@@ -505,18 +502,15 @@ static int render_view(int slot, int eye, int width, uint32_t* argb,
         if(shade) {
             uint32_t stock[VB_VIEWPORT_MAX_WIDTH];
             for(int y=row*8;y<row*8+8;++y) {
-                const unsigned at=(unsigned)(y-row_base)*width;
-                const unsigned screen_at=(unsigned)y*width;
+                const unsigned at=(unsigned)y*width;
                 for(int x=0;x<width;++x) {
                     int native_x=x-origins[row];
                     unsigned group=native_x<0?0:native_x>383?95:(unsigned)native_x/4;
                     stock[x]=palette[group][levels[at+x]&3];
                 }
-                memcpy(argb+screen_at,stock,width*sizeof(*stock));
+                memcpy(argb+at,stock,width*sizeof(*stock));
                 const VbRenderFrame frame={frame_seq,eye!=0,stock,levels+at,worlds+at,sources+at,width,1};
-                shade(&frame,argb+screen_at,context);
-                if(full_view)memcpy(full_view+screen_at,sources+at,width*sizeof(*sources));
-                else if(packed)for(int x=0;x<width;++x)packed[screen_at+x]=vb_source_pack(sources[at+x]);
+                shade(&frame,argb+at,context);
             }
         }
     }
@@ -532,15 +526,10 @@ static int render_view(int slot, int eye, int width, uint32_t* argb,
 }
 int vb_viewport_render(int slot,int eye,int width,uint32_t* argb,uint8_t* levels,
                        uint16_t* worlds,VbSourceTexel* sources) {
-    return render_view(slot,eye,width,argb,levels,worlds,sources,0,0,0,0);
+    return render_view(slot,eye,width,argb,levels,worlds,sources,0,0);
 }
 int vb_viewport_render_local_pixels(int slot,int eye,int width,uint32_t* argb,uint8_t* levels,
                                     uint16_t* worlds,VbSourceTexel* sources,VbRenderCallback shade,void* context) {
     if(!shade || !vb_viewport_can_stream_rows())return 0;
-    return render_view(slot,eye,width,argb,levels,worlds,sources,shade,context,0,0);
-}
-int vb_viewport_render_packed_sources(int slot,int eye,int width,uint32_t* argb,uint8_t* levels,
-    uint16_t* worlds,VbSourceTexel* sources,VbPackedSourceTexel* packed,VbSourceTexel* full_view,VbRenderCallback shade,void* context) {
-    if(!shade || !vb_viewport_can_stream_rows() || (!packed&&!full_view))return 0;
-    return render_view(slot,eye,width,argb,levels,worlds,sources,shade,context,packed,full_view);
+    return render_view(slot,eye,width,argb,levels,worlds,sources,shade,context);
 }

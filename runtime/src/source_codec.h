@@ -21,14 +21,4 @@ static inline VbSourceTexel vb_source_unpack(VbPackedSourceTexel p) {
     else{s.tile=(uint16_t)(bits&2047);s.u=(uint8_t)((bits>>11)&7);s.v=(uint8_t)((bits>>14)&7);s.map=(uint8_t)((bits>>17)&15);}
     return s;
 }
-#ifdef __cplusplus
-extern "C" {
-#endif
-/* Private dense eight-row working planes. Exactly one retained output is
- * needed: compact records, or the already-published legacy contiguous view. */
-int vb_viewport_render_packed_sources(int,int,int,uint32_t*,uint8_t*,uint16_t*,
-    VbSourceTexel*,VbPackedSourceTexel*,VbSourceTexel*,VbRenderCallback,void*);
-#ifdef __cplusplus
-}
-#endif
 #endif
