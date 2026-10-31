@@ -1,6 +1,7 @@
 #include "renderer.h"
 #include "vip.h"
 #include "viewport.h"
+#include <stdlib.h>
 #include <string.h>
 
 static VbRenderCallback s_render;
@@ -9,9 +10,13 @@ static char s_id[96];
 static int s_track_worlds;
 static int s_track_texels;
 static int s_local_pixels;
+static void release_thumbnail(void);
 static uint32_t native_stock[VB_RENDER_PIXELS];
 #ifndef VB_STREAM_SHADING
 #define VB_STREAM_SHADING 1
+#endif
+#ifndef VB_PREVIEW_ROWS
+#define VB_PREVIEW_ROWS 1
 #endif
 void vb_renderer_track_texels(void) { s_track_texels = s_track_worlds = 1; }
 int vb_renderer_tracks_texels(void) { return s_track_texels; }
@@ -30,7 +35,7 @@ int vb_renderer_register_local_pixels(const char* id,VbRenderCallback render,voi
     if(!vb_renderer_register(id,render,context))return 0;
     s_local_pixels=1;return 1;
 }
-void vb_renderer_reset(void) { s_render = 0; s_context = 0; s_id[0] = 0; s_local_pixels=0; vb_viewport_reset(); }
+void vb_renderer_reset(void) { s_render = 0; s_context = 0; s_id[0] = 0; s_local_pixels=0; release_thumbnail(); vb_viewport_reset(); }
 int vb_renderer_active(void) { return s_render != 0 || vb_viewport_active(); }
 const char* vb_renderer_id(void) { return s_id; }
 static void apply_local_rows(const VbRenderFrame* frame,uint32_t* out) {
@@ -80,6 +85,56 @@ static uint32_t view_stock[VB_VIEWPORT_MAX_WIDTH * VB_RENDER_HEIGHT];
 static uint8_t view_levels[VB_VIEWPORT_MAX_WIDTH * VB_RENDER_HEIGHT];
 static uint16_t view_worlds[VB_VIEWPORT_MAX_WIDTH * VB_RENDER_HEIGHT];
 static VbSourceTexel view_sources[VB_VIEWPORT_MAX_WIDTH * VB_RENDER_HEIGHT];
+/* Independent scratch preserves published planes. Allocate only for an eligible
+ * preview, sized to its largest actual width, rather than charging every game
+ * for a maximum-width image. A failed growth keeps the previous cache intact. */
+static struct {
+    void* allocation;
+    size_t pixels;
+    VbSourceTexel* sources;
+    uint32_t* stock;
+    uint16_t* worlds;
+    uint8_t* levels;
+} thumbnail;
+static void release_thumbnail(void) {
+    free(thumbnail.allocation);
+    memset(&thumbnail,0,sizeof(thumbnail));
+}
+static size_t aligned_offset(size_t value,size_t alignment) {
+    return (value+alignment-1)/alignment*alignment;
+}
+static int reserve_thumbnail(int width) {
+    const size_t pixels=(size_t)width*VB_RENDER_HEIGHT;
+    if(thumbnail.pixels>=pixels)return 1;
+    const size_t stock=aligned_offset(pixels*sizeof(VbSourceTexel),_Alignof(uint32_t));
+    const size_t worlds=aligned_offset(stock+pixels*sizeof(uint32_t),_Alignof(uint16_t));
+    const size_t levels=worlds+pixels*sizeof(uint16_t);
+    uint8_t* allocation=malloc(levels+pixels);
+    if(!allocation)return 0;
+    free(thumbnail.allocation);
+    thumbnail.allocation=allocation;thumbnail.pixels=pixels;
+    thumbnail.sources=(VbSourceTexel*)allocation;
+    thumbnail.stock=(uint32_t*)(allocation+stock);
+    thumbnail.worlds=(uint16_t*)(allocation+worlds);
+    thumbnail.levels=allocation+levels;
+    return 1;
+}
+static void unmodified_pixels(const VbRenderFrame* frame,uint32_t* out,void* context) {
+    (void)frame;(void)out;(void)context; /* The shared rasterizer prefills stock. */
+}
+int vb_renderer_present_thumbnail(int eye,int width,int tw,int th,uint32_t* out) {
+    if(!VB_PREVIEW_ROWS || !VB_STREAM_SHADING || !out || (eye!=0 && eye!=1)
+       || width<=VB_RENDER_WIDTH || width>VB_VIEWPORT_MAX_WIDTH || (width&1)
+       || tw<=0 || tw>width || th<=0 || th>VB_RENDER_HEIGHT
+       || (s_render && !s_local_pixels) || !vb_viewport_can_stream_rows())return 0;
+    if(!reserve_thumbnail(width))return 0;
+    if(!vb_viewport_render_sampled_local_pixels(vb_vip_display_fb()&1,eye,width,(unsigned)th,
+        thumbnail.stock,thumbnail.levels,thumbnail.worlds,thumbnail.sources,
+        s_render?s_render:unmodified_pixels,s_context))return 0;
+    for(int y=0;y<th;++y)for(int x=0;x<tw;++x)
+        out[y*tw+x]=thumbnail.stock[(y*VB_RENDER_HEIGHT/th)*width+x*width/tw];
+    return 1;
+}
 int vb_renderer_present_width(void) { return vb_viewport_width(); }
 int vb_renderer_present_viewport(int eye, int width, uint32_t* argb) {
     if (!argb) return 0;

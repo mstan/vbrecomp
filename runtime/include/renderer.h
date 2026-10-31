@@ -64,6 +64,12 @@ int vb_renderer_apply_frame(const VbRenderFrame*,uint32_t* argb);
  * Native present() remains fixed-size for existing tools and raw comparisons. */
 int vb_renderer_present_width(void);
 int vb_renderer_present_viewport(int eye, int width, uint32_t* argb);
+/* Exact nearest-sampled thumbnail of the current viewport image, without a
+ * full-frame render. Returns zero without changing output when the current
+ * consumer/provider contracts require the original full-frame capture path.
+ * Native width retains that path to preserve CPU framebuffer ownership. */
+int vb_renderer_present_thumbnail(int eye,int width,int thumb_width,int thumb_height,
+                                  uint32_t* argb);
 const VbSourceTexel* vb_renderer_present_sources(int eye, int width);
 
 #ifdef __cplusplus

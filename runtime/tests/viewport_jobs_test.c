@@ -67,6 +67,7 @@ int main(void) {
     assert(!vb_viewport_register_row_local("collision",32,9,0,classify,arrange,0));
     assert(!vb_viewport_can_stream_rows());
     assert(!vb_viewport_render_local_pixels(0,0,384,a,al,aw,as,shade,&shaded_rows));
+    assert(!vb_viewport_render_sampled_local_pixels(0,0,384,75,a,al,aw,as,shade,&shaded_rows));
     vb_viewport_reset();
     assert(vb_viewport_register_row_local("jobs.local",32,9,0,classify,arrange,0));
     assert(ref_viewport_register("scalar",32,9,0,classify,arrange,0));
@@ -99,6 +100,24 @@ int main(void) {
             assert(ref_viewport_render(0,eye,width,b,bl,bw,bs));
             assert(!memcmp(a,b,n*4));assert(!memcmp(al,bl,n));
             assert(!memcmp(aw,bw,n*2));assert(!memcmp(as,bs,n*sizeof(*as)));
+            const unsigned heights[]={75,1,224};
+            for(unsigned h=0;h<(scene?1u:3u);++h) {
+                unsigned height=heights[h];
+                memset(b,0x51,n*4);memset(bl,0x52,n);memset(bw,0x53,n*2);memset(bs,0x54,n*sizeof(*bs));
+                shaded_rows=0;
+                assert(vb_viewport_render_sampled_local_pixels(0,eye,width,height,b,bl,bw,bs,shade,&shaded_rows));
+                assert(shaded_rows==height);
+                for(unsigned y=0;y<height;++y) {
+                    size_t at=(size_t)(y*224/height)*width;
+                    for(int x=0;x<width;++x)assert(b[at+x]==shade_value(a[at+x],al[at+x],aw[at+x],as+at+x));
+                    assert(!memcmp(al+at,bl+at,width));assert(!memcmp(aw+at,bw+at,width*2));
+                    assert(!memcmp(as+at,bs+at,width*sizeof(*as)));
+                }
+                for(unsigned y=0;y<224;++y) {
+                    int selected=0;for(unsigned j=0;j<height;++j)if(j*224/height==y)selected=1;
+                    if(!selected)for(int x=0;x<width;++x)assert(b[y*width+x]==0x51515151u && bl[y*width+x]==0x52 && bw[y*width+x]==0x5353);
+                }
+            }
             for(size_t i=0;i<n;++i)a[i]=shade_value(a[i],al[i],aw[i],as+i);
             memset(b,0x51,n*4);memset(bl,0x52,n);memset(bw,0x53,n*2);memset(bs,0x54,n*sizeof(*bs));
             shaded_rows=0;
@@ -110,5 +129,6 @@ int main(void) {
     }
     free(a);free(b);free(al);free(bl);free(aw);free(bw);free(as);free(bs);free(dram);free(chars);
     puts("PASS: 386 scalar/job/streamed comparisons, both eyes and all output planes; mutations, wraps, flips, HBias, affine, outside callbacks and maximum width");
+    puts("PASS: sampled preview rows equal independently shaded full-frame samples; 1/75/224 rows, both eyes, all metadata, untouched unrequested rows");
     return 0;
 }

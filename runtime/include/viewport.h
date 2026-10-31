@@ -85,6 +85,11 @@ int vb_viewport_render(int slot, int eye, int width, uint32_t* argb,
 /* Requires both documented local-pixel and row-local provider contracts. */
 int vb_viewport_render_local_pixels(int,int,int,uint32_t*,uint8_t*,uint16_t*,
                                    VbSourceTexel*,VbRenderCallback,void*);
+/* Private thumbnail service: produce only the rows floor(y*224/sample_height).
+ * Unselected rows in the width*224 scratch arrays remain untouched. Requires
+ * the same row-local provider and local-pixel shader promises as full streaming. */
+int vb_viewport_render_sampled_local_pixels(int,int,int,unsigned,uint32_t*,
+    uint8_t*,uint16_t*,VbSourceTexel*,VbRenderCallback,void*);
 
 /* VIP-owned observer entry points. Palette entries are decoded levels 0..3. */
 void vb_viewport_clear_frames(void);

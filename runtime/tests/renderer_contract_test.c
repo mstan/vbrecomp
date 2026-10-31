@@ -7,6 +7,9 @@
 #ifndef VB_STREAM_SHADING
 #define VB_STREAM_SHADING 1
 #endif
+#ifndef VB_PREVIEW_ROWS
+#define VB_PREVIEW_ROWS 1
+#endif
 
 static unsigned legacy_calls,fused_calls,callback_calls;
 static unsigned local_calls,streamed_calls;
@@ -46,6 +49,22 @@ int vb_viewport_render_local_pixels(int slot,int eye,int width,uint32_t* out,uin
     return 1;
 }
 static uint32_t local_value(unsigned i,int eye){return pixel(i,eye)^((i+(i%33)*17+(i&3))&0xffffff);}
+int vb_viewport_render_sampled_local_pixels(int slot,int eye,int width,unsigned height,
+        uint32_t* out,uint8_t* levels,uint16_t* ws,VbSourceTexel* ss,
+        VbRenderCallback callback,void* context) {
+    assert(slot==1 && viewport_local && height && height<=224);
+    uint32_t stock[VB_VIEWPORT_MAX_WIDTH];
+    for(unsigned y=0;y<height;++y) {
+        unsigned at=(y*224/height)*width;
+        for(int x=0;x<width;++x) {
+            unsigned i=at+x;out[i]=stock[x]=pixel(i,eye);levels[i]=i&3;
+            ws[i]=i%33;ss[i].tile_hash=i;ss[i].y=777;
+        }
+        VbRenderFrame row={47,eye,stock,levels+at,ws+at,ss+at,width,1};
+        callback(&row,out+at,context);
+    }
+    return 1;
+}
 static void render_local(const VbRenderFrame* frame,uint32_t* out,void* context) {
     assert(context==&local_calls && frame->stock_argb!=out);
     assert(frame->frame_seq==47 && (frame->height==1 || frame->height==224));
@@ -74,6 +93,9 @@ static void render(const VbRenderFrame* frame,uint32_t* out,void* context){
     ++callback_calls;
 }
 int main(void){
+    uint32_t thumbnail[128*75];memset(thumbnail,0x72,sizeof(thumbnail));
+    assert(!vb_renderer_present_thumbnail(0,384,128,75,thumbnail));
+    assert(!vb_renderer_present_thumbnail(0,512,128,75,thumbnail));
     vb_renderer_track_texels();
     for(int eye=0;eye<2;++eye){
         vb_renderer_present(eye,output);
@@ -83,6 +105,10 @@ int main(void){
     }
     assert(legacy_calls==2 && !fused_calls);
     assert(vb_renderer_register("contract",render,&callback_calls));
+    viewport_local=1;
+    assert(!vb_renderer_present_thumbnail(0,512,128,75,thumbnail));
+    for(unsigned i=0;i<128*75;++i)assert(thumbnail[i]==0x72727272u);
+    viewport_local=0;
     assert(!vb_renderer_register_local_pixels("collision",render_local,&local_calls));
     for(int eye=0;eye<2;++eye){
         for(unsigned width=384;width<=512;width+=128){
@@ -108,6 +134,19 @@ int main(void){
         for(unsigned i=0;i<512*224;++i)assert(output[i]==local_value(i,eye));
     }
     assert(streamed_calls==(VB_STREAM_SHADING?2u:0u));
+    for(int eye=0;eye<2;++eye) {
+        local_calls=0;
+        const VbSourceTexel* published=vb_renderer_present_sources(eye,512);
+        assert(published[0].y==0);
+        int ok=vb_renderer_present_thumbnail(eye,512,128,75,thumbnail);
+        assert(ok==(VB_PREVIEW_ROWS && VB_STREAM_SHADING));
+        if(ok) {
+            assert(local_calls==75);
+            for(unsigned y=0;y<75;++y)for(unsigned x=0;x<128;++x)
+                assert(thumbnail[y*128+x]==local_value((y*224/75)*512+x*512/128,eye));
+            assert(published[0].y==0); // Thumbnail scratch cannot corrupt presented metadata.
+        }
+    }
     static uint8_t raw[VB_RENDER_PIXELS];
     for(unsigned i=0;i<VB_RENDER_PIXELS;++i){output[i]=pixel(i,0);raw[i]=i&3;}
     VbRenderFrame alias={47,0,output,raw,worlds,sources,384,224};
@@ -115,4 +154,6 @@ int main(void){
     for(unsigned i=0;i<VB_RENDER_PIXELS;++i)assert(output[i]==local_value(i,0));
     puts("PASS: native fused decode, callback read-only stock/prefill and direct no-callback viewport output");
     puts("PASS: explicitly local rows, independent viewport qualification, legacy fallback, alias input and reset/registration isolation");
+    puts("PASS: exact sampled thumbnails, legacy/native fallback and preservation of published presentation planes");
+    return 0;
 }

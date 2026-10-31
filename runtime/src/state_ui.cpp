@@ -99,12 +99,19 @@ Thumb capture() {
             image[(y+(TH-h)/2)*TW+x+(TW-w)/2]=pixels[(y*game_height/h)*game_width+x*game_width/w]|0xff000000u;
         return image;
     }
-    const int width=vb_renderer_present_width();capture_pixels.assign((size_t)width*224,0);auto& pixels=capture_pixels;
+    const int width=vb_renderer_present_width();
+    Thumb image{};
+    if(vb_renderer_active() && vb_renderer_present_thumbnail(0,width,TW,TH,image.data())) {
+        record_preview_cost(size_t(width)*TH);
+        for(auto& pixel:image)pixel|=0xff000000u;
+        return image;
+    }
+    capture_pixels.assign((size_t)width*224,0);auto& pixels=capture_pixels;
     record_preview_cost(pixels.size());
     if(vb_renderer_active())vb_renderer_present_viewport(0,width,pixels.data());
     else if(vb_recolor_active())vb_vip_render_framebuffer_recolored(0,pixels.data());
     else vb_vip_render_framebuffer(0,pixels.data());
-    Thumb image{};for(int y=0;y<TH;++y)for(int x=0;x<TW;++x)
+    for(int y=0;y<TH;++y)for(int x=0;x<TW;++x)
         image[y*TW+x]=pixels[(y*224/TH)*width+x*width/TW]|0xff000000u;
     return image;
 }

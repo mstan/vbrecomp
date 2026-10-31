@@ -19,6 +19,8 @@ set_source_files_properties("${VB_RUNTIME_DIR}/src/savestate.cpp" PROPERTIES
 function(vb_add_runtime_target TARGET)
     set_source_files_properties("${VB_RUNTIME_DIR}/src/renderer.c" PROPERTIES
         COMPILE_DEFINITIONS "VB_STREAM_SHADING=$<BOOL:${VBRECOMP_STREAM_SHADING}>")
+    set_property(SOURCE "${VB_RUNTIME_DIR}/src/renderer.c" APPEND PROPERTY
+        COMPILE_DEFINITIONS "VB_PREVIEW_ROWS=$<BOOL:${VBRECOMP_PREVIEW_ROWS}>")
     set_source_files_properties("${VB_RUNTIME_DIR}/src/memory.c" PROPERTIES
         COMPILE_DEFINITIONS "VBRECOMP_NATIVE_READS=$<BOOL:${VBRECOMP_NATIVE_READS}>;VBRECOMP_NATIVE_WRITES=$<BOOL:${VBRECOMP_NATIVE_WRITES}>")
     set(options NO_GAME_LINKED)
