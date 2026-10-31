@@ -117,7 +117,16 @@ static uint32_t shift(CPUState* c, uint32_t a, unsigned sh, unsigned op) {
     }
     sz(c,r); c->psw_ov=0; return r;
 }
-void vb_interpreter_step(CPUState* c) {
+/* Inline only within this translation unit, keeping one ISA implementation.
+ * Other C11 compilers retain a functioning ordinary inline fallback. */
+#if defined(_MSC_VER)
+#define VB_INTERPRETER_INLINE static __forceinline
+#elif defined(__GNUC__) || defined(__clang__)
+#define VB_INTERPRETER_INLINE static inline __attribute__((always_inline))
+#else
+#define VB_INTERPRETER_INLINE static inline
+#endif
+VB_INTERPRETER_INLINE void interpreter_step(CPUState* c) {
     if (vb_execution_before(c)) return;
     static const uint8_t costs[64] = {
         1,1,1,1,1,1,3,1,13,38,13,36,1,1,1,1,
@@ -217,6 +226,17 @@ finish:
     if(write && r2) c->gpr[r2]=result;
     c->gpr[0]=0; c->pc=next;
 }
+void vb_interpreter_step(CPUState* c) { interpreter_step(c); }
+void vb_interpreter_run(CPUState* c, uint64_t return_pc) {
+    while(c->pc!=return_pc && !c->halted && !c->yielded
+          && vb_execution.mode==VB_EXEC_INTERPRETER) {
+        if(!c->step_budget || c->cycles>=c->cycle_deadline) { c->yielded=1;return; }
+        /* Preserve the original forced-interpreter budget charge, including
+         * a debugger stop or simulation redirect before instruction execution. */
+        --c->step_budget;interpreter_step(c);
+    }
+}
+#undef VB_INTERPRETER_INLINE
 void vb_interpreter_fallback(CPUState* c) {
     if (vb_execution.mode==VB_EXEC_NATIVE)
         vb_stub_abort("native-only dispatch miss",c->pc,c->pc);
