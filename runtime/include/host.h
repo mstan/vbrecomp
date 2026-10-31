@@ -9,6 +9,7 @@ struct VbHostPlayer {
 };
 struct VbHostConfig:VbHostPlayer {
     int scale = 2, fullscreen = 0, filter = 0, audio = 1, volume = 100;
+    int internal_scale = 1;
     int skip_launcher = 0;
     int rewind = 1, rewind_depth = 32, rewind_interval = 6;
     VbHostPlayer extra_players[3];

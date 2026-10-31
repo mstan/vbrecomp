@@ -21,4 +21,7 @@
 #define vb_viewport_render ref_viewport_render
 #define vb_viewport_render_local_pixels ref_viewport_render_local_pixels
 #define vb_viewport_render_sampled_local_pixels ref_viewport_render_sampled_local_pixels
+#define vb_viewport_raster_track ref_viewport_raster_track
+#define vb_viewport_raster_loaded ref_viewport_raster_loaded
+#define vb_viewport_raster_bank ref_viewport_raster_bank
 #include "../src/viewport.c"

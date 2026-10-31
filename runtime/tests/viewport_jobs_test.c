@@ -2,6 +2,8 @@
  * Snapshots vary between eight-row blocks; all four output planes must agree.
  */
 #include "viewport.h"
+#include "../src/vip_raster.h"
+#include "savestate.h"
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -27,6 +29,8 @@ static int outside(int x,int y,int* sx,int* sy,void* c) {
 static int cell(int x,int y,uint16_t* out,void* c) {
     (void)c;*out=(uint16_t)(x*91+y*17);return (x&7)!=1;
 }
+static size_t visited;
+static void count_visit(void* context,void* data,size_t size){(void)context;(void)data;visited+=size;}
 static unsigned scene;
 static void arrange(const VbViewportScene* s,int kind,int width,VbViewportLayout* l,void* c) {
     (void)s;(void)kind;(void)width;(void)c;
@@ -60,7 +64,20 @@ int main(void) {
     uint16_t* aw=malloc(MAX*2),*bw=malloc(MAX*2);
     VbSourceTexel* as=malloc(MAX*sizeof(*as)),*bs=malloc(MAX*sizeof(*bs));
     uint16_t* dram=malloc(131072),*chars=malloc(32768),spt[4]={127,255,511,1023},suppress[1024]={0};
+    VbVipRasterJob* native_jobs=malloc(VB_VIP_RASTER_JOB_LIMIT*sizeof(*native_jobs));
+    uint8_t* native_levels=malloc(384*224);
     assert(a&&b&&al&&bl&&aw&&bw&&as&&bs&&dram&&chars);
+    /* A GPU-only capture must leave public/history state byte streams empty. */
+    vb_viewport_raster_track();
+    {
+        uint8_t palette[4][4]={{0}};VbVipRasterBank bank;
+        memset(dram,0,131072);memset(chars,0,32768);
+        vb_viewport_capture(0,0,dram,chars,spt,palette,palette,0,suppress);
+        assert(vb_viewport_raster_bank(0,0,&bank));
+        visited=0;vb_viewport_state_visit(count_visit,0);assert(!visited);
+        vb_viewport_state_visit_pages(count_visit,0,0);assert(!visited);
+        vb_viewport_raster_loaded();assert(!vb_viewport_raster_bank(0,0,&bank));
+    }
     vb_viewport_track();ref_viewport_track();
     assert(vb_viewport_register("jobs",32,9,0,classify,arrange,0));
     assert(!vb_viewport_can_stream_rows());
@@ -100,6 +117,13 @@ int main(void) {
             assert(ref_viewport_render(0,eye,width,b,bl,bw,bs));
             assert(!memcmp(a,b,n*4));assert(!memcmp(al,bl,n));
             assert(!memcmp(aw,bw,n*2));assert(!memcmp(as,bs,n*sizeof(*as)));
+            if(width==384) {
+                VbVipRasterBank banks[28];unsigned count=0;
+                for(int row=0;row<28;++row)assert(vb_viewport_raster_bank(0,row,banks+row));
+                assert(vb_vip_raster_prepare(banks,eye,0,native_jobs,VB_VIP_RASTER_JOB_LIMIT,&count));
+                assert(vb_vip_raster_cpu(banks,native_jobs,count,eye,0,native_levels));
+                assert(!memcmp(native_levels,al,384*224));
+            }
             const unsigned heights[]={75,1,224};
             for(unsigned h=0;h<(scene?1u:3u);++h) {
                 unsigned height=heights[h];
@@ -128,6 +152,7 @@ int main(void) {
         }
     }
     free(a);free(b);free(al);free(bl);free(aw);free(bw);free(as);free(bs);free(dram);free(chars);
+    free(native_jobs);free(native_levels);
     puts("PASS: 386 scalar/job/streamed comparisons, both eyes and all output planes; mutations, wraps, flips, HBias, affine, outside callbacks and maximum width");
     puts("PASS: sampled preview rows equal independently shaded full-frame samples; 1/75/224 rows, both eyes, all metadata, untouched unrequested rows");
     return 0;

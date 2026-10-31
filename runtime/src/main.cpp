@@ -64,6 +64,7 @@ static int can_pause_session(){return !vb_netplay_enabled() && vb_game_host_can_
 #include "ring_frame.h"
 #include "timer.h"
 #include "vip.h"
+#include "vip_gpu_raster.h"
 #include "vsu.h"
 #include "watchdog.h"
 #include "wtrace.h"
@@ -71,6 +72,9 @@ static int can_pause_session(){return !vb_netplay_enabled() && vb_game_host_can_
 
 #if VB_RUNTIME_HAVE_SDL
 #  include <SDL.h>
+#  ifndef VB_GPU_RASTER
+#    define VB_GPU_RASTER 0
+#  endif
 #  include "host_controller.h"
 #  include "host_controllers.h"
 #endif
@@ -215,6 +219,7 @@ static int vb_runtime_ui_get(void* opaque, const RecompRuntimeUiItem* item, int*
              : (flags & SDL_WINDOW_FULLSCREEN) ? 2 : 0;
     } else if (std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_WINDOW_SCALE) == 0) *out = c->window_scale;
     else if (std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_LINEAR_FILTER) == 0) *out = c->linear_filter;
+    else if (std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_RESOLUTION_SCALE) == 0) *out = vb_host_config.internal_scale;
     else if (std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_AUDIO) == 0) *out = c->audio_enabled;
     else if (std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_VOLUME) == 0) *out = c->volume;
     else if (std::strcmp(item->key, "history.enabled") == 0) *out = vb_host_config.rewind;
@@ -251,6 +256,9 @@ static int vb_runtime_ui_set(void* opaque, const RecompRuntimeUiItem* item, int 
 #if SDL_VERSION_ATLEAST(2, 0, 12)
         SDL_SetTextureScaleMode(c->texture, c->linear_filter ? SDL_ScaleModeLinear : SDL_ScaleModeNearest);
 #endif
+    } else if (std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_RESOLUTION_SCALE) == 0) {
+        if(value<1 || value>64)return 0;
+        vb_host_config.internal_scale=value;
     } else if (std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_AUDIO) == 0) {
         c->audio_enabled = value != 0;
         if (c->audio) SDL_PauseAudioDevice(c->audio, c->audio_enabled ? 0 : 1);
@@ -495,6 +503,7 @@ int main(int argc, char** argv) {
     uint32_t benchmark_frames = 0;
     bool measure_runtime = false;
     int measure_window_width = 0, measure_window_height = 0;
+    int requested_internal_scale = 0;
     const char* benchmark_route_path = nullptr;
     struct BenchmarkSegment { uint32_t end; uint16_t pad; };
     std::vector<BenchmarkSegment> benchmark_route;
@@ -524,6 +533,10 @@ int main(int argc, char** argv) {
             else if(mode=="native") vb_execution.mode=VB_EXEC_NATIVE;
             else if(mode=="interpreter") vb_execution.mode=VB_EXEC_INTERPRETER;
             else { std::puts("Invalid --execution mode"); return 2; }
+        } else if (a == "--internal-resolution" && i + 1 < argc) {
+            const char* value=argv[++i];char* end=nullptr;unsigned long scale=std::strtoul(value,&end,10);
+            if(!*value || *end || *value=='-' || scale<1 || scale>64){std::puts("--internal-resolution requires1..64");return 2;}
+            requested_internal_scale=(int)scale;
         } else if (a == "--frames" && i + 1 < argc) {
             std::string count=argv[++i];
             if(count.empty() || count.find_first_not_of("0123456789")!=std::string::npos) {
@@ -620,6 +633,7 @@ int main(int argc, char** argv) {
     const int host_result = vb_host_prepare(argv[0], rom_path, headless || benchmark_frames != 0);
     if (host_result < 0) { std::puts(vb_host_error().c_str()); return 2; }
     if (host_result == 0) return 0;
+    if(requested_internal_scale)vb_host_config.internal_scale=requested_internal_scale;
     if(measure_runtime && (headless || !vb_host_config.audio)) {
         std::puts("Runtime measurement requires working SDL presentation and audio");return 3;
     }
@@ -706,6 +720,8 @@ int main(int argc, char** argv) {
     SDL_Renderer*     ren = nullptr;
     SDL_Texture*      tex = nullptr;
     SDL_Texture*      state_tex = nullptr;
+    VbVipGpuRaster gpu_raster;
+    uint64_t gpu_cpu_present_fallbacks=0;
     uint16_t menu_blocked_pad=0,previous_gesture=0;
     int held_menu_direction=0;
     Uint32 next_menu_repeat=0;
@@ -847,10 +863,12 @@ int main(int argc, char** argv) {
         runtime_ui_config.features = RECOMP_RUNTIME_UI_STANDARD_FULLSCREEN |
             RECOMP_RUNTIME_UI_STANDARD_WINDOW_SCALE |
             RECOMP_RUNTIME_UI_STANDARD_LINEAR_FILTER |
+            RECOMP_RUNTIME_UI_STANDARD_RESOLUTION_SCALE |
             RECOMP_RUNTIME_UI_STANDARD_AUDIO |
             RECOMP_RUNTIME_UI_STANDARD_VOLUME |
             RECOMP_RUNTIME_UI_STANDARD_RESUME;
         runtime_ui_config.window_scale_max = 6;
+        runtime_ui_config.resolution_scale_max = 64;
         if (const auto* provider = vb_mod_runtime_launcher_provider_c()) {
             const int count = provider->feature_count(provider->ctx);
             ui_features.resize(count);
@@ -1276,6 +1294,19 @@ int main(int argc, char** argv) {
                 output=vb_state_ui_render(&output_w,&output_h);output_texture=state_tex;
             }
             host_capture={output,output_w,output_h};
+            bool use_gpu=VB_GPU_RASTER && !game_video && !vb_renderer_active()
+                && !vb_recolor_active() && !vb_overrides_active() && !vb_state_ui_mode()
+                && !vb_host_config.filter && output_w==384;
+#if defined(RECOMP_LAUNCHER)
+            use_gpu=use_gpu && !recomp_runtime_ui_is_open(s_runtime_ui);
+#if defined(RECOMP_RUNTIME_UI_HAS_TOAST)
+            use_gpu=use_gpu && !recomp_runtime_ui_toast_visible(s_runtime_ui);
+#endif
+#endif
+            const bool gpu_presented=use_gpu && gpu_raster.present_current(win,vb_vip_display_fb()&1,stereo,
+                (unsigned)vb_host_config.internal_scale,win_w,win_h,!measure_runtime);
+            if(!gpu_presented) {
+            ++gpu_cpu_present_fallbacks;
             SDL_UpdateTexture(output_texture, nullptr, output,
                               output_w * (int)sizeof(uint32_t));
 
@@ -1292,6 +1323,7 @@ int main(int argc, char** argv) {
             SDL_RenderClear(ren);
             SDL_RenderCopy(ren, output_texture, nullptr, &dst);
             SDL_RenderPresent(ren);
+            }
 
             /* Pace to VB_RT_FRAME_HZ — TAB skips the wait (turbo). */
             const Uint8* keys = SDL_GetKeyboardState(nullptr);
@@ -1344,7 +1376,9 @@ int main(int argc, char** argv) {
         uint64_t capture_bytes=0,reused_capture_pages=0;
         vb_viewport_capture_costs(&capture_bytes,&reused_capture_pages);
         unsigned video_active=0,video_dummy=0,renderer_flags=0,renderer_opengl=0;
+        VbVipGpuRasterCosts gpu_costs{};uint64_t gpu_fallbacks=0;
 #if VB_RUNTIME_HAVE_SDL
+        gpu_costs=gpu_raster.costs();gpu_fallbacks=gpu_cpu_present_fallbacks;
         const char* video_driver=SDL_GetCurrentVideoDriver();
         video_active=video_driver!=nullptr;video_dummy=video_driver && !std::strcmp(video_driver,"dummy");
         SDL_RendererInfo renderer_info{};
@@ -1365,6 +1399,11 @@ int main(int argc, char** argv) {
             "\"native_draws_scheduled\":%llu,\"native_draws_materialized\":%llu,\"native_draws_overwritten\":%llu,"
             "\"viewport_capture_bytes_copied\":%llu,\"viewport_capture_pages_reused\":%llu,"
             "\"sdl_video_active\":%u,\"sdl_video_dummy\":%u,\"sdl_renderer_flags\":%u,\"sdl_renderer_opengl\":%u,"
+            "\"gpu_raster_frames\":%llu,\"cpu_present_fallbacks\":%llu,\"gpu_raster_init_failures\":%llu,"
+            "\"gpu_requested_scale\":%u,\"gpu_effective_scale\":%u,\"gpu_upload_bytes\":%llu,"
+            "\"gpu_last_upload_bytes\":%llu,\"gpu_max_upload_bytes\":%llu,\"gpu_timer_available\":%u,"
+            "\"gpu_nanoseconds\":%llu,\"gpu_max_nanoseconds\":%llu,\"gpu_timed_frames\":%llu,"
+            "\"gpu_timer_pending\":%llu,\"gpu_timer_skipped\":%llu,"
             "\"workload_scope\":\"%s\"}\n",
             cpu.frame,benchmark_seconds,cpu.frame/benchmark_seconds,benchmark_cpu_seconds,
             (unsigned long long)cpu.cycles,cpu.pc,hash,(unsigned long long)vb_execution.native_instructions,
@@ -1386,6 +1425,11 @@ int main(int argc, char** argv) {
             (unsigned long long)(capture_bytes-initial_capture_bytes),
             (unsigned long long)(reused_capture_pages-initial_reused_capture_pages),
             video_active,video_dummy,renderer_flags,renderer_opengl,
+            (unsigned long long)gpu_costs.frames,(unsigned long long)gpu_fallbacks,(unsigned long long)gpu_costs.init_failures,
+            gpu_costs.requested_scale,gpu_costs.effective_scale,(unsigned long long)gpu_costs.upload_bytes,
+            (unsigned long long)gpu_costs.last_upload_bytes,(unsigned long long)gpu_costs.max_upload_bytes,(unsigned)gpu_costs.timer_available,
+            (unsigned long long)gpu_costs.gpu_nanoseconds,(unsigned long long)gpu_costs.gpu_max_nanoseconds,(unsigned long long)gpu_costs.timed_frames,
+            (unsigned long long)gpu_costs.timer_pending,(unsigned long long)gpu_costs.timer_skipped,
             measure_runtime?"uncapped-full-runtime":"headless-core");
         // The finite-run contract requires a durable result before frontend,
         // audio and allocator teardown. Treat an output error as a failed run.
@@ -1406,6 +1450,7 @@ int main(int argc, char** argv) {
 #if VB_RUNTIME_HAVE_SDL
     s_controllers.close();
     if (aud) { SDL_PauseAudioDevice(aud, 1); SDL_CloseAudioDevice(aud); }
+    gpu_raster.reset();
     if (tex) SDL_DestroyTexture(tex);
     if (state_tex) SDL_DestroyTexture(state_tex);
     if (ren) SDL_DestroyRenderer(ren);

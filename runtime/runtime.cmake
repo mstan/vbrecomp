@@ -17,6 +17,8 @@ set_source_files_properties("${VB_RUNTIME_DIR}/src/savestate.cpp" PROPERTIES
     COMPILE_DEFINITIONS "VB_STATE_BUILD_ID=\"$<TARGET_PROPERTY:VB_STATE_ID>:$<CONFIG>\"")
 
 function(vb_add_runtime_target TARGET)
+    set_property(SOURCE "${VB_RUNTIME_DIR}/src/main.cpp" "${VB_RUNTIME_DIR}/src/vip.c" APPEND PROPERTY
+        COMPILE_DEFINITIONS "VB_GPU_RASTER=$<BOOL:${VBRECOMP_GPU_RASTER}>")
     set_source_files_properties("${VB_RUNTIME_DIR}/src/renderer.c" PROPERTIES
         COMPILE_DEFINITIONS "VB_STREAM_SHADING=$<BOOL:${VBRECOMP_STREAM_SHADING}>")
     set_property(SOURCE "${VB_RUNTIME_DIR}/src/renderer.c" APPEND PROPERTY
@@ -37,6 +39,8 @@ function(vb_add_runtime_target TARGET)
 
     set(_runtime_sources
         ${VB_RUNTIME_DIR}/src/main.cpp
+        ${VB_RUNTIME_DIR}/src/vip_raster.c
+        ${VB_RUNTIME_DIR}/src/vip_gpu_raster.cpp
         ${VB_RUNTIME_DIR}/src/host.cpp
         ${VB_RUNTIME_DIR}/src/mod_runtime.cpp
         ${VB_RUNTIME_DIR}/src/renderer.c

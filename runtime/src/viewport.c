@@ -4,6 +4,7 @@
 #include "savestate.h"
 #include "vip.h"
 #include "draw_inputs.h"
+#include "vip_raster.h"
 #include <string.h>
 #include <stddef.h>
 
@@ -73,7 +74,7 @@ static void ensure_blocks(void) {
     for(unsigned slot=0;slot<2;++slot)for(unsigned row=0;row<28;++row)
         blocks[slot][row]=&storage[slot*28+row];
 }
-static int tracking, adaptive, window_width = 1280, window_height = 720;
+static int tracking, raster_tracking, adaptive, window_width = 1280, window_height = 720;
 static int row_local;
 static unsigned aspect_n = 16, aspect_d = 9;
 static char identifier[96];
@@ -83,9 +84,18 @@ static void* policy_context;
 static unsigned extra_size;
 static VbViewportCaptureExtra capture_extra;
 int vb_viewport_draw_inputs(int slot,int row,VbVipDrawInputs* out) {
-    if(!out || !tracking || slot<0 || slot>1 || row<0 || row>=28 || !blocks[slot][row]->valid)return 0;
+    if(!out || !(tracking || raster_tracking) || slot<0 || slot>1 || row<0 || row>=28 || !blocks[slot][row]->valid)return 0;
     const ViewBlock* b=blocks[slot][row];
     *out=(VbVipDrawInputs){b->dram,b->chars,b->spt,b->suppress,b->gplt,b->jplt,b->backdrop};
+    return 1;
+}
+int vb_viewport_raster_bank(int slot,int row,VbVipRasterBank* out) {
+    if(!out || !vb_viewport_draw_inputs(slot,row,&out->input))return 0;
+    out->pages=0;
+#if VB_VERSIONED_CAPTURE
+    const unsigned bank=(unsigned)(blocks[slot][row]-storage);
+    if(captured_revisions_valid[bank])out->pages=captured_revisions[bank];
+#endif
     return 1;
 }
 
@@ -129,6 +139,16 @@ static VbViewportScene scene_of(const ViewBlock* block) {
                             block->dram + 0x1e000 / 2, block->chars, block->dram,
                             block->spt, block->extra, extra_size};
     return scene;
+}
+void vb_viewport_raster_track(void) {
+    ensure_blocks();raster_tracking=1;
+#if VB_VERSIONED_CAPTURE
+    vb_vip_track_capture_revisions();
+#endif
+}
+void vb_viewport_raster_loaded(void) {
+    /* GPU-only banks are reconstructible and absent from history snapshots. */
+    if(!tracking)vb_viewport_clear_frames();
 }
 void vb_viewport_track(void) {
     ensure_blocks();tracking = 1;
@@ -191,7 +211,7 @@ void vb_viewport_capture(int slot, int row, const uint16_t* dram,
                          const uint16_t* chars, const uint16_t spt[4],
                          const uint8_t gplt[4][4], const uint8_t jplt[4][4],
                          unsigned backdrop, const uint16_t suppress[1024]) {
-    if (!tracking || slot < 0 || slot > 1 || row < 0 || row >= 28) return;
+    if (!(tracking || raster_tracking) || slot < 0 || slot > 1 || row < 0 || row >= 28) return;
     ViewBlock* b=blocks[slot][row];
 #if VB_DEFER_NATIVE_DRAW
     if(vb_vip_native_rows[slot]&(1u<<row)) {

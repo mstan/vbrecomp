@@ -41,6 +41,10 @@
 #include "recolor.h"
 #include "renderer.h"
 #include "viewport.h"
+#include "vip_raster.h"
+#ifndef VB_GPU_RASTER
+#define VB_GPU_RASTER 0
+#endif
 #include "draw_inputs.h"
 #ifndef VB_DEFER_NATIVE_DRAW
 #define VB_DEFER_NATIVE_DRAW 0
@@ -389,6 +393,40 @@ static uint8_t s_source_map, s_source_kind;
 uint32_t vb_vip_native_rows[2];
 uint32_t vb_vip_native_pending;
 static VbVipDrawInputs s_pending_inputs[2][28],s_draw_inputs;
+/* Derived display ownership only. A row touched by a CPU framebuffer writer
+ * is sampled as original native bitmap; no geometry is guessed from pixels. */
+static uint32_t raster_bitmap_rows[2]={0x0fffffffu,0x0fffffffu};
+static uint64_t raster_bitmap_revision[2][2],raster_revision=1;
+static uint64_t raster_next_revision(void) {
+    if(raster_revision && ++raster_revision==0)return 0;
+    return raster_revision;
+}
+static void raster_invalidate(void) {
+    for(unsigned slot=0;slot<2;++slot) {
+        raster_bitmap_rows[slot]=0x0fffffffu;
+        for(unsigned eye=0;eye<2;++eye)raster_bitmap_revision[slot][eye]=raster_next_revision();
+    }
+}
+static void raster_cpu_write(uint32_t at,uint32_t value,unsigned width) {
+#if VB_GPU_RASTER
+    if(at>=0x20000u)return;
+    for(unsigned byte=0;byte<width;++byte) {
+        unsigned p=at+byte,x=(p&0x7fffu)/64,y=(p&63u)*4;
+        if(x>=384 || y>=224 || s_vip_mem[p]==(uint8_t)(value>>(byte*8)))continue;
+        unsigned slot=(p>>15)&1,eye=(p>>16)&1;
+        raster_bitmap_rows[slot]|=1u<<(y/8);
+        raster_bitmap_revision[slot][eye]=raster_next_revision();
+    }
+#else
+    (void)at;(void)value;(void)width;
+#endif
+}
+uint32_t vb_vip_raster_bitmap_rows(int slot){return (unsigned)slot<2?raster_bitmap_rows[slot]:0x0fffffffu;}
+const uint8_t* vb_vip_raster_bitmap(int slot,int eye,uint64_t* revision) {
+    if((unsigned)slot>1 || (unsigned)eye>1)return NULL;
+    if(revision)*revision=raster_bitmap_revision[slot][eye];
+    return s_vip_mem+slot*0x8000u+eye*0x10000u;
+}
 static uint8_t s_pending_flags[2][28];
 static int s_draw_texels;
 static uint64_t s_native_scheduled,s_native_materialized,s_native_overwritten;
@@ -423,6 +461,10 @@ static uint16_t s_obj_suppress[1024];
 
 
 void vb_vip_init(void) {
+    raster_invalidate();
+#if VB_GPU_RASTER
+    vb_viewport_raster_track();
+#endif
     vb_vip_native_rows[0]=vb_vip_native_rows[1]=0;
     vb_vip_native_pending=0;
     vb_viewport_clear_frames();
@@ -859,6 +901,7 @@ void vb_vip_write8(uint32_t addr, uint8_t v) {
         return;
     }
     uint32_t r=vip_route(o);
+    raster_cpu_write(r,v,1);
     s_vip_mem[r] = v;capture_version_write(r);
 }
 
@@ -897,6 +940,7 @@ void vb_vip_write16(uint32_t addr, uint16_t v) {
         return;
     }
     uint32_t r = vip_route(o);
+    raster_cpu_write(r,v,2);
     s_vip_mem[r]     = (uint8_t)(v & 0xFFu);
     s_vip_mem[r + 1] = (uint8_t)((v >> 8) & 0xFFu);
     capture_version_write(r);
@@ -911,6 +955,7 @@ void vb_vip_write32(uint32_t addr, uint32_t v) {
         return;
     }
     uint32_t r = vip_route(o);
+    raster_cpu_write(r,v,4);
     s_vip_mem[r]     = (uint8_t)(v & 0xFFu);
     s_vip_mem[r + 1] = (uint8_t)((v >> 8) & 0xFFu);
     s_vip_mem[r + 2] = (uint8_t)((v >> 16) & 0xFFu);
@@ -1420,6 +1465,7 @@ static void vip_draw_block_now(uint8_t block_no) {
     uint8_t* fb_l = &s_vip_mem[s_drawing_fb ? 0x8000u  : 0x0000u];
     uint8_t* fb_r = &s_vip_mem[s_drawing_fb ? 0x18000u : 0x10000u];
     const unsigned slot=s_drawing_fb&1,bit=1u<<block_no;
+    raster_bitmap_rows[slot]&=~bit;
     ++s_native_scheduled;
 #if VB_DEFER_NATIVE_DRAW
     /* Freeze at the original hardware event, then reuse that immutable capture
@@ -1981,6 +2027,7 @@ int vb_vip_state_valid(void) {
     return 1;
 }
 void vb_vip_state_loaded(void) {
+    raster_invalidate();vb_viewport_raster_loaded();
     capture_versions_reset();
     vb_vip_native_rows[0]=vb_vip_native_rows[1]=0;
     vb_vip_native_pending=0;

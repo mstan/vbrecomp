@@ -73,6 +73,7 @@ void load_config() {
         int value;
         if (!(file >> value)) break;
         if (key == "scale") vb_host_config.scale = std::clamp(value, 1, 6);
+        else if(key=="internal_scale")vb_host_config.internal_scale=std::clamp(value,1,64);
         else if (key == "fullscreen") vb_host_config.fullscreen = std::clamp(value, 0, 2);
         else if (key == "filter") vb_host_config.filter = value != 0;
         else if (key == "audio") vb_host_config.audio = value != 0;
@@ -117,6 +118,7 @@ void vb_host_save(void*) {
     if (!file) { error = "Cannot save settings."; return; }
     file << "rom " << std::quoted(last_rom) << '\n'
          << "scale " << vb_host_config.scale << '\n'
+         << "internal_scale " << vb_host_config.internal_scale << '\n'
          << "fullscreen " << vb_host_config.fullscreen << '\n'
          << "filter " << vb_host_config.filter << '\n'
          << "audio " << vb_host_config.audio << '\n'
