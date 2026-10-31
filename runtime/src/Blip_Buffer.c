@@ -74,7 +74,7 @@ blargg_err_t Blip_Buffer_set_sample_rate(Blip_Buffer* bbuf, long new_rate,
 
    if (bbuf->buffer_size != new_size)
    {
-      void* p = realloc(bbuf->buffer, (new_size + blip_buffer_extra_) * sizeof (bbuf->buffer));
+      void* p = realloc(bbuf->buffer, (new_size + blip_buffer_extra_) * sizeof (*bbuf->buffer));
       if (!p)
          return "Out of memory";
 
@@ -144,8 +144,8 @@ void Blip_Buffer_remove_samples(Blip_Buffer* bbuf,  long count)
 
       // copy remaining samples to beginning and clear old samples
       remain = Blip_Buffer_samples_avail(bbuf) + blip_buffer_extra_;
-      memmove(bbuf->buffer, bbuf->buffer + count, remain * sizeof(bbuf->buffer));
-      memset(bbuf->buffer + remain, 0, count * sizeof(bbuf->buffer));
+      memmove(bbuf->buffer, bbuf->buffer + count, remain * sizeof(*bbuf->buffer));
+      memset(bbuf->buffer + remain, 0, count * sizeof(*bbuf->buffer));
    }
 }
 
