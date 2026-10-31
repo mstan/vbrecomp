@@ -5,7 +5,11 @@ static void run(CPUState* cpu,uint64_t return_pc) {
     while(cpu->pc!=return_pc && !cpu->halted && !cpu->yielded) {
         if(!cpu->step_budget || cpu->cycles>=cpu->cycle_deadline) { cpu->yielded=1;return; }
         if(vb_execution.mode==VB_EXEC_INTERPRETER) {
+#if VB_INTERPRETER_BATCH
+            vb_interpreter_run(cpu,return_pc);
+#else
             --cpu->step_budget;vb_interpreter_step(cpu);
+#endif
         } else vb_interpreter_fallback(cpu);
     }
 }

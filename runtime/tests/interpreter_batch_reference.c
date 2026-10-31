@@ -1,0 +1,17 @@
+/* Frozen retained source, not an include of the candidate implementation.
+ * Provenance: 9ffb83cafc7ffbd973da1a1318dc28c6df1f5889:runtime/src/v810_interpreter.c.
+ * Only public symbol names change so both implementations can share one test. */
+#define vb_execution vb_reference_execution
+#define vb_branch_rule_count vb_reference_branch_rule_count
+#define vb_branch_rules_enabled vb_reference_branch_rules_enabled
+#define vb_branch_rules_reset vb_reference_branch_rules_reset
+#define vb_branch_rules_enable vb_reference_branch_rules_enable
+#define vb_branch_rule_add vb_reference_branch_rule_add
+#define vb_branch_rule_get vb_reference_branch_rule_get
+#define vb_branch_predicate_lookup vb_reference_branch_predicate_lookup
+#define vb_fallback_coverage_get vb_reference_fallback_coverage_get
+#define vb_fallback_coverage_overflow vb_reference_fallback_coverage_overflow
+#define vb_execution_debug_check vb_reference_execution_debug_check
+#define vb_interpreter_step vb_reference_interpreter_step
+#define vb_interpreter_fallback vb_reference_interpreter_fallback
+#include "interpreter_batch_reference.inc"

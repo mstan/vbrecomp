@@ -27,6 +27,12 @@ static void fixture_execute(CPUState* cpu, unsigned index) {
 void vb_interpreter_step(CPUState* cpu) {
     ++cpu->cycles; ++vb_execution.interpreted;cpu->pc=cpu->gpr[31];
 }
+void vb_interpreter_run(CPUState* cpu,uint64_t lp) {
+    while(cpu->pc!=lp && !cpu->halted && !cpu->yielded && vb_execution.mode==VB_EXEC_INTERPRETER) {
+        if(!cpu->step_budget || cpu->cycles>=cpu->cycle_deadline){cpu->yielded=1;return;}
+        --cpu->step_budget;vb_interpreter_step(cpu);
+    }
+}
 void vb_interpreter_fallback(CPUState* cpu) {
     ++vb_execution.fallback;cpu->pc=cpu->gpr[31];
 }
