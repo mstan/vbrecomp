@@ -15,6 +15,9 @@
  * foreground succession when another application's foreground window closes. */
 static inline bool vb_sdl_noactivate_window_requested() {
 #if defined(_WIN32)
+    // Dummy/offscreen drivers have no HWND and cannot use Win32 window styles.
+    const char* driver=SDL_GetCurrentVideoDriver();
+    if(!driver || SDL_strcmp(driver,"windows")!=0)return false;
     const char* hint=SDL_GetHint("SDL_WINDOW_NO_ACTIVATION_WHEN_SHOWN");
     return hint && SDL_strcmp(hint,"1")==0;
 #else

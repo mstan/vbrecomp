@@ -70,8 +70,22 @@ static unsigned random_value(){seed^=seed<<13;seed^=seed>>17;seed^=seed<<5;retur
 int main(int argc,char** argv) {
     const bool palette_only=argc==2 && !std::strcmp(argv[1],"--palette-only");
     const bool corrections=argc==2 && !std::strcmp(argv[1],"--corrections-only");
-    const bool legacy=argc==2 && !std::strcmp(argv[1],"--legacy-timing-only");const bool noactivate=argc==2 && !std::strcmp(argv[1],"--noactivate-window-only");assert(argc==1 || palette_only || corrections || legacy || noactivate);
+    const bool legacy=argc==2 && !std::strcmp(argv[1],"--legacy-timing-only");const bool noactivate=argc==2 && !std::strcmp(argv[1],"--noactivate-window-only");
+    const bool dummy_window=argc==2 && !std::strcmp(argv[1],"--dummy-window-only");
+    assert(argc==1 || palette_only || corrections || legacy || noactivate || dummy_window);
+    if(dummy_window){SDL_setenv("SDL_VIDEODRIVER","dummy",1);SDL_SetHint("SDL_WINDOW_NO_ACTIVATION_WHEN_SHOWN","1");}
     assert(SDL_Init(SDL_INIT_VIDEO)==0);
+    if(dummy_window) {
+        assert(!std::strcmp(SDL_GetCurrentVideoDriver(),"dummy"));
+        SDL_Window* window=vb_sdl_create_window("Dummy software window",0,0,32,32,SDL_WINDOW_HIDDEN);
+        if(!window){std::fprintf(stderr,"dummy window rejected: %s\n",SDL_GetError());SDL_Quit();return 1;}
+        assert(!vb_sdl_noactivate_window_requested());
+        SDL_Renderer* renderer=SDL_CreateRenderer(window,-1,SDL_RENDERER_SOFTWARE);assert(renderer);
+        assert(vb_sdl_prepare_noactivate_window(window));assert(vb_sdl_show_guarded_window(window));
+        assert(SDL_RenderClear(renderer)==0);SDL_RenderPresent(renderer);
+        SDL_DestroyRenderer(renderer);SDL_DestroyWindow(window);SDL_Quit();
+        std::puts("PASS: hinted dummy software window needs no native HWND and presents successfully");return 0;
+    }
     SDL_Window* window=vb_sdl_create_window("Hidden VIP raster readback",0,0,768,448,SDL_WINDOW_HIDDEN|(noactivate?0:SDL_WINDOW_OPENGL));assert(window);
     if(noactivate) {
 #if defined(_WIN32)
