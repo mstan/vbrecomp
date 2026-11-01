@@ -7,8 +7,10 @@ and unqualified custom renderers keep the original portable presentation.
 Initialization failure is latched until reset/window replacement. Requested and
 effective density are reported once when changed; the hardware limit can lower
 it. Ordinary1x uses the original presentation and does not enable GPU-only capture.
-Explicit `--internal-resolution 1` selects the diagnostic GPU1 control. Enhanced
-stock views enable GPU capture only after backend qualification; callbacks and
+Ordinary `--internal-resolution 1` also keeps that legacy path. Only the explicit
+combination `--internal-resolution 1 --gpu-pass-timing --measure-runtime N`
+selects diagnostic GPU1; enhanced scales above1 remain normally GPU eligible.
+Stock views enable GPU capture only after backend qualification; callbacks and
 unsupported backends preserve their existing capture behavior. Toggles settle
 pending native jobs and use native bitmaps until fresh VIP captures arrive.
 

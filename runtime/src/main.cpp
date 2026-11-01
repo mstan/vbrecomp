@@ -1303,9 +1303,9 @@ int main(int argc, char** argv) {
                 output=vb_state_ui_render(&output_w,&output_h);output_texture=state_tex;
             }
             host_capture={output,output_w,output_h};
-            /* Ordinary1x retains the legacy path. An explicit CLI1 is a diagnostic
-             * GPU1 control; stored1x and normal UI1x never activate it. */
-            bool use_gpu=VB_GPU_RASTER && (vb_host_config.internal_scale>1 || requested_internal_scale==1) && !game_video && !vb_renderer_active()
+            /* Ordinary1x, including CLI1, retains the legacy path. GPU1 is only
+             * an explicit finite pass-profiling control. */
+            bool use_gpu=VB_GPU_RASTER && (vb_host_config.internal_scale>1 || (measure_runtime && gpu_pass_timing && requested_internal_scale==1)) && !game_video && !vb_renderer_active()
                 && !vb_recolor_active() && !vb_overrides_active() && !vb_state_ui_mode()
                 && !vb_host_config.filter && output_w==384;
 #if defined(RECOMP_LAUNCHER)
