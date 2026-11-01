@@ -54,3 +54,7 @@ including both eyes and native bitmaps, and exercises16/32/64x bounded tiles.
 Component qualification alone is not game performance or acceptance.
 
 Timer contract: https://registry.khronos.org/OpenGL/extensions/ARB/ARB_timer_query.txt
+
+Named game hosts may define `VB_GAME_DEFAULT_INTERNAL_SCALE` for fresh settings.
+The value is applied before loading the saved configuration, so explicit user
+choices remain authoritative. The standalone host retains its1x default.

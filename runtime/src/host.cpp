@@ -169,6 +169,9 @@ int vb_host_prepare(const char* executable, const char*& rom, bool headless) {
     }
     sram_path=fs::absolute(sram_path);
     if (mods_path.empty()) mods_path = base / "mods";
+#if defined(VB_GAME_DEFAULT_INTERNAL_SCALE)
+    vb_host_config.internal_scale = VB_GAME_DEFAULT_INTERNAL_SCALE;
+#endif
     load_config();
     if (rom) last_rom = rom;
     const bool has_game = VB_GAME_ID[0] != 0;
