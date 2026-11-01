@@ -23,6 +23,13 @@ void VbVipGpuFrame::stock_colors(int eye) {
 #endif
 #ifdef VB_VIP_GL
 #include "vip_gpu_shader.h"
+#if defined(VB_VIP_GPU_TEST)
+extern "C" void* vb_vip_test_gl_proc(const char*);
+extern "C" void vb_vip_test_presented(int,int);
+#define VB_VIP_GL_PROC vb_vip_test_gl_proc
+#else
+#define VB_VIP_GL_PROC SDL_GL_GetProcAddress
+#endif
 #define VB_GL_FUNCTIONS(X) \
  X(GLenum,GetError,()) X(void,GetIntegerv,(GLenum,GLint*)) \
  X(void,Enable,(GLenum)) X(void,Disable,(GLenum)) X(void,Viewport,(GLint,GLint,GLsizei,GLsizei)) \
@@ -57,7 +64,7 @@ struct Gl {
     VB_GL_FUNCTIONS(FIELD)
 #undef FIELD
     bool load(){
-#define LOAD(ret,name,args) name=reinterpret_cast<name##Fn>(SDL_GL_GetProcAddress("gl" #name));if(!name)return false;
+#define LOAD(ret,name,args) name=reinterpret_cast<name##Fn>(VB_VIP_GL_PROC("gl" #name));if(!name)return false;
         VB_GL_FUNCTIONS(LOAD)
 #undef LOAD
         return true;
@@ -76,7 +83,7 @@ struct VbVipGpuRaster::Impl {
     uint64_t pages[28][40]{},bitmap_versions[2]{};
     std::array<std::array<uint16_t,33>,28> metadata{};
     std::array<uint32_t,2*96*4> colors{};
-    bool sources_initialized=false,bank_initialized[28]{},colors_initialized=false,failed=false;
+    bool api_loaded=false,sources_initialized=false,bank_initialized[28]{},colors_initialized=false,failed=false;
     VbVipGpuRasterCosts costs{};
     using GenQueriesFn=void(APIENTRY*)(GLsizei,GLuint*);using DeleteQueriesFn=void(APIENTRY*)(GLsizei,const GLuint*);
     using QueryCounterFn=void(APIENTRY*)(GLuint,GLenum);using GetQueryObjectivFn=void(APIENTRY*)(GLuint,GLenum,GLint*);
@@ -105,7 +112,8 @@ struct VbVipGpuRaster::Impl {
         SDL_Window* previous_window=SDL_GL_GetCurrentWindow();SDL_GLContext previous=SDL_GL_GetCurrentContext();
         const bool active=context && (previous==context || SDL_GL_MakeCurrent(window,context)==0);
         if(active && delete_queries && queries[0])delete_queries(8,queries);
-        if(active && gl.DeleteTextures){gl.DeleteTextures(4,images);if(tile_image)gl.DeleteTextures(1,&tile_image);gl.DeleteBuffers(1,&job_buffer);gl.DeleteFramebuffers(1,&fbo);gl.DeleteVertexArrays(1,&vao);if(program)gl.DeleteProgram(program);}
+        /* No resource is created until the complete API table has loaded. */
+        if(active && api_loaded){gl.DeleteTextures(4,images);if(tile_image)gl.DeleteTextures(1,&tile_image);gl.DeleteBuffers(1,&job_buffer);gl.DeleteFramebuffers(1,&fbo);gl.DeleteVertexArrays(1,&vao);if(program)gl.DeleteProgram(program);}
         if(context){SDL_GLContext dying=context;context=nullptr;if(previous==dying)previous=nullptr;SDL_GL_MakeCurrent(nullptr,nullptr);SDL_GL_DeleteContext(dying);}
         SDL_GL_MakeCurrent(previous?previous_window:nullptr,previous);
     }
@@ -116,6 +124,7 @@ struct VbVipGpuRaster::Impl {
     void bind(unsigned unit,GLenum target,GLuint value){gl.ActiveTexture(GL_TEXTURE0+unit);gl.BindTexture(target,value);}
     bool start() {
         if(!gl.load())return false;
+        api_loaded=true;
         GLint version=0;gl.GetIntegerv(GL_MAJOR_VERSION,&version);if(version<3)return false;
         GLint limit=0,layers=0;gl.GetIntegerv(GL_MAX_TEXTURE_SIZE,&limit);gl.GetIntegerv(GL_MAX_ARRAY_TEXTURE_LAYERS,&layers);
         if(limit<321 || layers<28)return false;
@@ -234,15 +243,22 @@ bool VbVipGpuRaster::present(const VbVipGpuFrame& frame,bool stereo,unsigned req
         // do not grow with scale. Only GPU tile dimensions are32*scale.
         for(unsigned ty=0;ty<7;++ty)for(unsigned tx=0;tx<12;++tx) {
             s.draw_tile(tx,ty,scale,frame.counts[eye]);
-            int x0=left+int(tx*32)*dw/384,x1=left+int((tx+1)*32)*dw/384;
-            int y0=top+int(eye*224+ty*32)*dh/native_height,y1=top+int(eye*224+(ty+1)*32)*dh/native_height;
+            // One global stereo transform preserves nearest sampling phase.
+            // Source clipping does not change the original blit transform
+            // (OpenGL3.1 section4.3.2); no full enhanced target is needed.
+            const int x0=-int(tx*32*scale),y0=-int((eye*224+ty*32)*scale);
             s.gl.BindFramebuffer(GL_READ_FRAMEBUFFER,s.fbo);s.gl.BindFramebuffer(GL_DRAW_FRAMEBUFFER,0);
-            s.gl.BlitFramebuffer(0,0,s.tile_size,s.tile_size,x0,height-y0,x1,height-y1,GL_COLOR_BUFFER_BIT,GL_NEAREST);
+            s.gl.BlitFramebuffer(x0,y0,x0+384*int(scale),y0+native_height*int(scale),
+                left,height-top,left+dw,height-top-dh,GL_COLOR_BUFFER_BIT,GL_NEAREST);
         }
     }
     if(s.gl.GetError()!=GL_NO_ERROR){s.failed=true;return false;}
     timer.good=true;++s.costs.frames;s.costs.max_upload_bytes=std::max(s.costs.max_upload_bytes,s.costs.last_upload_bytes);
-    s.end_time(timer.i,true);timer.i=-1;SDL_GL_SwapWindow(s.window);return true;
+    s.end_time(timer.i,true);timer.i=-1;
+#if defined(VB_VIP_GPU_TEST)
+    vb_vip_test_presented(width,height);
+#endif
+    SDL_GL_SwapWindow(s.window);return true;
 }
 bool VbVipGpuRaster::readback_native(const VbVipGpuFrame& frame,int eye,uint32_t* out) {
     if(!impl_ || !out || (unsigned)eye>1)return false;

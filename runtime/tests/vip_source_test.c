@@ -357,7 +357,23 @@ static void viewport_tests(void) {
     puts("PASS: VIP viewport replay, source identity, both eyes, edge recovery, snapshot lifetime and aspect sizing");
 }
 
-int main(void) {
+static void raster_revision_tests(void) {
+    for(unsigned slot=0;slot<2;++slot)for(unsigned eye=0;eye<2;++eye) {
+        setup(0,0,0);raster_invalidate();raster_bitmap_rows[slot]=0;
+        uint64_t before[2];
+        for(unsigned e=0;e<2;++e)assert(vb_vip_raster_bitmap(slot,e,&before[e]));
+        vb_vip_write8(slot*0x8000+eye*0x10000+3*64,1);
+        assert(vb_vip_raster_bitmap_rows(slot)&1);
+        for(unsigned e=0;e<2;++e){uint64_t after;assert(vb_vip_raster_bitmap(slot,e,&after));assert(after!=before[e]);}
+    }
+    puts("PASS: one-eye CPU framebuffer write invalidates both shared-band bitmap identities");
+}
+int main(int argc,char** argv) {
+#if VB_GPU_RASTER
+    if(argc==2 && !strcmp(argv[1],"--raster-revisions-only")){raster_revision_tests();return 0;}
+#else
+    (void)argc;(void)argv;
+#endif
     for(unsigned mode=0;mode<4;++mode)for(unsigned flip=0;flip<4;++flip)for(int diagonal=0;diagonal<2;++diagonal) {
         setup(mode,flip<<12,diagonal);
         tracking=0;vip_draw_block_into(0,left,right);memcpy(baseline,left,sizeof(left));memcpy(baseline_right,right,sizeof(right));

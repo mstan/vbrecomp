@@ -25,6 +25,7 @@ uint chr(uint at){return texelFetch(source_plane,ivec3(int(at&255u),256+int(at>>
 uint meta(int at){return texelFetch(source_plane,ivec3(at,320,item.w),0).r;}
 int sign_bits(uint n,uint bits){uint b=1u<<(bits-1u);return int((n&((1u<<bits)-1u))^b)-int(b);}
 int half(uint at){return sign_bits(word(at),16u);}
+int floor_div(int n,int d){return n>=0?n/d:-((-n+d-1)/d);}
 void main() {
     ivec2 local=ivec2(gl_FragCoord.xy),p=tile_origin+local/scale;
     int kind=item.x;uint level=0u;
@@ -55,8 +56,8 @@ void main() {
                 int shift=mp>=0&&eye!=0?mp:mp<0&&eye==0?-mp:0;
                 // Split native integer and subpixel phases: bounded products at64x.
                 int phase=local.x%scale;
-                uint u=uint(mx*64+dx*(p.x-gx+shift))+uint(dx*phase/scale);
-                uint v=uint(my*64+dy*(p.x-gx+shift))+uint(dy*phase/scale);
+                uint u=uint(mx*64+dx*(p.x-gx+shift))+uint(floor_div(dx*phase,scale));
+                uint v=uint(my*64+dy*(p.x-gx+shift))+uint(floor_div(dy*phase,scale));
                 xx=u&(over?67108863u:(xs<<9u)-1u);yy=v&(over?67108863u:(ys<<9u)-1u);
                 if(dy==0 && yy>=(ys<<9u))discard;
                 if(xx<(xs<<9u) && yy<(ys<<9u))cell=word(base|((xx>>6u)&~4095u)|(((yy>>6u)&~4095u)<<scx)|((xx>>12u)&63u)|(((yy>>12u)&63u)*64u));

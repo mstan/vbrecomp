@@ -414,7 +414,11 @@ static void raster_cpu_write(uint32_t at,uint32_t value,unsigned width) {
         unsigned p=at+byte,x=(p&0x7fffu)/64,y=(p&63u)*4;
         if(x>=384 || y>=224 || s_vip_mem[p]==(uint8_t)(value>>(byte*8)))continue;
         unsigned slot=(p>>15)&1,eye=(p>>16)&1;
-        raster_bitmap_rows[slot]|=1u<<(y/8);
+        const unsigned bit=1u<<(y/8);
+        /* Switching the shared band to bitmap exposes both native eyes,
+         * including VIP draws since the opposite eye was last uploaded. */
+        if(!(raster_bitmap_rows[slot]&bit))raster_bitmap_revision[slot][eye^1]=raster_next_revision();
+        raster_bitmap_rows[slot]|=bit;
         raster_bitmap_revision[slot][eye]=raster_next_revision();
     }
 #else

@@ -4,7 +4,11 @@
 #include "viewport.h"
 #include "red_lut.h"
 #include <SDL.h>
+#include <SDL_opengl.h>
+#include <cmath>
 #include <cassert>
+#include <algorithm>
+#include <cstdlib>
 #include <cstdio>
 #include <cstring>
 #include <vector>
@@ -17,15 +21,63 @@ void vb_vip_column_argb(int eye,uint32_t colors[96][4]) {
     for(unsigned x=0;x<96;++x)for(unsigned v=0;v<4;++v)colors[x][v]=0xff000000u|((x*13+v*37+eye*17)&255)<<16;
 }
 }
+static const char* missing_proc;
+extern "C" void* vb_vip_test_gl_proc(const char* name) {
+    return missing_proc && !std::strcmp(name,missing_proc)?nullptr:SDL_GL_GetProcAddress(name);
+}
+static const VbVipGpuFrame* checked_frame;
+static unsigned checked_scale;
+static bool checked_affine;
+extern "C" void vb_vip_test_presented(int width,int height) {
+    if(!checked_frame)return;
+    using BindFn=void(APIENTRY*)(GLenum,GLuint);using ReadBufferFn=void(APIENTRY*)(GLenum);
+    using ReadFn=void(APIENTRY*)(GLint,GLint,GLsizei,GLsizei,GLenum,GLenum,void*);
+    auto bind=reinterpret_cast<BindFn>(SDL_GL_GetProcAddress("glBindFramebuffer"));
+    auto buffer=reinterpret_cast<ReadBufferFn>(SDL_GL_GetProcAddress("glReadBuffer"));
+    auto read=reinterpret_cast<ReadFn>(SDL_GL_GetProcAddress("glReadPixels"));assert(bind&&buffer&&read);
+    // Test output stays500x585, independently of internal density.
+    std::vector<uint32_t> pixels(size_t(width)*height);bind(GL_READ_FRAMEBUFFER,0);buffer(GL_BACK);
+    read(0,0,width,height,GL_BGRA,GL_UNSIGNED_INT_8_8_8_8_REV,pixels.data());
+    const double fit=std::min(double(width)/384,double(height)/448);
+    int dw=int(384*fit),dh=int(448*fit),left=(width-dw)/2,top=(height-dh)/2;
+    assert(dw==500 && (dh&1));
+    for(int y=0;y<height;++y)for(int x=0;x<width;++x) {
+        uint32_t actual=pixels[size_t(height-1-y)*width+x],expected=0xff000000u;bool matched=false;
+        if(x>=left&&x<left+dw&&y>=top&&y<top+dh) {
+            uint64_t ux=uint64_t(2*(x-left)+1)*384*checked_scale,uy=uint64_t(2*(y-top)+1)*448*checked_scale;
+            unsigned ex=ux/(2*dw),ey=uy/(2*dh);
+            // At an exact source pixel edge, both neighboring centers are
+            // equally near. Accept either tie choice, but check every pixel.
+            unsigned xn=(ex && ux%(2*dw)==0)?2:1,yn=(ey && uy%(2*dh)==0)?2:1;
+            for(unsigned iy=0;iy<yn;++iy)for(unsigned ix=0;ix<xn;++ix) {
+                unsigned hx=ex-ix,hy=ey-iy,nx=hx/checked_scale,ny=(hy/checked_scale)%224,eye=hy/(224*checked_scale),level;
+                if(checked_affine) {
+                    // Adversarial dx=dy=-1 starts on an exact fixed-point boundary.
+                    int fixed=int(std::floor(-double(hx)/checked_scale));
+                    unsigned sample=(unsigned(fixed)&((512u<<9)-1))>>9;
+                    const uint16_t* chars=checked_frame->banks[ny/8].input.chars;
+                    level=(chars[8+(sample&7)]>>((sample&7)*2))&3;
+                } else level=(checked_frame->bitmaps[eye][nx*64+ny/4]>>((ny&3)*2))&3;
+                expected=checked_frame->colors[eye][nx/4][level];matched|=actual==expected;
+            }
+        } else matched=actual==expected;
+        if(!matched){std::fprintf(stderr,"global resize/phase mismatch scale=%u affine=%d x=%d y=%d expected=%08x got=%08x\n",checked_scale,checked_affine,x,y,expected,actual);std::abort();}
+    }
+}
 static unsigned seed=0x27f1aa31;
 static unsigned random_value(){seed^=seed<<13;seed^=seed>>17;seed^=seed<<5;return seed;}
 int main(int argc,char** argv) {
-    const bool palette_only=argc==2 && !std::strcmp(argv[1],"--palette-only");assert(argc==1 || palette_only);
+    const bool palette_only=argc==2 && !std::strcmp(argv[1],"--palette-only");
+    const bool corrections=argc==2 && !std::strcmp(argv[1],"--corrections-only");assert(argc==1 || palette_only || corrections);
     assert(SDL_Init(SDL_INIT_VIDEO)==0);
     SDL_Window* window=SDL_CreateWindow("Hidden VIP raster readback",0,0,768,448,SDL_WINDOW_OPENGL|SDL_WINDOW_HIDDEN);assert(window);
     VbVipGpuRaster gpu;
     SDL_Window* plain=SDL_CreateWindow("Hidden portable fallback",0,0,32,32,SDL_WINDOW_HIDDEN);assert(plain);
     assert(!gpu.initialize(plain));assert(!gpu.initialize(plain));assert(gpu.costs().init_failures==1);gpu.reset();SDL_DestroyWindow(plain);
+    if(corrections) {
+        missing_proc="glTexImage3D";assert(!gpu.initialize(window));assert(gpu.costs().init_failures==1);
+        assert(!gpu.initialize(window));gpu.reset();missing_proc=nullptr;
+    }
     assert(gpu.initialize(window));
     std::vector<uint16_t> dram(65536),chars(16384);uint16_t spt[4]={127,255,511,1023},suppress[1024]{};
     uint8_t gplt[4][4],jplt[4][4];VbVipGpuFrame frame{};
@@ -35,7 +87,7 @@ int main(int argc,char** argv) {
     std::vector<uint8_t> reference_levels(384*224);
     std::vector<uint16_t> reference_worlds(384*224);std::vector<VbSourceTexel> reference_sources(384*224);
     vb_viewport_track();
-    for(unsigned scene=0;scene<(palette_only?1u:6u);++scene) {
+    for(unsigned scene=0;scene<((palette_only||corrections)?1u:6u);++scene) {
         for(auto& v:dram)v=(uint16_t)random_value();for(auto& v:chars)v=(uint16_t)random_value();
         for(auto& v:bitmap)v=(uint8_t)random_value();
         for(int p=0;p<4;++p)for(int i=0;i<4;++i){gplt[p][i]=random_value()&3;jplt[p][i]=random_value()&3;}
@@ -67,10 +119,32 @@ int main(int argc,char** argv) {
         }
         // Full requested densities use the same frame/jobs and bounded tile;
         // no CPU enhanced framebuffer is created or uploaded.
-        assert(gpu.present(frame,true,palette_only?1:scene==0?16:scene==1?32:scene==2?64:1,768,448,false));
+        assert(gpu.present(frame,true,(palette_only||corrections)?1:scene==0?16:scene==1?32:scene==2?64:1,768,448,false));
     }
-    auto costs=gpu.costs();assert(costs.frames==(palette_only?1u:6u));
+    if(corrections) {
+        SDL_SetWindowSize(window,500,585);
+        int width=0,height=0;SDL_GL_GetDrawableSize(window,&width,&height);assert(width==500 && height==585);
+        for(int eye=0;eye<2;++eye) {
+            assert(vb_vip_raster_prepare(frame.banks,eye,0x0fffffffu,jobs[eye].data(),VB_VIP_RASTER_JOB_LIMIT,&frame.counts[eye]));
+            frame.jobs[eye]=jobs[eye].data();frame.bitmaps[eye]=bitmap.data();frame.bitmap_revision[eye]=0;
+        }
+        checked_frame=&frame;checked_scale=1;checked_affine=false;
+        assert(gpu.present(frame,true,1,width,height,false));
+        // Same odd stereo output, but true affine16x source sampling. All
+        // CPU reference/readback storage remains output/native sized.
+        std::fill(dram.begin(),dram.end(),0);std::fill(chars.begin(),chars.end(),0xaaaa);
+        for(unsigned i=0;i<4096;++i)dram[i]=1;
+        chars[8]=(chars[8]&~3u)|1;chars[15]|=3u<<14;
+        uint16_t* w=dram.data()+0x1d800/2+31*16;w[0]=0xe000;w[7]=383;w[8]=223;w[9]=0x4000;
+        dram[0x1d800/2+30*16]=64;
+        for(unsigned y=0;y<224;++y){dram[0x4000+y*8+3]=uint16_t(-1);dram[0x4000+y*8+4]=uint16_t(-1);}
+        for(unsigned p=0;p<4;++p)for(unsigned i=0;i<4;++i)gplt[p][i]=jplt[p][i]=i;
+        for(int row=0;row<28;++row){vb_viewport_capture(0,row,dram.data(),chars.data(),spt,gplt,jplt,0,suppress);assert(vb_viewport_raster_bank(0,row,frame.banks+row));}
+        for(int eye=0;eye<2;++eye){assert(vb_vip_raster_prepare(frame.banks,eye,0,jobs[eye].data(),VB_VIP_RASTER_JOB_LIMIT,&frame.counts[eye]));frame.jobs[eye]=jobs[eye].data();frame.bitmaps[eye]=nullptr;}
+        checked_scale=16;checked_affine=true;assert(gpu.present(frame,true,16,width,height,false));checked_frame=nullptr;
+    }
+    auto costs=gpu.costs();assert(costs.frames==(corrections?3u:palette_only?1u:6u));
     std::printf("VIP_GPU_COMPONENT frames=%llu upload_bytes=%llu timed_frames=%llu gpu_ns=%llu timer_pending=%llu\n",(unsigned long long)costs.frames,(unsigned long long)costs.upload_bytes,(unsigned long long)costs.timed_frames,(unsigned long long)costs.gpu_nanoseconds,(unsigned long long)costs.timer_pending);
     gpu.reset();SDL_DestroyWindow(window);SDL_Quit();
-    std::puts(palette_only?"PASS: active display LUT matches CPU/native GPU pixels in both eyes":"PASS: native GPU/portable VIP job pixels, normal/HBias/affine/OBJ/bitmap, both eyes; bounded16/32/64x presentation");
+    std::puts(corrections?"PASS: partial API fallback, odd global stereo resize, signed affine16x floor phase, exact native pixels":palette_only?"PASS: active display LUT matches CPU/native GPU pixels in both eyes":"PASS: native GPU/portable VIP job pixels, normal/HBias/affine/OBJ/bitmap, both eyes; bounded16/32/64x presentation");
 }
