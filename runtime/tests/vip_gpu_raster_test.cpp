@@ -68,12 +68,23 @@ static unsigned seed=0x27f1aa31;
 static unsigned random_value(){seed^=seed<<13;seed^=seed>>17;seed^=seed<<5;return seed;}
 int main(int argc,char** argv) {
     const bool palette_only=argc==2 && !std::strcmp(argv[1],"--palette-only");
-    const bool corrections=argc==2 && !std::strcmp(argv[1],"--corrections-only");assert(argc==1 || palette_only || corrections);
+    const bool corrections=argc==2 && !std::strcmp(argv[1],"--corrections-only");
+    const bool legacy=argc==2 && !std::strcmp(argv[1],"--legacy-timing-only");assert(argc==1 || palette_only || corrections || legacy);
     assert(SDL_Init(SDL_INIT_VIDEO)==0);
     SDL_Window* window=SDL_CreateWindow("Hidden VIP raster readback",0,0,768,448,SDL_WINDOW_OPENGL|SDL_WINDOW_HIDDEN);assert(window);
     VbVipGpuRaster gpu;
     SDL_Window* plain=SDL_CreateWindow("Hidden portable fallback",0,0,32,32,SDL_WINDOW_HIDDEN);assert(plain);
     assert(!gpu.initialize(plain));assert(!gpu.initialize(plain));assert(gpu.costs().init_failures==1);gpu.reset();SDL_DestroyWindow(plain);
+    if(legacy) {
+        SDL_SetHint(SDL_HINT_RENDER_DRIVER,"opengl");SDL_Renderer* renderer=SDL_CreateRenderer(window,-1,SDL_RENDERER_ACCELERATED);assert(renderer);
+        SDL_Texture* texture=SDL_CreateTexture(renderer,SDL_PIXELFORMAT_ARGB8888,SDL_TEXTUREACCESS_STREAMING,384,224);assert(texture);
+        std::vector<uint32_t> stock(384*224,0xffdd1100);auto context=SDL_GL_GetCurrentContext();assert(context);
+        for(unsigned i=0;i<5;++i){gpu.legacy_begin(window,renderer);assert(SDL_UpdateTexture(texture,nullptr,stock.data(),384*4)==0);gpu.legacy_source(stock.size()*4);SDL_RenderClear(renderer);SDL_RenderCopy(renderer,texture,nullptr,nullptr);gpu.legacy_end(renderer);SDL_RenderPresent(renderer);}
+        uint32_t pixel;SDL_Rect one{0,0,1,1};assert(SDL_RenderReadPixels(renderer,&one,SDL_PIXELFORMAT_ARGB8888,&pixel,4)==0);
+        auto times=gpu.legacy_costs();SDL_RendererInfo info{};SDL_GetRendererInfo(renderer,&info);std::printf("VIP_LEGACY_DIAGNOSTIC renderer=%s available=%u timed=%llu pending=%llu skipped=%llu samewindow=%u\n",info.name,(unsigned)times.timer_available,(unsigned long long)times.timed_frames,(unsigned long long)times.timer_pending,(unsigned long long)times.timer_skipped,(unsigned)(SDL_GL_GetCurrentWindow()==window));std::fflush(stdout);assert(times.timer_available && times.timed_frames>0 && times.timed_frames+times.timer_pending+times.timer_skipped==5);assert(times.gpu_nanoseconds==times.gpu_source_upload_nanoseconds+times.gpu_raster_compose_nanoseconds);assert(gpu.costs().frames==0 && !gpu.costs().init_failures);
+        std::printf("VIP_LEGACY_GPU_PASSES source_upload_ns=%llu compose_ns=%llu frames=%llu\n",(unsigned long long)times.gpu_source_upload_nanoseconds,(unsigned long long)times.gpu_raster_compose_nanoseconds,(unsigned long long)times.timed_frames);
+        gpu.reset();assert(SDL_GL_GetCurrentContext()==context);assert(SDL_RenderClear(renderer)==0);SDL_RenderPresent(renderer);SDL_DestroyTexture(texture);SDL_DestroyRenderer(renderer);SDL_DestroyWindow(window);SDL_Quit();std::puts("PASS: borrowed legacy SDL pass timestamps; renderer context retained, no raster initialization");return 0;
+    }
     if(corrections) {
         missing_proc="glTexImage3D";assert(!gpu.initialize(window));assert(gpu.costs().init_failures==1);
         assert(!gpu.initialize(window));gpu.reset();missing_proc=nullptr;
@@ -144,6 +155,8 @@ int main(int argc,char** argv) {
         checked_scale=16;checked_affine=true;assert(gpu.present(frame,true,16,width,height,false));checked_frame=nullptr;
     }
     auto costs=gpu.costs();assert(costs.frames==(corrections?3u:palette_only?1u:6u));
+    assert(costs.gpu_source_upload_nanoseconds+costs.gpu_raster_compose_nanoseconds==costs.gpu_nanoseconds);
+    std::printf("VIP_GPU_PASSES source_upload_ns=%llu raster_compose_ns=%llu\n",(unsigned long long)costs.gpu_source_upload_nanoseconds,(unsigned long long)costs.gpu_raster_compose_nanoseconds);
     std::printf("VIP_GPU_COMPONENT frames=%llu upload_bytes=%llu timed_frames=%llu gpu_ns=%llu timer_pending=%llu\n",(unsigned long long)costs.frames,(unsigned long long)costs.upload_bytes,(unsigned long long)costs.timed_frames,(unsigned long long)costs.gpu_nanoseconds,(unsigned long long)costs.timer_pending);
     gpu.reset();SDL_DestroyWindow(window);SDL_Quit();
     std::puts(corrections?"PASS: partial API fallback, odd global stereo resize, signed affine16x floor phase, exact native pixels":palette_only?"PASS: active display LUT matches CPU/native GPU pixels in both eyes":"PASS: native GPU/portable VIP job pixels, normal/HBias/affine/OBJ/bitmap, both eyes; bounded16/32/64x presentation");

@@ -1,5 +1,6 @@
 /* Exercise the real canonical VIP bus and the frozen viewport bank rotation. */
 #include <assert.h>
+#include <stdio.h>
 #include "../src/vip.c"
 int vb_renderer_tracks_texels(void){return 0;}
 int vb_renderer_tracks_worlds(void){return 0;}
@@ -36,7 +37,18 @@ static void check_capture(void) {
         assert(vb_viewport_tile_hash(b.chars,tile,&h));assert(h==vb_capture_hash(b.chars+tile*8));
     }
 }
-int main(void) {
+int main(int argc,char** argv) {
+    if(argc==2 && !strcmp(argv[1],"--raster-activation-only")) {
+        assert(!capture_revision_tracking);uint64_t clock=capture_revision_clock;
+        vb_vip_write16(0x20000,1);assert(capture_revision_clock==clock);
+        vb_vip_raster_set_active(1);assert(capture_revision_tracking);clock=capture_revision_clock;
+        vb_vip_write16(0x20000,2);assert(capture_revision_clock>clock);
+        vb_vip_raster_set_active(0);assert(!capture_revision_tracking);clock=capture_revision_clock;
+        vb_vip_write16(0x20000,3);assert(capture_revision_clock==clock);
+        vb_viewport_track();vb_vip_raster_set_active(1);vb_vip_raster_set_active(0);assert(capture_revision_tracking);clock=capture_revision_clock;
+        vb_vip_write16(0x20000,4);assert(capture_revision_clock>clock);
+        puts("PASS: GPU-only version observation disabled when inactive; public tracking retained");return 0;
+    }
     static uint8_t saved_memory[sizeof(s_vip_mem)],old_dram[0x20000],old_chars[0x8000];
     static uint16_t external_dram[65536],external_chars[16384];
     vb_viewport_track();memset(s_vip_mem,0x29,sizeof(s_vip_mem));capture_versions_reset();

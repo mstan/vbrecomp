@@ -77,7 +77,7 @@ struct Context {
 };
 }
 struct VbVipGpuRaster::Impl {
-    Gl gl;SDL_Window* window{};SDL_GLContext context{};
+    Gl gl;SDL_Window* window{};SDL_GLContext context{};bool owns_context=true;
     GLuint program{},vao{},images[4]{},job_buffer{},fbo{};unsigned tile_size{};int swap_interval=-2;
     GLint tile_uniform{},eye_uniform{},scale_uniform{},max_scale{};
     uint64_t pages[28][40]{},bitmap_versions[2]{};
@@ -90,31 +90,34 @@ struct VbVipGpuRaster::Impl {
     using GetQueryObjectui64vFn=void(APIENTRY*)(GLuint,GLenum,GLuint64*);using GetQueryivFn=void(APIENTRY*)(GLenum,GLenum,GLint*);
     GenQueriesFn gen_queries{};DeleteQueriesFn delete_queries{};QueryCounterFn query_counter{};
     GetQueryObjectivFn query_available{};GetQueryObjectui64vFn query_value{};GetQueryivFn query_bits{};
-    GLuint queries[8]{};bool pending[4]{},query_good[4]{};
+    GLuint queries[12]{};bool pending[4]{},query_good[4]{};
     void collect_times(){
         if(!costs.timer_available)return;
         for(unsigned i=0;i<4;++i)if(pending[i]) {
-            GLint ready=0;query_available(queries[i*2+1],GL_QUERY_RESULT_AVAILABLE,&ready);if(!ready)continue;
-            GLuint64 a=0,b=0;query_value(queries[i*2],GL_QUERY_RESULT,&a);query_value(queries[i*2+1],GL_QUERY_RESULT,&b);
-            if(query_good[i] && b>=a){uint64_t n=b-a;costs.gpu_nanoseconds+=n;costs.gpu_max_nanoseconds=std::max(costs.gpu_max_nanoseconds,n);++costs.timed_frames;}
+            GLint ready=0;query_available(queries[i*3+2],GL_QUERY_RESULT_AVAILABLE,&ready);if(!ready)continue;
+            if(query_good[i]){
+                GLuint64 a=0,b=0,c=0;query_value(queries[i*3],GL_QUERY_RESULT,&a);query_value(queries[i*3+1],GL_QUERY_RESULT,&b);query_value(queries[i*3+2],GL_QUERY_RESULT,&c);
+                if(c>=b && b>=a){uint64_t n=c-a;costs.gpu_nanoseconds+=n;costs.gpu_source_upload_nanoseconds+=b-a;costs.gpu_raster_compose_nanoseconds+=c-b;costs.gpu_max_nanoseconds=std::max(costs.gpu_max_nanoseconds,n);++costs.timed_frames;}
+            }
             pending[i]=false;--costs.timer_pending;
         }
     }
     int begin_time(){
         collect_times();if(!costs.timer_available)return -1;
-        for(int i=0;i<4;++i)if(!pending[i]){query_counter(queries[i*2],GL_TIMESTAMP);return i;}
+        for(int i=0;i<4;++i)if(!pending[i]){query_counter(queries[i*3],GL_TIMESTAMP);return i;}
         ++costs.timer_skipped;return -1;
     }
-    void end_time(int i,bool good){if(i<0)return;query_counter(queries[i*2+1],GL_TIMESTAMP);pending[i]=true;query_good[i]=good;++costs.timer_pending;}
+    void source_time(int i){if(i>=0)query_counter(queries[i*3+1],GL_TIMESTAMP);}
+    void end_time(int i,bool good){if(i<0)return;query_counter(queries[i*3+2],GL_TIMESTAMP);pending[i]=true;query_good[i]=good;++costs.timer_pending;}
     void uploaded(uint64_t bytes){costs.upload_bytes+=bytes;costs.last_upload_bytes+=bytes;}
     std::vector<VbVipRasterJob> jobs[2];
     ~Impl(){
         SDL_Window* previous_window=SDL_GL_GetCurrentWindow();SDL_GLContext previous=SDL_GL_GetCurrentContext();
         const bool active=context && (previous==context || SDL_GL_MakeCurrent(window,context)==0);
-        if(active && delete_queries && queries[0])delete_queries(8,queries);
+        if(active && delete_queries && queries[0])delete_queries(12,queries);
         /* No resource is created until the complete API table has loaded. */
         if(active && api_loaded){gl.DeleteTextures(4,images);if(tile_image)gl.DeleteTextures(1,&tile_image);gl.DeleteBuffers(1,&job_buffer);gl.DeleteFramebuffers(1,&fbo);gl.DeleteVertexArrays(1,&vao);if(program)gl.DeleteProgram(program);}
-        if(context){SDL_GLContext dying=context;context=nullptr;if(previous==dying)previous=nullptr;SDL_GL_MakeCurrent(nullptr,nullptr);SDL_GL_DeleteContext(dying);}
+        if(context && owns_context){SDL_GLContext dying=context;context=nullptr;if(previous==dying)previous=nullptr;SDL_GL_MakeCurrent(nullptr,nullptr);SDL_GL_DeleteContext(dying);}
         SDL_GL_MakeCurrent(previous?previous_window:nullptr,previous);
     }
     GLuint shader(GLenum kind,const char* body) {
@@ -122,13 +125,7 @@ struct VbVipGpuRaster::Impl {
         if(!good){char log[2048]{};gl.GetShaderInfoLog(s,sizeof(log),nullptr,log);std::fprintf(stderr,"VIP GPU shader unavailable: %s\n",log);gl.DeleteShader(s);return 0;}return s;
     }
     void bind(unsigned unit,GLenum target,GLuint value){gl.ActiveTexture(GL_TEXTURE0+unit);gl.BindTexture(target,value);}
-    bool start() {
-        if(!gl.load())return false;
-        api_loaded=true;
-        GLint version=0;gl.GetIntegerv(GL_MAJOR_VERSION,&version);if(version<3)return false;
-        GLint limit=0,layers=0;gl.GetIntegerv(GL_MAX_TEXTURE_SIZE,&limit);gl.GetIntegerv(GL_MAX_ARRAY_TEXTURE_LAYERS,&layers);
-        if(limit<321 || layers<28)return false;
-        max_scale=std::min(64,limit/32);
+    void start_timing() {
         if(SDL_GL_ExtensionSupported("GL_ARB_timer_query")){
             gen_queries=reinterpret_cast<GenQueriesFn>(SDL_GL_GetProcAddress("glGenQueries"));
             delete_queries=reinterpret_cast<DeleteQueriesFn>(SDL_GL_GetProcAddress("glDeleteQueries"));
@@ -137,9 +134,18 @@ struct VbVipGpuRaster::Impl {
             query_value=reinterpret_cast<GetQueryObjectui64vFn>(SDL_GL_GetProcAddress("glGetQueryObjectui64v"));
             query_bits=reinterpret_cast<GetQueryivFn>(SDL_GL_GetProcAddress("glGetQueryiv"));
             if(gen_queries && delete_queries && query_counter && query_available && query_value && query_bits){
-                GLint bits=0;query_bits(GL_TIMESTAMP,GL_QUERY_COUNTER_BITS,&bits);if(bits>0){gen_queries(8,queries);costs.timer_available=true;}
+                GLint bits=0;query_bits(GL_TIMESTAMP,GL_QUERY_COUNTER_BITS,&bits);if(bits>0){gen_queries(12,queries);costs.timer_available=true;}
             }
         }
+    }
+    bool start() {
+        if(!gl.load())return false;
+        api_loaded=true;
+        GLint version=0;gl.GetIntegerv(GL_MAJOR_VERSION,&version);if(version<3)return false;
+        GLint limit=0,layers=0;gl.GetIntegerv(GL_MAX_TEXTURE_SIZE,&limit);gl.GetIntegerv(GL_MAX_ARRAY_TEXTURE_LAYERS,&layers);
+        if(limit<321 || layers<28)return false;
+        max_scale=std::min(64,limit/32);
+        start_timing();
         GLuint v=shader(GL_VERTEX_SHADER,vb_vip_gpu_vertex),f=shader(GL_FRAGMENT_SHADER,vb_vip_gpu_fragment);
         if(!v || !f){if(v)gl.DeleteShader(v);if(f)gl.DeleteShader(f);return false;}
         program=gl.CreateProgram();gl.AttachShader(program,v);gl.AttachShader(program,f);gl.BindFragDataLocation(program,0,"result");gl.LinkProgram(program);
@@ -233,6 +239,7 @@ bool VbVipGpuRaster::present(const VbVipGpuFrame& frame,bool stereo,unsigned req
     s.costs.last_upload_bytes=0;int timing=s.begin_time();
     struct TimeEnd {Impl& s;int i;bool good=false;~TimeEnd(){s.end_time(i,good);}} timer{s,timing};
     if(!s.tile(scale) || !s.upload(frame)){s.failed=true;return false;}
+    s.source_time(timing);
     int native_height=stereo?448:224;
     double fit=std::min(double(width)/384,double(height)/native_height);
     int dw=int(384*fit),dh=int(native_height*fit),left=(width-dw)/2,top=(height-dh)/2;
@@ -285,7 +292,33 @@ bool VbVipGpuRaster::present_current(SDL_Window* window,int slot,bool stereo,uns
 VbVipGpuRasterCosts VbVipGpuRaster::costs(){
     VbVipGpuRasterCosts out{};if(impl_){Context use(impl_->window,impl_->context);if(use.good)impl_->collect_times();out=impl_->costs;}out.init_failures=init_failures_;return out;
 }
-void VbVipGpuRaster::reset(){impl_.reset();attempted_=false;attempted_window_=nullptr;init_failures_=0;}
+void VbVipGpuRaster::legacy_begin(SDL_Window* window,SDL_Renderer* renderer) {
+    legacy_timing_=-1;SDL_RendererInfo info{};
+    if(!window || !renderer || SDL_GetRendererInfo(renderer,&info)!=0 || !info.name || std::strcmp(info.name,"opengl"))return;
+    SDL_RenderFlush(renderer);
+    SDL_GLContext current=SDL_GL_GetCurrentContext();
+    if(!current || SDL_GL_GetCurrentWindow()!=window)return;
+    if(legacy_ && legacy_->context!=current)legacy_.reset();
+    if(!legacy_){legacy_=std::make_unique<Impl>();legacy_->window=window;legacy_->context=current;legacy_->owns_context=false;legacy_->start_timing();}
+    legacy_->costs.last_upload_bytes=0;legacy_timing_=legacy_->begin_time();
+}
+void VbVipGpuRaster::legacy_source(uint64_t bytes) {
+    if(!legacy_)return;
+    legacy_->uploaded(bytes);
+    if(legacy_timing_<0)return;
+    Context use(legacy_->window,legacy_->context);if(!use.good)return;
+    legacy_->source_time(legacy_timing_);
+}
+void VbVipGpuRaster::legacy_end(SDL_Renderer* renderer) {
+    if(!legacy_ || legacy_timing_<0)return;
+    SDL_RenderFlush(renderer);Context use(legacy_->window,legacy_->context);
+    if(use.good){legacy_->end_time(legacy_timing_,true);++legacy_->costs.frames;}
+    legacy_timing_=-1;
+}
+VbVipGpuRasterCosts VbVipGpuRaster::legacy_costs(){
+    VbVipGpuRasterCosts out{};if(legacy_){Context use(legacy_->window,legacy_->context);if(use.good)legacy_->collect_times();out=legacy_->costs;}return out;
+}
+void VbVipGpuRaster::reset(){impl_.reset();legacy_.reset();legacy_timing_=-1;attempted_=false;attempted_window_=nullptr;init_failures_=0;}
 #else
 struct VbVipGpuRaster::Impl{};
 VbVipGpuRaster::VbVipGpuRaster()=default;VbVipGpuRaster::~VbVipGpuRaster()=default;
@@ -293,6 +326,10 @@ bool VbVipGpuRaster::initialize(SDL_Window*){return false;}
 bool VbVipGpuRaster::present_current(SDL_Window*,int,bool,unsigned,int,int,bool){return false;}
 bool VbVipGpuRaster::present(const VbVipGpuFrame&,bool,unsigned,int,int,bool){return false;}
 bool VbVipGpuRaster::readback_native(const VbVipGpuFrame&,int,uint32_t*){return false;}
+void VbVipGpuRaster::legacy_begin(SDL_Window*,SDL_Renderer*){}
+void VbVipGpuRaster::legacy_source(uint64_t){}
+void VbVipGpuRaster::legacy_end(SDL_Renderer*){}
+VbVipGpuRasterCosts VbVipGpuRaster::legacy_costs(){return {};}
 VbVipGpuRasterCosts VbVipGpuRaster::costs(){return {};}
 void VbVipGpuRaster::reset(){}
 #endif

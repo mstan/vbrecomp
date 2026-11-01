@@ -6,7 +6,11 @@ select density independently of window size. Unsupported windows/capabilities
 and unqualified custom renderers keep the original portable presentation.
 Initialization failure is latched until reset/window replacement. Requested and
 effective density are reported once when changed; the hardware limit can lower
-it. Native1x is the default and still requires a per-game neutrality gate.
+it. Ordinary1x uses the original presentation and does not enable GPU-only capture.
+Explicit `--internal-resolution 1` selects the diagnostic GPU1 control. Enhanced
+stock views enable GPU capture only after backend qualification; callbacks and
+unsupported backends preserve their existing capture behavior. Toggles settle
+pending native jobs and use native bitmaps until fresh VIP captures arrive.
 
 The guest VIP timing, original packed framebuffers, reads and state visitors
 remain native. Immutable eight-row draw captures feed ordered normal, HBias,
@@ -33,7 +37,13 @@ those fallbacks do not establish16x rendering for modded workloads.
 
 The existing finite benchmark JSON reports actual GPU/fallback frames, requested
 and effective scale, initialization failures, actual API upload bytes and optional
-asynchronous ARB_timer_query timestamp totals. Four query pairs are bounded;
+asynchronous ARB_timer_query timestamp totals. Four bounded three-timestamp slots separate source upload/allocation from
+job-upload/raster/composition; their sum equals the combined GPU duration.
+Opt-in `--gpu-pass-timing` with `--measure-runtime` reuses those slots on the
+already-current SDL OpenGL context for legacy upload vs clear/copy composition;
+it creates no raster context or captures. Unsupported SDL backends remain
+explicitly untimed. Normal native performance runs omit this profiling flag.
+There is no CPU-preparation/pass breakdown;
 unavailable/pending/skipped samples remain explicit and never force a GPU wait.
 Timing covers upload/raster/blit commands before swap, not swap/vsync waiting.
 The hidden `vb-vip-gpu-raster-test` is explicitly run under a hardware lease;

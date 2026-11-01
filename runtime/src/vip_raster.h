@@ -17,6 +17,9 @@ typedef struct VbVipRasterJob {
     int32_t data[4];   /* kind(-1 backdrop,-2 native bitmap,0..3 VIP), world,OBJ,bank */
 } VbVipRasterJob;
 #define VB_VIP_RASTER_JOB_LIMIT 65536
+void vb_vip_raster_set_active(int active); /* Qualified display request only. */
+void vb_vip_set_capture_revision_tracking(int active);
+void vb_viewport_raster_enable(int active);
 void vb_viewport_raster_track(void); /* Display capture only; never adds state fields. */
 void vb_viewport_raster_loaded(void);
 int vb_viewport_raster_bank(int slot,int row,VbVipRasterBank*);

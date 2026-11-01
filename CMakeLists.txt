@@ -266,7 +266,7 @@ if(BUILD_TESTING)
     add_test(NAME vb-vip-eager COMMAND vb-vip-eager-test)
     add_executable(vb-capture-versions-test runtime/tests/capture_versions_test.c
         runtime/tests/vip_source_unreachable.c runtime/src/viewport.c)
-    target_compile_definitions(vb-capture-versions-test PRIVATE VB_DEFER_NATIVE_DRAW=1 VB_VERSIONED_CAPTURE=1)
+    target_compile_definitions(vb-capture-versions-test PRIVATE VB_DEFER_NATIVE_DRAW=1 VB_VERSIONED_CAPTURE=1 VB_GPU_RASTER=1)
     target_include_directories(vb-capture-versions-test PRIVATE runtime/include)
     if(MSVC)
         target_compile_options(vb-capture-versions-test PRIVATE /UNDEBUG)

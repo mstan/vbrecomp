@@ -98,6 +98,16 @@ static void capture_version_write(unsigned offset) {
 static void capture_versions_reset(void) {}
 static void capture_version_write(unsigned offset) {(void)offset;}
 #endif
+void vb_vip_set_capture_revision_tracking(int active) {
+#if VB_VERSIONED_CAPTURE
+    active=active!=0;
+    if(active==capture_revision_tracking)return;
+    capture_revision_tracking=active;
+    if(active)capture_versions_reset();
+#else
+    (void)active;
+#endif
+}
 void vb_vip_track_capture_revisions(void) {
 #if VB_VERSIONED_CAPTURE
     capture_revision_tracking=1;
@@ -395,6 +405,8 @@ uint32_t vb_vip_native_pending;
 static VbVipDrawInputs s_pending_inputs[2][28],s_draw_inputs;
 /* Derived display ownership only. A row touched by a CPU framebuffer writer
  * is sampled as original native bitmap; no geometry is guessed from pixels. */
+static int raster_active;
+static void vip_materialize_all(void);
 static uint32_t raster_bitmap_rows[2]={0x0fffffffu,0x0fffffffu};
 static uint64_t raster_bitmap_revision[2][2],raster_revision=1;
 static uint64_t raster_next_revision(void) {
@@ -407,9 +419,20 @@ static void raster_invalidate(void) {
         for(unsigned eye=0;eye<2;++eye)raster_bitmap_revision[slot][eye]=raster_next_revision();
     }
 }
+void vb_vip_raster_set_active(int active) {
+#if VB_GPU_RASTER
+    active=active!=0;if(active==raster_active)return;
+    /* Pending native jobs can borrow these banks. Settle them before changing
+     * display-only capture lifetime; guest-visible bytes stay identical. */
+    vip_materialize_all();raster_active=active;raster_invalidate();
+    vb_viewport_raster_enable(active);
+#else
+    (void)active;
+#endif
+}
 static void raster_cpu_write(uint32_t at,uint32_t value,unsigned width) {
 #if VB_GPU_RASTER
-    if(at>=0x20000u)return;
+    if(!raster_active || at>=0x20000u)return;
     for(unsigned byte=0;byte<width;++byte) {
         unsigned p=at+byte,x=(p&0x7fffu)/64,y=(p&63u)*4;
         if(x>=384 || y>=224 || s_vip_mem[p]==(uint8_t)(value>>(byte*8)))continue;
@@ -465,10 +488,7 @@ static uint16_t s_obj_suppress[1024];
 
 
 void vb_vip_init(void) {
-    raster_invalidate();
-#if VB_GPU_RASTER
-    vb_viewport_raster_track();
-#endif
+    vb_vip_raster_set_active(0);raster_invalidate();
     vb_vip_native_rows[0]=vb_vip_native_rows[1]=0;
     vb_vip_native_pending=0;
     vb_viewport_clear_frames();
@@ -1469,7 +1489,7 @@ static void vip_draw_block_now(uint8_t block_no) {
     uint8_t* fb_l = &s_vip_mem[s_drawing_fb ? 0x8000u  : 0x0000u];
     uint8_t* fb_r = &s_vip_mem[s_drawing_fb ? 0x18000u : 0x10000u];
     const unsigned slot=s_drawing_fb&1,bit=1u<<block_no;
-    raster_bitmap_rows[slot]&=~bit;
+    if(raster_active)raster_bitmap_rows[slot]&=~bit;
     ++s_native_scheduled;
 #if VB_DEFER_NATIVE_DRAW
     /* Freeze at the original hardware event, then reuse that immutable capture

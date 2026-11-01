@@ -77,6 +77,11 @@ int main(void) {
         visited=0;vb_viewport_state_visit(count_visit,0);assert(!visited);
         vb_viewport_state_visit_pages(count_visit,0,0);assert(!visited);
         vb_viewport_raster_loaded();assert(!vb_viewport_raster_bank(0,0,&bank));
+        vb_viewport_raster_enable(0);
+        uint64_t before,after;vb_viewport_capture_costs(&before,0);
+        vb_viewport_capture(0,0,dram,chars,spt,palette,palette,0,suppress);vb_viewport_capture_costs(&after,0);assert(before==after);
+        vb_viewport_raster_enable(1);assert(!vb_viewport_raster_bank(0,0,&bank));
+        vb_viewport_raster_enable(0);
     }
     vb_viewport_track();ref_viewport_track();
     assert(vb_viewport_register("jobs",32,9,0,classify,arrange,0));

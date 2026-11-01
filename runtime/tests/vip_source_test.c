@@ -357,9 +357,31 @@ static void viewport_tests(void) {
     puts("PASS: VIP viewport replay, source identity, both eyes, edge recovery, snapshot lifetime and aspect sizing");
 }
 
+static size_t raster_visited;
+static void raster_count_visit(void* c,void* p,size_t n){(void)c;(void)p;raster_visited+=n;}
+static void raster_activation_tests(void) {
+    setup(0,0,0);vb_vip_raster_set_active(0);raster_invalidate();
+    uint64_t before,after,copied0,copied1;vb_vip_raster_bitmap(0,0,&before);
+    vb_vip_write8(64*3,1);vb_vip_raster_bitmap(0,0,&after);assert(before==after);
+    vb_viewport_capture_costs(&copied0,0);vip_draw_block_now(0);vb_viewport_capture_costs(&copied1,0);assert(copied0==copied1);
+    vb_vip_raster_set_active(1);assert(vb_vip_raster_bitmap_rows(0)==0x0fffffffu);
+    VbVipRasterBank bank;assert(!vb_viewport_raster_bank(0,0,&bank));
+    vip_draw_block_now(0);assert(!(vb_vip_raster_bitmap_rows(0)&1));assert(vb_viewport_raster_bank(0,0,&bank));
+    vb_vip_raster_set_active(0);assert(!vb_vip_native_pending);assert(vb_vip_read8(64*3)==0x77);
+    assert(!vb_viewport_raster_bank(0,0,&bank));
+    vb_vip_raster_set_active(1);assert(vb_vip_raster_bitmap_rows(0)==0x0fffffffu);
+    vip_draw_block_now(0);vb_vip_state_loaded();assert(vb_vip_raster_bitmap_rows(0)==0x0fffffffu);assert(!vb_viewport_raster_bank(0,0,&bank));
+    vb_vip_raster_set_active(0);
+    /* Public tracked viewport/history captures survive local GPU toggles. */
+    vb_viewport_track();vip_draw_block_now(0);assert(vb_viewport_raster_bank(0,0,&bank));uint16_t saved=bank.input.chars[8];
+    raster_visited=0;vb_viewport_state_visit(raster_count_visit,0);size_t bytes=raster_visited;assert(bytes);
+    vb_vip_raster_set_active(1);vb_vip_raster_set_active(0);assert(vb_viewport_raster_bank(0,0,&bank));assert(bank.input.chars[8]==saved);
+    raster_visited=0;vb_viewport_state_visit(raster_count_visit,0);assert(raster_visited==bytes);
+    puts("PASS: inactive capture/bitmap work absent; activation, disable, load and public viewport lifetime safe");
+}
 static void raster_revision_tests(void) {
     for(unsigned slot=0;slot<2;++slot)for(unsigned eye=0;eye<2;++eye) {
-        setup(0,0,0);raster_invalidate();raster_bitmap_rows[slot]=0;
+        setup(0,0,0);vb_vip_raster_set_active(1);raster_invalidate();raster_bitmap_rows[slot]=0;
         uint64_t before[2];
         for(unsigned e=0;e<2;++e)assert(vb_vip_raster_bitmap(slot,e,&before[e]));
         vb_vip_write8(slot*0x8000+eye*0x10000+3*64,1);
@@ -371,6 +393,7 @@ static void raster_revision_tests(void) {
 int main(int argc,char** argv) {
 #if VB_GPU_RASTER
     if(argc==2 && !strcmp(argv[1],"--raster-revisions-only")){raster_revision_tests();return 0;}
+    if(argc==2 && !strcmp(argv[1],"--raster-activation-only")){raster_activation_tests();raster_revision_tests();return 0;}
 #else
     (void)argc;(void)argv;
 #endif

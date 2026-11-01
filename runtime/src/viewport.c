@@ -140,12 +140,17 @@ static VbViewportScene scene_of(const ViewBlock* block) {
                             block->spt, block->extra, extra_size};
     return scene;
 }
-void vb_viewport_raster_track(void) {
-    ensure_blocks();raster_tracking=1;
+void vb_viewport_raster_enable(int active) {
+    active=active!=0;if(active==raster_tracking)return;
+    if(active)ensure_blocks();
+    raster_tracking=active;
 #if VB_VERSIONED_CAPTURE
-    vb_vip_track_capture_revisions();
+    vb_vip_set_capture_revision_tracking(tracking || raster_tracking);
 #endif
+    /* Public viewport/history banks remain owned by their original contract. */
+    if(!tracking)vb_viewport_clear_frames();
 }
+void vb_viewport_raster_track(void) {vb_viewport_raster_enable(1);}
 void vb_viewport_raster_loaded(void) {
     /* GPU-only banks are reconstructible and absent from history snapshots. */
     if(!tracking)vb_viewport_clear_frames();

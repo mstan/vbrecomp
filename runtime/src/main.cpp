@@ -501,7 +501,7 @@ int main(int argc, char** argv) {
     unsigned rewind_interval=1;
     bool rewind_explicit=false,interval_explicit=false;
     uint32_t benchmark_frames = 0;
-    bool measure_runtime = false;
+    bool measure_runtime = false,gpu_pass_timing=false;
     int measure_window_width = 0, measure_window_height = 0;
     int requested_internal_scale = 0;
     const char* benchmark_route_path = nullptr;
@@ -533,6 +533,8 @@ int main(int argc, char** argv) {
             else if(mode=="native") vb_execution.mode=VB_EXEC_NATIVE;
             else if(mode=="interpreter") vb_execution.mode=VB_EXEC_INTERPRETER;
             else { std::puts("Invalid --execution mode"); return 2; }
+        } else if (a == "--gpu-pass-timing") {
+            gpu_pass_timing=true;
         } else if (a == "--internal-resolution" && i + 1 < argc) {
             const char* value=argv[++i];char* end=nullptr;unsigned long scale=std::strtoul(value,&end,10);
             if(!*value || *end || *value=='-' || scale<1 || scale>64){std::puts("--internal-resolution requires1..64");return 2;}
@@ -591,6 +593,7 @@ int main(int argc, char** argv) {
         }
     }
 
+    if(gpu_pass_timing && !measure_runtime){std::fputs("--gpu-pass-timing requires --measure-runtime\n",stderr);return 2;}
     if (benchmark_frames && frame_limit) {
         std::fputs("--frames cannot be combined with a finite measurement.\n", stderr); return 2;
     }
@@ -1294,7 +1297,9 @@ int main(int argc, char** argv) {
                 output=vb_state_ui_render(&output_w,&output_h);output_texture=state_tex;
             }
             host_capture={output,output_w,output_h};
-            bool use_gpu=VB_GPU_RASTER && !game_video && !vb_renderer_active()
+            /* Ordinary1x retains the legacy path. An explicit CLI1 is a diagnostic
+             * GPU1 control; stored1x and normal UI1x never activate it. */
+            bool use_gpu=VB_GPU_RASTER && (vb_host_config.internal_scale>1 || requested_internal_scale==1) && !game_video && !vb_renderer_active()
                 && !vb_recolor_active() && !vb_overrides_active() && !vb_state_ui_mode()
                 && !vb_host_config.filter && output_w==384;
 #if defined(RECOMP_LAUNCHER)
@@ -1303,12 +1308,17 @@ int main(int argc, char** argv) {
             use_gpu=use_gpu && !recomp_runtime_ui_toast_visible(s_runtime_ui);
 #endif
 #endif
-            const bool gpu_presented=use_gpu && gpu_raster.present_current(win,vb_vip_display_fb()&1,stereo,
+            const bool qualified_gpu=use_gpu && gpu_raster.initialize(win);
+            vb_vip_raster_set_active(qualified_gpu);
+            const bool gpu_presented=qualified_gpu && gpu_raster.present_current(win,vb_vip_display_fb()&1,stereo,
                 (unsigned)vb_host_config.internal_scale,win_w,win_h,!measure_runtime);
             if(!gpu_presented) {
+            if(qualified_gpu)vb_vip_raster_set_active(0);
             ++gpu_cpu_present_fallbacks;
+            if(gpu_pass_timing)gpu_raster.legacy_begin(win,ren);
             SDL_UpdateTexture(output_texture, nullptr, output,
                               output_w * (int)sizeof(uint32_t));
+            if(gpu_pass_timing)gpu_raster.legacy_source(uint64_t(output_w)*output_h*sizeof(uint32_t));
 
             double sx = (double)win_w / output_w;
             double sy = (double)win_h / output_h;
@@ -1322,6 +1332,7 @@ int main(int argc, char** argv) {
             SDL_SetRenderDrawColor(ren, 0, 0, 0, 0xFF);
             SDL_RenderClear(ren);
             SDL_RenderCopy(ren, output_texture, nullptr, &dst);
+            if(gpu_pass_timing)gpu_raster.legacy_end(ren);
             SDL_RenderPresent(ren);
             }
 
@@ -1376,9 +1387,9 @@ int main(int argc, char** argv) {
         uint64_t capture_bytes=0,reused_capture_pages=0;
         vb_viewport_capture_costs(&capture_bytes,&reused_capture_pages);
         unsigned video_active=0,video_dummy=0,renderer_flags=0,renderer_opengl=0;
-        VbVipGpuRasterCosts gpu_costs{};uint64_t gpu_fallbacks=0;
+        VbVipGpuRasterCosts gpu_costs{},legacy_costs{};uint64_t gpu_fallbacks=0;
 #if VB_RUNTIME_HAVE_SDL
-        gpu_costs=gpu_raster.costs();gpu_fallbacks=gpu_cpu_present_fallbacks;
+        gpu_costs=gpu_raster.costs();legacy_costs=gpu_raster.legacy_costs();gpu_fallbacks=gpu_cpu_present_fallbacks;
         const char* video_driver=SDL_GetCurrentVideoDriver();
         video_active=video_driver!=nullptr;video_dummy=video_driver && !std::strcmp(video_driver,"dummy");
         SDL_RendererInfo renderer_info{};
@@ -1402,8 +1413,13 @@ int main(int argc, char** argv) {
             "\"gpu_raster_frames\":%llu,\"cpu_present_fallbacks\":%llu,\"gpu_raster_init_failures\":%llu,"
             "\"gpu_requested_scale\":%u,\"gpu_effective_scale\":%u,\"gpu_upload_bytes\":%llu,"
             "\"gpu_last_upload_bytes\":%llu,\"gpu_max_upload_bytes\":%llu,\"gpu_timer_available\":%u,"
+            "\"gpu_source_upload_nanoseconds\":%llu,\"gpu_raster_compose_nanoseconds\":%llu,"
             "\"gpu_nanoseconds\":%llu,\"gpu_max_nanoseconds\":%llu,\"gpu_timed_frames\":%llu,"
             "\"gpu_timer_pending\":%llu,\"gpu_timer_skipped\":%llu,"
+            "\"legacy_gpu_timer_available\":%u,\"legacy_gpu_source_upload_nanoseconds\":%llu,"
+            "\"legacy_gpu_raster_compose_nanoseconds\":%llu,\"legacy_gpu_nanoseconds\":%llu,"
+            "\"legacy_gpu_timed_frames\":%llu,\"legacy_gpu_timer_pending\":%llu,\"legacy_gpu_timer_skipped\":%llu,"
+            "\"legacy_gpu_upload_bytes\":%llu,"
             "\"workload_scope\":\"%s\"}\n",
             cpu.frame,benchmark_seconds,cpu.frame/benchmark_seconds,benchmark_cpu_seconds,
             (unsigned long long)cpu.cycles,cpu.pc,hash,(unsigned long long)vb_execution.native_instructions,
@@ -1428,8 +1444,13 @@ int main(int argc, char** argv) {
             (unsigned long long)gpu_costs.frames,(unsigned long long)gpu_fallbacks,(unsigned long long)gpu_costs.init_failures,
             gpu_costs.requested_scale,gpu_costs.effective_scale,(unsigned long long)gpu_costs.upload_bytes,
             (unsigned long long)gpu_costs.last_upload_bytes,(unsigned long long)gpu_costs.max_upload_bytes,(unsigned)gpu_costs.timer_available,
+            (unsigned long long)gpu_costs.gpu_source_upload_nanoseconds,(unsigned long long)gpu_costs.gpu_raster_compose_nanoseconds,
             (unsigned long long)gpu_costs.gpu_nanoseconds,(unsigned long long)gpu_costs.gpu_max_nanoseconds,(unsigned long long)gpu_costs.timed_frames,
             (unsigned long long)gpu_costs.timer_pending,(unsigned long long)gpu_costs.timer_skipped,
+            (unsigned)legacy_costs.timer_available,(unsigned long long)legacy_costs.gpu_source_upload_nanoseconds,
+            (unsigned long long)legacy_costs.gpu_raster_compose_nanoseconds,(unsigned long long)legacy_costs.gpu_nanoseconds,
+            (unsigned long long)legacy_costs.timed_frames,(unsigned long long)legacy_costs.timer_pending,(unsigned long long)legacy_costs.timer_skipped,
+            (unsigned long long)legacy_costs.upload_bytes,
             measure_runtime?"uncapped-full-runtime":"headless-core");
         // The finite-run contract requires a durable result before frontend,
         // audio and allocator teardown. Treat an output error as a failed run.
@@ -1450,7 +1471,7 @@ int main(int argc, char** argv) {
 #if VB_RUNTIME_HAVE_SDL
     s_controllers.close();
     if (aud) { SDL_PauseAudioDevice(aud, 1); SDL_CloseAudioDevice(aud); }
-    gpu_raster.reset();
+    vb_vip_raster_set_active(0);gpu_raster.reset();
     if (tex) SDL_DestroyTexture(tex);
     if (state_tex) SDL_DestroyTexture(state_tex);
     if (ren) SDL_DestroyRenderer(ren);
