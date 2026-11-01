@@ -4,6 +4,7 @@
 #include "viewport.h"
 #include "red_lut.h"
 #include <SDL.h>
+#include "../src/sdl_window.h"
 #include <SDL_opengl.h>
 #include <cmath>
 #include <cassert>
@@ -69,9 +70,30 @@ static unsigned random_value(){seed^=seed<<13;seed^=seed>>17;seed^=seed<<5;retur
 int main(int argc,char** argv) {
     const bool palette_only=argc==2 && !std::strcmp(argv[1],"--palette-only");
     const bool corrections=argc==2 && !std::strcmp(argv[1],"--corrections-only");
-    const bool legacy=argc==2 && !std::strcmp(argv[1],"--legacy-timing-only");assert(argc==1 || palette_only || corrections || legacy);
+    const bool legacy=argc==2 && !std::strcmp(argv[1],"--legacy-timing-only");const bool noactivate=argc==2 && !std::strcmp(argv[1],"--noactivate-window-only");assert(argc==1 || palette_only || corrections || legacy || noactivate);
     assert(SDL_Init(SDL_INIT_VIDEO)==0);
-    SDL_Window* window=SDL_CreateWindow("Hidden VIP raster readback",0,0,768,448,SDL_WINDOW_OPENGL|SDL_WINDOW_HIDDEN);assert(window);
+    SDL_Window* window=vb_sdl_create_window("Hidden VIP raster readback",0,0,768,448,SDL_WINDOW_HIDDEN|(noactivate?0:SDL_WINDOW_OPENGL));assert(window);
+    if(noactivate) {
+#if defined(_WIN32)
+        assert(vb_sdl_noactivate_window_requested());SDL_SysWMinfo info{};SDL_VERSION(&info.version);
+        assert(SDL_GetWindowWMInfo(window,&info) && info.subsystem==SDL_SYSWM_WINDOWS);
+        HWND hwnd=info.info.win.window;assert(!IsWindowVisible(hwnd));assert(GetWindowLongPtrW(hwnd,GWL_EXSTYLE)&WS_EX_NOACTIVATE);
+        DWORD foreground_pid=0;HWND before=GetForegroundWindow();GetWindowThreadProcessId(before,&foreground_pid);assert(foreground_pid!=GetCurrentProcessId());
+        SDL_SetHint(SDL_HINT_RENDER_DRIVER,"opengl");SDL_Renderer* renderer=SDL_CreateRenderer(window,-1,SDL_RENDERER_ACCELERATED);assert(renderer);
+        SDL_RendererInfo renderer_info{};assert(SDL_GetRendererInfo(renderer,&renderer_info)==0 && !std::strcmp(renderer_info.name,"opengl"));
+        SDL_SysWMinfo final_info{};SDL_VERSION(&final_info.version);assert(SDL_GetWindowWMInfo(window,&final_info));
+        HWND final_hwnd=final_info.info.win.window;assert(!IsWindowVisible(final_hwnd));
+        SDL_GLContext context=SDL_GL_GetCurrentContext();assert(context);
+        assert(vb_sdl_show_guarded_window(window));
+        for(unsigned i=0;i<5;++i){SDL_PumpEvents();SDL_RenderClear(renderer);SDL_RenderPresent(renderer);SDL_Delay(10);DWORD pid=0;GetWindowThreadProcessId(GetForegroundWindow(),&pid);assert(pid!=GetCurrentProcessId());assert(SDL_GL_GetCurrentContext()==context);}
+        assert(IsWindowVisible(final_hwnd));assert(GetWindowLongPtrW(final_hwnd,GWL_EXSTYLE)&WS_EX_NOACTIVATE);
+        HWND after=GetForegroundWindow();SDL_HideWindow(window);SDL_DestroyRenderer(renderer);SDL_DestroyWindow(window);SDL_Quit();
+        DWORD pid=0;GetWindowThreadProcessId(GetForegroundWindow(),&pid);assert(pid!=GetCurrentProcessId());
+        std::printf("PASS: owned HWND hidden/style verified before show; WS_EX_NOACTIVATE retained, GL context survives, foreground guard passes (same foreground=%u, HWND recreated=%u)\n",(unsigned)(before==after),(unsigned)(hwnd!=final_hwnd));return 0;
+#else
+        SDL_DestroyWindow(window);SDL_Quit();std::puts("SKIP: Win32 no-activation style is platform gated");return 0;
+#endif
+    }
     VbVipGpuRaster gpu;
     SDL_Window* plain=SDL_CreateWindow("Hidden portable fallback",0,0,32,32,SDL_WINDOW_HIDDEN);assert(plain);
     assert(!gpu.initialize(plain));assert(!gpu.initialize(plain));assert(gpu.costs().init_failures==1);gpu.reset();SDL_DestroyWindow(plain);
