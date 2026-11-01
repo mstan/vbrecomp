@@ -84,6 +84,72 @@ static void setup_observers(CPUState* cpu,VbExecutionStats* stats) {
         assert(vb_simulation_points_enable(1));
     }
 }
+#ifdef VB_TEST_COVERAGE_EDGES
+void vb_test_coverage_clear(void);
+void vb_test_coverage_seed(unsigned,uint64_t);
+void vb_test_coverage_seed_overflow(uint64_t);
+void vb_reference_test_coverage_clear(void);
+void vb_reference_test_coverage_seed(unsigned,uint64_t);
+void vb_reference_test_coverage_seed_overflow(uint64_t);
+static void compare_coverage(void) {
+    for(unsigned slot=0;slot<VB_FALLBACK_COVERAGE_CAPACITY;++slot) {
+        uint32_t a=0,b=0;uint64_t ah=0,bh=0;
+        assert(vb_fallback_coverage_get(slot,&a,&ah)==vb_reference_fallback_coverage_get(slot,&b,&bh));
+        assert(a==b && ah==bh);
+    }
+    assert(vb_fallback_coverage_overflow()==vb_reference_fallback_coverage_overflow());
+}
+static void coverage_step(uint32_t pc) {
+    CPUState initial={0};initial.pc=pc;initial.step_budget=1;initial.cycle_deadline=100;
+    initial.read8=read8;initial.read16=read16;initial.read32=read32;
+    initial.write8=write8;initial.write16=write16;initial.write32=write32;
+    CPUState expected=initial,actual=initial;
+    vb_reference_execution=(VbExecutionStats){0};vb_execution=(VbExecutionStats){0};
+    memcpy(memory,initial_memory,sizeof(memory));setup_observers(&expected,&vb_reference_execution);
+    vb_reference_interpreter_fallback(&expected);uint64_t expected_trace=trace;
+    unsigned expected_accesses=accesses,expected_hooks=hook_calls;
+    memcpy(reference_memory,memory,sizeof(memory));
+    memcpy(memory,initial_memory,sizeof(memory));setup_observers(&actual,&vb_execution);
+    vb_interpreter_fallback(&actual);
+    assert(!memcmp(&actual,&expected,sizeof(actual)));
+    assert(!memcmp(&vb_execution,&vb_reference_execution,sizeof(vb_execution)));
+    assert(!memcmp(memory,reference_memory,sizeof(memory)) && trace==expected_trace);
+    assert(accesses==expected_accesses && hook_calls==expected_hooks);
+}
+static void coverage_edges(void) {
+    vb_test_coverage_clear();vb_reference_test_coverage_clear();
+    memset(initial_memory,0,sizeof(initial_memory)); /* MOV r0,r0 at every fetch. */
+    scenario=change_mode=patch_code=0;
+    unsigned inverse=0;
+    while(((inverse*2654435761u)&(VB_FALLBACK_COVERAGE_CAPACITY-1))!=1)++inverse;
+    const uint32_t a=0x20000,c=a+0x2000,b=inverse*2;
+    coverage_step(a);coverage_step(c);coverage_step(b); /* Slots0,1,2; distinct cache sets for c/b. */
+    for(unsigned i=0,used=3;used<VB_FALLBACK_COVERAGE_CAPACITY;++i) {
+        if(i*2==b)continue;
+        coverage_step(i*2);++used;
+    }
+    compare_coverage();
+    /* A wrapping row creates a hole before a cached positive in another set.
+     * The original probe now inserts a duplicate PC into that earlier slot. */
+    coverage_step(b);vb_test_coverage_seed(1,UINT64_MAX);vb_reference_test_coverage_seed(1,UINT64_MAX);
+    coverage_step(c);coverage_step(b);compare_coverage();
+    const uint32_t missing=0x100000+inverse*4; /* Hash2; absent from the full table. */
+    for(unsigned i=0;i<65;++i)coverage_step(missing);
+    assert(vb_fallback_coverage_overflow()==65);compare_coverage();
+    vb_test_coverage_seed_overflow(UINT64_MAX);vb_reference_test_coverage_seed_overflow(UINT64_MAX);
+    coverage_step(missing);coverage_step(missing);
+    assert(vb_fallback_coverage_overflow()==1);compare_coverage();
+    /* A previously cached negative must become an insertion after another
+     * counter wraps; neither its old miss nor cached positives may survive. */
+    vb_test_coverage_seed(0,UINT64_MAX);vb_reference_test_coverage_seed(0,UINT64_MAX);
+    coverage_step(a);coverage_step(missing);
+    assert(vb_fallback_coverage_overflow()==1);compare_coverage();
+    for(unsigned i=0;i<256;++i)coverage_step(0x400000+2*(i*256+5));
+    for(unsigned i=0;i<32;++i)coverage_step(0); /* Zero is a real PC, not a cache sentinel. */
+    compare_coverage();
+    puts("PASS: original full coverage slots/hits, repeated misses, cache aliases, PC0 and independent hit/overflow counter wraps");
+}
+#endif
 int main(void) {
     unsigned total_steps=0,long_steps=0,observed_hooks=0,observed_callbacks=0;
     const unsigned ops[]={0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,23,24,25,26,29,30,31,32,34,36,38,40,41,42,43,44,45,46,47,48,49,51,52,53,55,56,57,58,59,60,61,62,63};
@@ -154,6 +220,9 @@ int main(void) {
         assert(pc==expected_pc && hits==expected_hits);
     }
     assert(vb_fallback_coverage_overflow()==vb_reference_fallback_coverage_overflow());
+#ifdef VB_TEST_COVERAGE_EDGES
+    coverage_edges();
+#endif
     assert(total_steps && observed_callbacks && long_steps>1000);
 #ifdef VB_CPUHOOK_ENABLE
     assert(observed_hooks);

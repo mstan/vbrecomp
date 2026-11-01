@@ -21,6 +21,22 @@ budget charge. Mode changes can cross between these paths at the next iteration.
 Native-only misses retain their original failure. Generated native routing stays
 on the original OFF path in the safe consumer profile.
 
+The generic default-HYBRID investigation also found an active coverage-table
+cost: the real Zero route at frame1600 had4096 occupied slots and87,943,359
+overflow hits in both original arms. Each overflow performs the original full
+4096-slot probe. The ON profile now has a fixed256-entry result cache (2KiB)
+for that existing probe. It preserves the public slot layout, PC/hit counts,
+overflow count and first/last accounting. A hit counter wrapping to the empty
+sentinel invalidates all cached positives and negatives; overflow wraps
+independently. Code fetches and instruction execution remain live.
+
+The OFF probe remains verbatim, with the entire preprocessed interpreter
+translation unit token-identical to retained9ff. The existing frozen-original
+differential fixture also covers full tables, repeated missing PCs, aliases,
+PC0, duplicate insertion after a counter wrap and independent counter wraps.
+Windows debug/production/CPUHOOK/ OFF profiles pass. Built-game performance
+and the candidate's retention remain pending; these are component results.
+
 Supported profiles, using the ordinary existing build pipeline:
 
 ```sh

@@ -15,3 +15,9 @@
 #define vb_interpreter_step vb_reference_interpreter_step
 #define vb_interpreter_fallback vb_reference_interpreter_fallback
 #include "interpreter_batch_reference.inc"
+/* Private near-overflow seeding does not change the frozen reference body. */
+void vb_reference_test_coverage_clear(void) {
+    memset(fallback_coverage,0,sizeof(fallback_coverage));fallback_coverage_overflow=0;
+}
+void vb_reference_test_coverage_seed(unsigned slot,uint64_t hits) { fallback_coverage[slot].hits=hits; }
+void vb_reference_test_coverage_seed_overflow(uint64_t hits) { fallback_coverage_overflow=hits; }

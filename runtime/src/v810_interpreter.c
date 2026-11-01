@@ -58,6 +58,42 @@ int vb_branch_predicate_lookup(const CPUState* cpu,uint32_t pc,uint16_t word,int
 typedef struct { uint32_t pc; uint64_t hits; } VbFallbackCoverage;
 static VbFallbackCoverage fallback_coverage[VB_FALLBACK_COVERAGE_CAPACITY];
 static uint64_t fallback_coverage_overflow;
+#if VB_INTERPRETER_BATCH
+/* The public table/order/counters stay unchanged. Once full, its keys cannot
+ * change until a hit counter wraps to the original empty sentinel. Cache only
+ * results of that original probe, including repeated full-table misses. */
+enum { COVERAGE_CACHE_COUNT=256 };
+typedef struct { uint32_t pc; uint16_t slot; uint8_t kind; } VbCoverageCache;
+static VbCoverageCache coverage_cache[COVERAGE_CACHE_COUNT];
+static int coverage_full;
+static void coverage_cache_clear(void) {
+    memset(coverage_cache,0,sizeof(coverage_cache));coverage_full=0;
+}
+static void record_fallback_pc(uint32_t pc) {
+    VbCoverageCache* cache=coverage_cache+(((pc>>1)*2654435761u)&(COVERAGE_CACHE_COUNT-1));
+    if(cache->kind && cache->pc==pc) {
+        if(cache->kind==1) {
+            VbFallbackCoverage* row=fallback_coverage+cache->slot;
+            if(row->hits && row->pc==pc) {
+                if(++row->hits==0)coverage_cache_clear();
+                return;
+            }
+        } else if(coverage_full) {++fallback_coverage_overflow;return;}
+    }
+    unsigned slot=((pc>>1)*2654435761u)&(VB_FALLBACK_COVERAGE_CAPACITY-1);
+    for (unsigned n=0;n<VB_FALLBACK_COVERAGE_CAPACITY;++n) {
+        VbFallbackCoverage* row=fallback_coverage+slot;
+        if (!row->hits || row->pc==pc) { row->pc=pc;++row->hits;
+            if(!row->hits)coverage_cache_clear();
+            else {*cache=(VbCoverageCache){pc,(uint16_t)slot,1};}
+            return; }
+        slot=(slot+1)&(VB_FALLBACK_COVERAGE_CAPACITY-1);
+    }
+    coverage_full=1;*cache=(VbCoverageCache){pc,0,2};
+    ++fallback_coverage_overflow;
+}
+#else
+/* Keep the native OFF translation unit exactly as retained. */
 static void record_fallback_pc(uint32_t pc) {
     unsigned slot=((pc>>1)*2654435761u)&(VB_FALLBACK_COVERAGE_CAPACITY-1);
     for (unsigned n=0;n<VB_FALLBACK_COVERAGE_CAPACITY;++n) {
@@ -67,6 +103,7 @@ static void record_fallback_pc(uint32_t pc) {
     }
     ++fallback_coverage_overflow;
 }
+#endif
 int vb_fallback_coverage_get(unsigned slot,uint32_t* pc,uint64_t* hits) {
     if (slot>=VB_FALLBACK_COVERAGE_CAPACITY || !fallback_coverage[slot].hits) return 0;
     *pc=fallback_coverage[slot].pc;*hits=fallback_coverage[slot].hits;return 1;

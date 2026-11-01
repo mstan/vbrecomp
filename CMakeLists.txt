@@ -129,11 +129,11 @@ if(BUILD_TESTING)
     foreach(_interpreter_mode debug production cpuhook)
         set(_interpreter_target vb-interpreter-batch-${_interpreter_mode}-test)
         add_executable(${_interpreter_target} runtime/tests/interpreter_batch_test.c
-            runtime/tests/interpreter_batch_reference.c runtime/src/v810_interpreter.c
+            runtime/tests/interpreter_batch_reference.c runtime/tests/interpreter_batch_candidate.c
             runtime/src/v810_extended.c runtime/src/interrupts.c runtime/src/simulation_points.c
             runtime/src/no_game_linked.c)
         target_include_directories(${_interpreter_target} PRIVATE runtime/include)
-        target_compile_definitions(${_interpreter_target} PRIVATE VB_SIMULATION_POINTS=1 VB_INTERPRETER_BATCH=1)
+        target_compile_definitions(${_interpreter_target} PRIVATE VB_SIMULATION_POINTS=1 VB_INTERPRETER_BATCH=1 VB_TEST_COVERAGE_EDGES=1)
         if(_interpreter_mode STREQUAL "production")
             target_compile_definitions(${_interpreter_target} PRIVATE VBRECOMP_INSTRUCTION_DEBUG=0)
         elseif(_interpreter_mode STREQUAL "cpuhook")
