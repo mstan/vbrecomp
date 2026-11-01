@@ -24,7 +24,7 @@ option(VBRECOMP_VERSIONED_CAPTURE "Copy only changed canonical VIP capture pages
 option(VBRECOMP_FRAMEBUFFER_BLOCKS "Decode four framebuffer rows per packed-byte read" ON)
 option(VBRECOMP_VERSIONED_HISTORY "Share qualified frozen pages without re-comparing their bytes" ON)
 option(VBRECOMP_STREAM_SHADING "Stream qualified local-pixel shading with ready viewport rows" ON)
-option(VBRECOMP_INTERPRETER_BATCH "Keep exact forced-interpreter steps in one shared execution loop" ON)
+option(VBRECOMP_INTERPRETER_BATCH "Batch exact interpreter steps (explicit generic-host profile)" OFF)
 option(VBRECOMP_LTO "Evaluate compiler interprocedural optimization for the built runtime" OFF)
 set(VBRECOMP_LTO_ACTIVE OFF)
 if(VBRECOMP_LTO)
@@ -120,9 +120,10 @@ if(BUILD_TESTING)
         set(_interpreter_target vb-interpreter-batch-${_interpreter_mode}-test)
         add_executable(${_interpreter_target} runtime/tests/interpreter_batch_test.c
             runtime/tests/interpreter_batch_reference.c runtime/src/v810_interpreter.c
-            runtime/src/v810_extended.c runtime/src/interrupts.c runtime/src/simulation_points.c)
+            runtime/src/v810_extended.c runtime/src/interrupts.c runtime/src/simulation_points.c
+            runtime/src/no_game_linked.c)
         target_include_directories(${_interpreter_target} PRIVATE runtime/include)
-        target_compile_definitions(${_interpreter_target} PRIVATE VB_SIMULATION_POINTS=1)
+        target_compile_definitions(${_interpreter_target} PRIVATE VB_SIMULATION_POINTS=1 VB_INTERPRETER_BATCH=1)
         if(_interpreter_mode STREQUAL "production")
             target_compile_definitions(${_interpreter_target} PRIVATE VBRECOMP_INSTRUCTION_DEBUG=0)
         elseif(_interpreter_mode STREQUAL "cpuhook")
