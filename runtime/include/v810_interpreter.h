@@ -72,12 +72,17 @@ static inline void vb_execution_charge(CPUState* c, unsigned op, unsigned base) 
 /* Execute one real instruction through the live bus. No host call stack. */
 void vb_interpreter_step(CPUState* cpu);
 #ifndef VB_INTERPRETER_BATCH
-#define VB_INTERPRETER_BATCH 1
+#define VB_INTERPRETER_BATCH 0
 #endif
+#if VB_INTERPRETER_BATCH
 /* Exact forced-interpreter dispatch span. Every instruction still performs live
  * bus fetches and observer checks. Return on caller PC, halt/yield, exhausted
  * budget/deadline or an observer changing the selected execution backend. */
 void vb_interpreter_run(CPUState* cpu, uint64_t return_pc);
+/* Generic host has no native routes: batch its ordinary hybrid fallback too,
+ * retaining the original per-instruction fallback accounting and mode checks. */
+void vb_interpreter_run_generic(CPUState* cpu, uint64_t return_pc);
+#endif
 void vb_interpreter_fallback(CPUState* cpu);
 void vb_interpreter_extended(CPUState* cpu, uint16_t first, uint16_t second);
 int vb_execution_debug_check(CPUState* cpu);

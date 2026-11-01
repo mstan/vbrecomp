@@ -117,6 +117,7 @@ static uint32_t shift(CPUState* c, uint32_t a, unsigned sh, unsigned op) {
     }
     sz(c,r); c->psw_ov=0; return r;
 }
+#if VB_INTERPRETER_BATCH
 /* Inline only within this translation unit, keeping one ISA implementation.
  * Other C11 compilers retain a functioning ordinary inline fallback. */
 #if defined(_MSC_VER)
@@ -127,6 +128,10 @@ static uint32_t shift(CPUState* c, uint32_t a, unsigned sh, unsigned op) {
 #define VB_INTERPRETER_INLINE static inline
 #endif
 VB_INTERPRETER_INLINE void interpreter_step(CPUState* c) {
+#else
+/* OFF preserves the original public function, without an inline wrapper. */
+void vb_interpreter_step(CPUState* c) {
+#endif
     if (vb_execution_before(c)) return;
     static const uint8_t costs[64] = {
         1,1,1,1,1,1,3,1,13,38,13,36,1,1,1,1,
@@ -226,6 +231,7 @@ finish:
     if(write && r2) c->gpr[r2]=result;
     c->gpr[0]=0; c->pc=next;
 }
+#if VB_INTERPRETER_BATCH
 void vb_interpreter_step(CPUState* c) { interpreter_step(c); }
 void vb_interpreter_run(CPUState* c, uint64_t return_pc) {
     while(c->pc!=return_pc && !c->halted && !c->yielded
@@ -236,7 +242,28 @@ void vb_interpreter_run(CPUState* c, uint64_t return_pc) {
         --c->step_budget;interpreter_step(c);
     }
 }
+void vb_interpreter_run_generic(CPUState* c, uint64_t return_pc) {
+    while(c->pc!=return_pc && !c->halted && !c->yielded) {
+        if(!c->step_budget || c->cycles>=c->cycle_deadline) { c->yielded=1;return; }
+        if(vb_execution.mode==VB_EXEC_INTERPRETER) {
+            --c->step_budget;interpreter_step(c);
+        } else {
+            if(vb_execution.mode==VB_EXEC_NATIVE)
+                vb_stub_abort("native-only dispatch miss",c->pc,c->pc);
+            uint32_t pc=c->pc;
+            uint64_t before=vb_execution.interpreted;
+            interpreter_step(c);
+            /* Hybrid fallback charges only a retired instruction; debugger
+             * stops and simulation redirects keep the original contract. */
+            if(before==vb_execution.interpreted)continue;
+            if(!vb_execution.fallback)vb_execution.first_fallback_pc=pc;
+            vb_execution.last_fallback_pc=pc;
+            ++vb_execution.fallback;record_fallback_pc(pc);--c->step_budget;
+        }
+    }
+}
 #undef VB_INTERPRETER_INLINE
+#endif
 void vb_interpreter_fallback(CPUState* c) {
     if (vb_execution.mode==VB_EXEC_NATIVE)
         vb_stub_abort("native-only dispatch miss",c->pc,c->pc);

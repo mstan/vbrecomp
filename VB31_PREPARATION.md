@@ -1,4 +1,48 @@
-# VB31 exact interpreter-span preparation
+# VB31 structural interpreter-span revision
+
+This is the final bounded structural experiment after `c688a331`. That earlier
+candidate failed its native Wario control despite an interpreter-profile benefit;
+it is not promoted. Existing evidence remains retained outside this worktree.
+The new revision is **not accepted**: root controls real game qualification and
+matched per-game timing after source/component/generic compatibility checks.
+
+`VBRECOMP_INTERPRETER_BATCH=OFF` is the global and header default. It compiles
+the original public `vb_interpreter_step` body and original generic/native
+dispatch behavior; the new inline body, wrappers and span functions are absent.
+The ISA body has one source definition behind a gated declaration, not two
+implementations to maintain. Explicit ON is the standalone generic build profile.
+
+The generic `NO_GAME_LINKED` host now batches its real default HYBRID fallback
+as well as forced interpretation. Every iteration preserves live fetches,
+observers, debugger/simulation callbacks, halt/yield/caller/budget/deadline exits,
+and execution-mode changes. HYBRID charges budget and fallback coverage only
+after a retired instruction; forced interpretation keeps its original pre-step
+budget charge. Mode changes can cross between these paths at the next iteration.
+Native-only misses retain their original failure. Generated native routing stays
+on the original OFF path in the safe consumer profile.
+
+Supported profiles, using the ordinary existing build pipeline:
+
+```sh
+# Native consumer/game builds: default OFF, or make it explicit in their CMake job.
+cmake -S . -B build-native -DVBRECOMP_INTERPRETER_BATCH=OFF
+
+# Standalone generic host: empty generated module plus explicit ON.
+cmake -S . -B build-generic -DVBRECOMP_GAME= -DVBRECOMP_INTERPRETER_BATCH=ON
+cmake --build build-generic --target vb-runtime --parallel 1
+python tools/qa/generate_interpreter_workload.py --out diagnostic --runtime build-generic/runtime/vb-runtime.exe
+```
+
+The original public diagnostic defaults to omitting `--execution`, exercising
+the generic host's default zero-valued HYBRID mode. Use `--execution interpreter`
+on the generator to prepare its forced-profile control. Neither command launches
+implicitly. The differential fixture covers direct forced spans and actual
+generic public dispatch/call APIs in forced and default HYBRID modes, including
+bidirectional observer mode changes and exact fallback-PC coverage. Its frozen
+reference remains the untouched retained interpreter.
+
+The earlier preparation below describes the original forced-only experiment;
+this section supersedes its defaults, routing and pending-state statements.
 
 Status: isolated prototype with component checks. No built-game qualification,
 performance result, retention decision or merge approval exists for this item.
