@@ -225,3 +225,16 @@ Legacy `VBRECOMP_OVERRIDES` and related capture/recolor experiments still exist
 for prior workflows. Clear them when testing package renderers; they can otherwise
 add their own native draw suppression or overlays. `.vbmod` installation does not
 set those environment variables.
+
+## Stereoscopic presentation
+
+The trusted plugin `vb.display.anaglyph` enables red/cyan anaglyph output.
+A game package can select it as an optional feature. It renders both eye
+images independently, including active color rendering and overlays, then
+puts left-eye brightness in red and right-eye brightness in green and blue.
+Use glasses with the red lens over the left eye. Brightness is the largest
+RGB channel, preserving the faithful red renderer's intensity.
+
+This presentation mode uses the native raster with host window scaling;
+the separate HD GPU raster path is bypassed. Ordinary single-eye and stacked
+stereo output retain their previous paths when the feature is disabled.

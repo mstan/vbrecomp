@@ -42,6 +42,7 @@ static double process_cpu_seconds() {
 #include "asset_pack.h"
 #include "recolor.h"
 #include "renderer.h"
+#include "stereo.h"
 #include "viewport.h"
 #include "mod_runtime.h"
 #include "host.h"
@@ -734,7 +735,7 @@ int main(int argc, char** argv) {
     Uint64            sdl_period = 0;
     Uint64            sdl_deadline = 0;
     int               tex_w = VB_RT_EYE_W;
-    int               tex_h = stereo ? VB_RT_EYE_H * 2 : VB_RT_EYE_H;
+    int               tex_h = stereo && !vb_stereo_anaglyph_enabled() ? VB_RT_EYE_H * 2 : VB_RT_EYE_H;
     std::vector<uint32_t> tex_storage(VB_VIEWPORT_MAX_WIDTH * VB_RT_EYE_H * 2);
     uint32_t*         tex_pixels = tex_storage.data();
     VbHostCapture host_capture{tex_pixels, tex_w, tex_h};
@@ -1225,17 +1226,20 @@ int main(int argc, char** argv) {
 
             int win_w = 0, win_h = 0;
             SDL_GetRendererOutputSize(ren, &win_w, &win_h);
-            vb_viewport_window(win_w, stereo ? win_h / 2 : win_h);
+            const bool anaglyph = vb_stereo_anaglyph_enabled() != 0;
+            const bool stacked = stereo && !anaglyph;
+            const bool both_eyes = stereo || anaglyph;
+            vb_viewport_window(win_w, stacked ? win_h / 2 : win_h);
             int view_width=0,view_height=0;
             const int view_seat=vb_netplay_view_seat();
             const bool game_video=vb_game_host_video_size(view_seat,&view_width,&view_height)!=0;
-            if(!game_video) {view_width=vb_renderer_present_width();view_height=stereo?VB_RT_EYE_H*2:VB_RT_EYE_H;}
+            if(!game_video) {view_width=vb_renderer_present_width();view_height=stacked?VB_RT_EYE_H*2:VB_RT_EYE_H;}
             if (view_width != tex_w || view_height != tex_h) {
                 SDL_Texture* resized = SDL_CreateTexture(ren, SDL_PIXELFORMAT_ARGB8888,
                     SDL_TEXTUREACCESS_STREAMING, view_width, view_height);
                 if (!resized) vb_stub_abort("cannot resize presentation texture", cpu.pc, view_width);
                 SDL_DestroyTexture(tex); tex = resized; tex_w = view_width;tex_h=view_height;
-                tex_storage.resize(size_t(tex_w)*tex_h);tex_pixels=tex_storage.data();
+                tex_storage.resize(size_t(tex_w)*tex_h*(anaglyph?2u:1u));tex_pixels=tex_storage.data();
                 host_capture.pixels=tex_pixels;
                 host_capture.width = tex_w;
                 host_capture.height=tex_h;
@@ -1246,6 +1250,10 @@ int main(int argc, char** argv) {
                 runtime_ui_context.texture = tex;
 #endif
             }
+            // The second eye is temporary when composing into one anaglyph
+            // image. A live toggle can change storage without resizing texture.
+            tex_storage.resize(size_t(tex_w)*tex_h*(anaglyph?2u:1u));
+            tex_pixels=tex_storage.data();
 
             /* Opt-in full-screen recolor uses the recolored present path;
              * otherwise the faithful render. */
@@ -1253,20 +1261,22 @@ int main(int argc, char** argv) {
             if(game_video) {
                 if(!vb_game_host_video_render(view_seat,0,tex_pixels,tex_w,tex_h))
                     vb_stub_abort("game presentation unavailable",cpu.pc,0);
-            } else if (vb_renderer_active()) {
+                if(anaglyph && !vb_game_host_video_render(view_seat,1,tex_pixels+size_t(tex_w)*tex_h,tex_w,tex_h))
+                    vb_stub_abort("right game presentation unavailable",cpu.pc,0);
+            } else if (vb_renderer_active() || (anaglyph && tex_w != VB_RT_EYE_W)) {
                 if (!vb_renderer_present_viewport(0, tex_w, tex_pixels))
                     vb_stub_abort("viewport frame unavailable", cpu.pc, tex_w);
-                if (stereo && !vb_renderer_present_viewport(1, tex_w, tex_pixels + tex_w * VB_RT_EYE_H))
+                if (both_eyes && !vb_renderer_present_viewport(1, tex_w, tex_pixels + tex_w * VB_RT_EYE_H))
                     vb_stub_abort("right viewport frame unavailable", cpu.pc, tex_w);
             } else if (recolor) {
                 vb_vip_render_framebuffer_recolored(0, &tex_pixels[0]);
-                if (stereo) {
+                if (both_eyes) {
                     vb_vip_render_framebuffer_recolored(1,
                         &tex_pixels[VB_RT_EYE_H * VB_RT_EYE_W]);
                 }
             } else {
                 vb_vip_render_framebuffer(0, &tex_pixels[0]);
-                if (stereo) {
+                if (both_eyes) {
                     vb_vip_render_framebuffer(1,
                         &tex_pixels[VB_RT_EYE_H * VB_RT_EYE_W]);
                 }
@@ -1279,7 +1289,7 @@ int main(int argc, char** argv) {
             if (!game_video && vb_overrides_active()) {
                 int slot = vb_vip_display_fb() & 1;
                 static uint32_t center[VB_RT_EYE_W * VB_RT_EYE_H];
-                for (int eye = 0; eye < (stereo ? 2 : 1); ++eye) {
+                for (int eye = 0; eye < (both_eyes ? 2 : 1); ++eye) {
                     uint32_t* image = tex_pixels + eye * tex_w * VB_RT_EYE_H;
                     int margin = (tex_w - VB_RT_EYE_W) / 2;
                     for (int y = 0; y < VB_RT_EYE_H; ++y)
@@ -1289,6 +1299,9 @@ int main(int argc, char** argv) {
                         std::memcpy(image + y * tex_w + margin, center + y * VB_RT_EYE_W, VB_RT_EYE_W * sizeof(uint32_t));
                 }
             }
+
+            if(anaglyph)
+                vb_stereo_anaglyph(tex_pixels,tex_pixels+size_t(tex_w)*tex_h,size_t(tex_w)*tex_h);
 
 #if defined(RECOMP_LAUNCHER)
             recomp_runtime_ui_render_argb8888(s_runtime_ui, tex_pixels,
@@ -1307,7 +1320,7 @@ int main(int argc, char** argv) {
              * an explicit finite pass-profiling control. */
             bool use_gpu=VB_GPU_RASTER && (vb_host_config.internal_scale>1 || (measure_runtime && gpu_pass_timing && requested_internal_scale==1)) && !game_video && !vb_renderer_active()
                 && !vb_recolor_active() && !vb_overrides_active() && !vb_state_ui_mode()
-                && !vb_host_config.filter && output_w==384;
+                && !vb_host_config.filter && !anaglyph && output_w==384;
 #if defined(RECOMP_LAUNCHER)
             use_gpu=use_gpu && !recomp_runtime_ui_is_open(s_runtime_ui);
 #if defined(RECOMP_RUNTIME_UI_HAS_TOAST)
