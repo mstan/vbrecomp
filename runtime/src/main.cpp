@@ -974,7 +974,9 @@ int main(int argc, char** argv) {
         std::fprintf(stderr,"vb-runtime: failed to bind TCP port %d\n",port);
         vb_netplay_stop();vb_state_shutdown();vb_memory_shutdown();return 4;
     }
+#if defined(VBRECOMP_DEBUG_TOOLS)
     std::printf("vb-runtime: listening on 127.0.0.1:%d\n",port);std::fflush(stdout);
+#endif
     vb_debug_server_set_paused(start_paused);
     uint32_t history_frame = UINT32_MAX;
     if(!headless && !benchmark_frames && !rewind_explicit) {
