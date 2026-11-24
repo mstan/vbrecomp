@@ -47,6 +47,7 @@ static double process_cpu_seconds() {
 #include "mod_runtime.h"
 #include "host.h"
 #include "png_write.h"
+#include "headless_capture.h"
 #include "cpu_state.h"
 #include "v810_interpreter.h"
 #include "debug_server.h"
@@ -509,6 +510,11 @@ int main(int argc, char** argv) {
     const char* benchmark_route_path = nullptr;
     struct BenchmarkSegment { uint32_t end; uint16_t pad; };
     std::vector<BenchmarkSegment> benchmark_route;
+    VbCaptureConfig capture_cfg{};
+    capture_cfg.from = -1; capture_cfg.to = -1; capture_cfg.every = 1;
+    bool capture_mode = false;
+    const char* load_state_path = nullptr;
+    uint32_t last_captured_frame = 0;
 
 
     for (int i = 1; i < argc; ++i) {
@@ -569,6 +575,8 @@ int main(int argc, char** argv) {
                 measure_window_height < 128 || measure_window_height > 8192) {
                 std::fputs("--measure-window requires WIDTHxHEIGHT in 128..8192\n", stderr); return 2;
             }
+        } else if (a == "--load-state" && i + 1 < argc) {
+            load_state_path = argv[++i];
         } else if (a == "--state-file" && i + 1 < argc) {
             state_file = argv[++i];
         } else if (a == "--rewind-frames" && i + 1 < argc) {
@@ -582,6 +590,26 @@ int main(int argc, char** argv) {
             char* end=nullptr;const char* value=argv[++i];unsigned long n=std::strtoul(value,&end,10);
             if(!*value || *end || *value=='-' || n<1 || n>60){std::puts("--rewind-interval requires 1..60");return 2;}
             rewind_interval=(unsigned)n;interval_explicit=true;
+        } else if (a == "--capture-out" && i + 1 < argc) {
+            capture_cfg.out_dir = argv[++i];
+        } else if (a == "--capture-wav" && i + 1 < argc) {
+            capture_cfg.wav_path = argv[++i];
+        } else if (a == "--input-script" && i + 1 < argc) {
+            capture_cfg.input_script = argv[++i];
+        } else if (a == "--capture-size" && i + 1 < argc) {
+            int cw = 0, ch = 0;
+            if (std::sscanf(argv[++i], "%dx%d", &cw, &ch) != 2 || cw < 16 || ch < 16 || cw > 16384 || ch > 16384) {
+                std::fputs("--capture-size expects WxH\n", stderr); return 2;
+            }
+            capture_cfg.width = cw; capture_cfg.height = ch;
+        } else if (a == "--capture-from" && i + 1 < argc) {
+            capture_cfg.from = std::atol(argv[++i]);
+        } else if (a == "--capture-to" && i + 1 < argc) {
+            capture_cfg.to = std::atol(argv[++i]);
+        } else if (a == "--capture-every" && i + 1 < argc) {
+            capture_cfg.every = std::atoi(argv[++i]);
+        } else if (a == "--exit-at-frame" && i + 1 < argc) {
+            frame_limit = (uint32_t)std::strtoul(argv[++i], nullptr, 10);
         } else if (a == "--paused") {
             start_paused = true;
         } else if (a == "--headless") {
@@ -626,6 +654,11 @@ int main(int argc, char** argv) {
         }
     }
 
+    capture_mode = vb_capture_start(&capture_cfg) != 0;
+    if (capture_mode) {
+        vb_capture_size(&measure_window_width, &measure_window_height);
+        std::puts("vb-runtime: capture mode (no window, no audio device, unpaced)");
+    }
 #if !VB_RUNTIME_HAVE_SDL
     /* The build doesn't have SDL2; window is impossible regardless of
      * the user's wishes. Treat as headless for the rest of main(). */
@@ -635,7 +668,7 @@ int main(int argc, char** argv) {
 #if !defined(VBRECOMP_DEBUG_TOOLS)
     if (start_paused) { std::fputs("--paused requires a debug-tools build.\n", stderr); return 2; }
 #endif
-    const int host_result = vb_host_prepare(argv[0], rom_path, headless || benchmark_frames != 0);
+    const int host_result = vb_host_prepare(argv[0], rom_path, headless || benchmark_frames != 0 || capture_mode);
     if (host_result < 0) { std::puts(vb_host_error().c_str()); return 2; }
     if (host_result == 0) return 0;
     if(requested_internal_scale)vb_host_config.internal_scale=requested_internal_scale;
@@ -839,7 +872,7 @@ int main(int argc, char** argv) {
         want.samples  = 1024;            /* ~23 ms @ 44.1 kHz */
         want.callback = vb_sdl_audio_cb;
         SDL_AudioSpec have;
-        aud = SDL_OpenAudioDevice(nullptr, 0, &want, &have, 0);
+        aud = capture_mode ? 0 : SDL_OpenAudioDevice(nullptr, 0, &want, &have, 0);
         if (aud == 0) {
             if(measure_runtime) return 3;
             std::fprintf(stderr,
@@ -997,6 +1030,12 @@ int main(int argc, char** argv) {
         vb_host_config.rewind_interval=(int)rewind_interval;
     }
     vb_state_ui_init(state_file.c_str());
+    if (load_state_path) {
+        const int loaded = vb_state_load_file(load_state_path);
+        std::fprintf(stderr, "vb-runtime: load state %s: %s\n", load_state_path,
+                     loaded == 0 ? "loaded" : vb_state_error());
+        if (loaded != 0 && capture_mode) { vb_capture_finish(); return 3; }
+    }
     VbStateCaptureCosts initial_capture_costs{};
     vb_state_capture_costs(&initial_capture_costs);
     VbVipDrawCosts initial_draw_costs{};vb_vip_draw_costs(&initial_draw_costs);
@@ -1163,7 +1202,14 @@ int main(int argc, char** argv) {
         /* The configured keyboard/controller drives a windowed game unless
          * a TCP input override is active. clear_input restores physical input. */
 #if VB_RUNTIME_HAVE_SDL
-        if (!headless && benchmark_route.empty() && !vb_debug_server_input_override()) {
+        if (capture_mode && vb_capture_has_input()) {
+            /* Scripted input stands in for the keyboard/controller. */
+            vb_input_set_pad(vb_capture_pad(0, cpu.frame + 1));
+            VbGameInputs physical{};
+            for (unsigned seat = 1; seat < vb_host_player_count(); ++seat)
+                physical.buttons[seat] = vb_capture_pad(seat, cpu.frame + 1);
+            vb_game_host_physical_inputs(&physical);
+        } else if (!headless && benchmark_route.empty() && !vb_debug_server_input_override()) {
             bool menu_open=vb_state_ui_mode()!=0;
 #if defined(RECOMP_LAUNCHER)
             menu_open=menu_open || (s_runtime_ui && recomp_runtime_ui_is_open(s_runtime_ui));
@@ -1322,7 +1368,7 @@ int main(int argc, char** argv) {
              * an explicit finite pass-profiling control. */
             bool use_gpu=VB_GPU_RASTER && (vb_host_config.internal_scale>1 || (measure_runtime && gpu_pass_timing && requested_internal_scale==1)) && !game_video && !vb_renderer_active()
                 && !vb_recolor_active() && !vb_overrides_active() && !vb_state_ui_mode()
-                && !vb_host_config.filter && !anaglyph && output_w==384;
+                && !vb_host_config.filter && !anaglyph && output_w==384 && !capture_mode;
 #if defined(RECOMP_LAUNCHER)
             use_gpu=use_gpu && !recomp_runtime_ui_is_open(s_runtime_ui);
 #if defined(RECOMP_RUNTIME_UI_HAS_TOAST)
@@ -1350,6 +1396,17 @@ int main(int argc, char** argv) {
             dst.x = (win_w - dst.w) / 2;
             dst.y = (win_h - dst.h) / 2;
 
+            if (capture_mode && cpu.frame != last_captured_frame) {
+                last_captured_frame = cpu.frame;
+                vb_capture_present(output, output_w, output_h, dst.x, dst.y, dst.w, dst.h, cpu.frame);
+                /* One block of mixed audio per presented frame, from the same
+                 * VSU ring the SDL callback would drain. */
+                static std::vector<int16_t> capture_audio;
+                const int n = vb_capture_audio_frames(cpu.frame);
+                capture_audio.assign((size_t)n * 2, 0);
+                vb_vsu_pull_samples(capture_audio.data(), (size_t)n);
+                vb_capture_audio(capture_audio.data(), n, cpu.frame);
+            }
             SDL_SetRenderDrawColor(ren, 0, 0, 0, 0xFF);
             SDL_RenderClear(ren);
             SDL_RenderCopy(ren, output_texture, nullptr, &dst);
@@ -1359,7 +1416,7 @@ int main(int argc, char** argv) {
 
             /* Pace to VB_RT_FRAME_HZ — TAB skips the wait (turbo). */
             const Uint8* keys = SDL_GetKeyboardState(nullptr);
-            const bool turbo = measure_runtime || (keys && keys[SDL_SCANCODE_TAB]);
+            const bool turbo = measure_runtime || capture_mode || (keys && keys[SDL_SCANCODE_TAB]);
             Uint64 now = SDL_GetPerformanceCounter();
             if (sdl_deadline == 0 || now >= sdl_deadline + sdl_period * 3) {
                 /* Either first present or we fell badly behind; resync. */
@@ -1392,6 +1449,7 @@ int main(int argc, char** argv) {
 #endif
     }
 
+    vb_capture_finish();
     vb_watchdog_stop();
     if (benchmark_frames) {
         if(cpu.frame!=benchmark_frames || benchmark_seconds<=0) {
