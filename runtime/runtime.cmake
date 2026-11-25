@@ -83,6 +83,7 @@ function(vb_add_runtime_target TARGET)
         ${VB_RUNTIME_DIR}/src/interrupts.c
         ${VB_RUNTIME_DIR}/src/timer.c
         ${VB_RUNTIME_DIR}/src/png_write.c
+        ${VB_RUNTIME_DIR}/src/headless_capture.cpp
         ${VB_RUNTIME_DIR}/src/ring_frame.c
         ${VB_RUNTIME_DIR}/src/stub_abort.c
         ${VB_RUNTIME_DIR}/src/watchdog.cpp
