@@ -4,7 +4,7 @@
  *   --capture-out DIR       DIR/frame_NNNNNN.png of the presented picture
  *   --capture-size WxH      drawable size a window of that size would have
  *                           (default 1920x1080; 2560x1080 for 21:9)
- *   --capture-from/-to N, --capture-every K
+ *   --capture-from/-to N, --capture-every K (PNG spacing; audio stays continuous)
  *   --capture-wav FILE      mixed VSU output, 44.1 kHz stereo, from --capture-from
  *   --input-script FILE     `<frame> [P:]BUTTONS` (P = seat 1..4; `-` releases;
  *                           A B L R START SELECT UP DOWN LEFT RIGHT and the
@@ -33,7 +33,8 @@ typedef struct VbCaptureConfig {
 } VbCaptureConfig;
 
 /* Starts capture mode (selects SDL dummy drivers: call before SDL_Init).
- * Returns 1 when frames or audio were requested. */
+ * Returns 1 when frames or audio were requested. Requested input/output failures
+ * terminate capture with exit code 2, rather than reporting a successful run. */
 int vb_capture_start(const VbCaptureConfig* config);
 int vb_capture_enabled(void);
 int vb_capture_has_input(void);

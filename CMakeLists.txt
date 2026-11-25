@@ -103,6 +103,12 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME vb-renderer-fallback COMMAND vb-renderer-fallback-test)
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
+    add_executable(vb-headless-capture-test runtime/tests/headless_capture_test.cpp
+        runtime/src/headless_capture.cpp runtime/src/png_write.c)
+    target_include_directories(vb-headless-capture-test PRIVATE runtime/include)
+    add_test(NAME vb-headless-capture
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/runtime/tests/run_headless_capture_test.py"
+            "$<TARGET_FILE:vb-headless-capture-test>" "${CMAKE_CURRENT_BINARY_DIR}")
     set(_dispatch_dir "${CMAKE_CURRENT_BINARY_DIR}/dispatch-fixture")
     add_custom_command(OUTPUT "${_dispatch_dir}/dispatch_fixture.c" "${_dispatch_dir}/dispatch_fixture.h"
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/runtime/tests/generate_dispatch_fixture.py" "${_dispatch_dir}"

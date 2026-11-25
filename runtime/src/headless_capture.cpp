@@ -42,6 +42,16 @@ struct State {
     uint16_t held[4] = {0, 0, 0, 0};
 } g;
 
+[[noreturn]] void capture_error(const char* operation, const char* path) {
+    std::fprintf(stderr, "capture: cannot %s '%s'\n", operation, path);
+    std::exit(2);
+}
+
+bool in_capture_range(uint32_t frame) {
+    return (g.from < 0 || (int64_t)frame >= g.from) &&
+           (g.to < 0 || (int64_t)frame <= g.to);
+}
+
 uint16_t parse_buttons(const char* s) {
     static const struct { const char* name; uint16_t bit; } kNames[] = {
         {"A", VB_PAD_A}, {"B", VB_PAD_B}, {"L", VB_PAD_LT}, {"R", VB_PAD_RT},
@@ -66,7 +76,7 @@ uint16_t parse_buttons(const char* s) {
 
 void load_input(const char* path) {
     FILE* f = std::fopen(path, "rb");
-    if (!f) { std::fprintf(stderr, "capture: cannot open input script '%s'\n", path); return; }
+    if (!f) capture_error("open input script", path);
     char line[512];
     while (std::fgets(line, sizeof(line), f)) {
         if (char* c = std::strchr(line, '#')) *c = 0;
@@ -83,7 +93,9 @@ void load_input(const char* path) {
         while (*p == ' ' || *p == '\t') ++p;
         g.steps.push_back({frame, seat, *p == '-' ? (uint16_t)0 : parse_buttons(p)});
     }
-    std::fclose(f);
+    const bool read_failed = std::ferror(f) != 0;
+    const bool close_failed = std::fclose(f) != 0;
+    if (read_failed || close_failed) capture_error("read input script", path);
     std::stable_sort(g.steps.begin(), g.steps.end(),
                      [](const Step& a, const Step& b) { return a.frame < b.frame; });
 }
@@ -100,8 +112,9 @@ void wav_header(FILE* f, uint32_t data_bytes) {
     std::memcpy(h + 24, &rate, 4); std::memcpy(h + 28, &bps, 4);
     std::memcpy(h + 32, &align, 2); std::memcpy(h + 34, &bits, 2);
     std::memcpy(h + 36, "data", 4); std::memcpy(h + 40, &data_bytes, 4);
-    std::fseek(f, 0, SEEK_SET);
-    std::fwrite(h, 1, 44, f);
+    if (std::fseek(f, 0, SEEK_SET) != 0 ||
+        std::fwrite(h, 1, sizeof(h), f) != sizeof(h) || std::fflush(f) != 0)
+        capture_error("write WAV header", g.wav_path.c_str());
 }
 }  // namespace
 
@@ -123,8 +136,8 @@ int vb_capture_start(const VbCaptureConfig* c) {
     if (c->wav_path) {
         g.wav_path = c->wav_path;
         g.wav = std::fopen(c->wav_path, "wb");
-        if (g.wav) wav_header(g.wav, 0);
-        else std::fprintf(stderr, "capture: cannot open %s\n", c->wav_path);
+        if (!g.wav) capture_error("open WAV", c->wav_path);
+        wav_header(g.wav, 0);
     }
     VB_CAP_SETENV("SDL_VIDEODRIVER", "dummy");
     VB_CAP_SETENV("SDL_AUDIODRIVER", "dummy");
@@ -136,8 +149,7 @@ int vb_capture_has_input(void) { return g.steps.empty() ? 0 : 1; }
 void vb_capture_size(int* w, int* h) { if (w) *w = g.width; if (h) *h = g.height; }
 
 int vb_capture_frame_wanted(uint32_t frame) {
-    if (g.from >= 0 && (long)frame < g.from) return 0;
-    if (g.to >= 0 && (long)frame > g.to) return 0;
+    if (!in_capture_range(frame)) return 0;
     long base = g.from >= 0 ? g.from : 1;
     return (((long)frame - base) % g.every) == 0;
 }
@@ -161,7 +173,9 @@ void vb_capture_present(const uint32_t* argb, int w, int h,
     }
     char path[1200];
     std::snprintf(path, sizeof(path), "%s/frame_%06u.png", g.out_dir.c_str(), frame);
-    if (vb_write_png_32bpp(path, W, H, g.canvas.data()) == 0) ++g.png_count;
+    if (vb_write_png_32bpp(path, W, H, g.canvas.data()) != 0)
+        capture_error("write PNG", path);
+    ++g.png_count;
 }
 
 int vb_capture_audio_frames(uint32_t frame) {
@@ -171,8 +185,11 @@ int vb_capture_audio_frames(uint32_t frame) {
 }
 
 void vb_capture_audio(const int16_t* stereo, int frames, uint32_t frame) {
-    if (!g.wav || !vb_capture_frame_wanted(frame)) return;
-    std::fwrite(stereo, 4, (size_t)frames, g.wav);
+    if (!g.wav || !in_capture_range(frame) || frames <= 0) return;
+    if (!stereo || (uint64_t)frames > (UINT32_MAX - 36u) / 4u - g.wav_frames)
+        capture_error("append WAV samples", g.wav_path.c_str());
+    if (std::fwrite(stereo, 4, (size_t)frames, g.wav) != (size_t)frames)
+        capture_error("write WAV samples", g.wav_path.c_str());
     g.wav_frames += (uint64_t)frames;
 }
 
@@ -187,7 +204,7 @@ uint16_t vb_capture_pad(unsigned seat, uint32_t frame) {
 void vb_capture_finish(void) {
     if (g.wav) {
         wav_header(g.wav, (uint32_t)(g.wav_frames * 4));
-        std::fclose(g.wav);
+        if (std::fclose(g.wav) != 0) capture_error("close WAV", g.wav_path.c_str());
         g.wav = nullptr;
     }
     if (g.enabled)
