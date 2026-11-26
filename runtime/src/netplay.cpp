@@ -31,6 +31,9 @@
 #if VB_RUNTIME_HAVE_SDL
 #include <SDL.h>
 #endif
+#if defined(RECOMP_LAUNCHER)
+#include "recomp_launcher.h"
+#endif
 #if VB_RUNTIME_HAVE_NETPLAY
 #include "recomp_net/session.h"
 #include "recomp_net/rb_driver.h"
@@ -502,7 +505,14 @@ int vb_netplay_apply_launch(const RecompLauncherCNetplayLaunch* launch) {
     if(!ice_transport)discard_pending_ice();
     enabled=from_lobby=native_setup=true;return 1;
 #else
+#if defined(RECOMP_LAUNCHER)
+    // Offline Home/Play supplies a non-null, disabled launch record.
+    // Only an actual network request requires the optional network backend.
+    if(!launch || !launch->enabled) {error.clear();return 1;}
+    error="This build does not include network play.";return 0;
+#else
     return !launch;
+#endif
 #endif
 }
 const char* vb_netplay_error(){return error.c_str();}
