@@ -113,7 +113,7 @@ int main(int argc, char** argv) {
 #if defined(RECOMP_LAUNCHER)
     const auto* ui = vb_mod_runtime_launcher_provider_c();
     assert(ui && !strcmp(ui->archive_extension, ".vbmod"));
-    assert(ui->package_count(ui->ctx) == 3 && ui->feature_count(ui->ctx) == 3);
+    assert(ui->package_count(ui->ctx) == 4 && ui->feature_count(ui->ctx) == 4);
     RecompLauncherCModFeature feature = {};
     assert(ui->feature_get(ui->ctx, 0, &feature));
     assert(!strcmp(feature.package_id, "color") && feature.enabled == 0);
@@ -126,6 +126,6 @@ int main(int argc, char** argv) {
     assert(!ui->remove_package(ui->ctx, "color", "1.0.0"));
     assert(ui->feature_enable(ui->ctx, "color", "color", 0));
     assert(ui->remove_package(ui->ctx, "color", "1.0.0"));
-    assert(ui->package_count(ui->ctx) == 2);
+    assert(ui->package_count(ui->ctx) == 3);
 #endif
 }

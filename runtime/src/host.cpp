@@ -1,3 +1,4 @@
+#include "recomp_persistence/atomic_file.h"
 #include "host.h"
 #include "mod_runtime.h"
 #include "renderer.h"
@@ -8,6 +9,7 @@
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <sstream>
 #include <iomanip>
 #include <vector>
 #include <cstring>
@@ -113,9 +115,7 @@ void vb_host_save(void*) {
     if (config_path.empty()) return;
     std::error_code ec;
     fs::create_directories(config_path.parent_path(), ec);
-    const auto temporary = fs::u8path(config_path.u8string() + ".tmp");
-    std::ofstream file(temporary, std::ios::trunc);
-    if (!file) { error = "Cannot save settings."; return; }
+    std::ostringstream file;
     file << "rom " << std::quoted(last_rom) << '\n'
          << "scale " << vb_host_config.scale << '\n'
          << "internal_scale " << vb_host_config.internal_scale << '\n'
@@ -139,15 +139,10 @@ void vb_host_save(void*) {
             <<prefix<<"gamepad "<<std::quoted(p.gamepad_guid)<<'\n';
         for(int i=0;i<14;++i)file<<prefix<<"key"<<i<<' '<<p.keys[i]<<'\n'<<prefix<<"pad"<<i<<' '<<p.pads[i]<<'\n';
     }
-    file.close();
-    if (!file) { error = "Cannot finish saving settings."; return; }
-#ifdef _WIN32
-    if (!MoveFileExW(temporary.c_str(), config_path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
-        error = "Cannot publish saved settings.";
-#else
-    fs::rename(temporary, config_path, ec);
-    if (ec) error = "Cannot publish saved settings: " + ec.message();
-#endif
+    const auto bytes=file.str();
+    if (!recomp_atomic_file_store(config_path.u8string().c_str(),bytes.data(),bytes.size()))
+        error="Cannot publish saved settings.";
+
 }
 
 const std::string& vb_host_error() { return error; }
@@ -275,18 +270,9 @@ static bool publish_sram(const unsigned char* bytes) {
             error="Cannot preserve native save before state restore: "+ec.message();return false;
         }
     }
-    auto temporary=fs::u8path(sram_path.u8string()+".tmp");
-    std::ofstream file(temporary,std::ios::binary|std::ios::trunc);
-    file.write((const char*)bytes,65536);file.close();
-    if(!file) { error="Cannot write cartridge save: "+temporary.u8string();return false; }
-#ifdef _WIN32
-    if(!MoveFileExW(temporary.c_str(),sram_path.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)) {
+    if(!recomp_atomic_file_store(sram_path.u8string().c_str(),bytes,65536)) {
         error="Cannot publish cartridge save: "+sram_path.u8string();return false;
     }
-#else
-    fs::rename(temporary,sram_path,ec);
-    if(ec) { error=ec.message();return false; }
-#endif
     return true;
 }
 bool vb_host_save_sram() {

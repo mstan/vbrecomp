@@ -1,4 +1,4 @@
-/* main.cpp — vb-runtime entry point.
+/* main.cpp â€” vb-runtime entry point.
  *
  * Drives the recompiled cart in a step-budget dispatch loop, ticks
  * device emulation (timer + VIP) by the cycle delta consumed each
@@ -45,6 +45,7 @@ static double process_cpu_seconds() {
 #include "stereo.h"
 #include "viewport.h"
 #include "mod_runtime.h"
+#include "diagnostics_service.h"
 #include "host.h"
 #include "png_write.h"
 #include "headless_capture.h"
@@ -98,7 +99,7 @@ static int can_pause_session(){return !vb_netplay_enabled() && vb_game_host_can_
 
 static void print_help(const char* argv0) {
     std::printf(
-        "%s — Virtual Boy static-recomp runtime\n"
+        "%s â€” Virtual Boy static-recomp runtime\n"
         "\n"
         "Usage: %s [--rom PATH] [--port N] [--headless] [--stereo]\n"
         "\n"
@@ -492,7 +493,9 @@ int main(int argc, char** argv) {
     for(auto& value:utf8_args)utf8_argv.push_back(value.data());
     utf8_argv.push_back(nullptr);argc=wide_count;argv=utf8_argv.data();
 #endif
+    vb_execution.mode=VB_EXEC_NATIVE;
     int port = VB_DEFAULT_DEBUG_PORT;
+    bool hidden_window=false;
     const char* rom_path = nullptr;
     bool headless = false;
     bool explicit_headless = false;
@@ -506,6 +509,7 @@ int main(int argc, char** argv) {
     uint32_t benchmark_frames = 0;
     bool measure_runtime = false,gpu_pass_timing=false;
     int measure_window_width = 0, measure_window_height = 0;
+    bool window_size_explicit=false;
     int requested_internal_scale = 0;
     const char* benchmark_route_path = nullptr;
     struct BenchmarkSegment { uint32_t end; uint16_t pad; };
@@ -537,9 +541,7 @@ int main(int argc, char** argv) {
             rom_path = argv[++i];
         } else if (a == "--execution" && i + 1 < argc) {
             std::string mode=argv[++i];
-            if(mode=="hybrid") vb_execution.mode=VB_EXEC_HYBRID;
-            else if(mode=="native") vb_execution.mode=VB_EXEC_NATIVE;
-            else if(mode=="interpreter") vb_execution.mode=VB_EXEC_INTERPRETER;
+            if(mode=="native") vb_execution.mode=VB_EXEC_NATIVE;
             else { std::puts("Invalid --execution mode"); return 2; }
         } else if (a == "--gpu-pass-timing") {
             gpu_pass_timing=true;
@@ -568,7 +570,8 @@ int main(int argc, char** argv) {
             headless = !measure_runtime;
         } else if (a == "--benchmark-route" && i + 1 < argc) {
             benchmark_route_path = argv[++i];
-        } else if (a == "--measure-window" && i + 1 < argc) {
+        } else if ((a == "--measure-window" || a == "--window-size") && i + 1 < argc) {
+            window_size_explicit=a=="--window-size";
             char extra;
             if (std::sscanf(argv[++i], "%dx%d%c", &measure_window_width, &measure_window_height, &extra) != 2 ||
                 measure_window_width < 128 || measure_window_width > 8192 ||
@@ -610,6 +613,8 @@ int main(int argc, char** argv) {
             capture_cfg.every = std::atoi(argv[++i]);
         } else if (a == "--exit-at-frame" && i + 1 < argc) {
             frame_limit = (uint32_t)std::strtoul(argv[++i], nullptr, 10);
+        } else if (a == "--hidden-window") {
+            hidden_window=true;
         } else if (a == "--paused") {
             start_paused = true;
         } else if (a == "--headless") {
@@ -633,7 +638,7 @@ int main(int argc, char** argv) {
     if (measure_runtime && explicit_headless) {
         std::fputs("--measure-runtime cannot use --headless.\n", stderr); return 2;
     }
-    if (measure_window_width && !measure_runtime) {
+    if (measure_window_width && !measure_runtime && !window_size_explicit) {
         std::fputs("--measure-window requires --measure-runtime\n", stderr); return 2;
     }
     if (benchmark_route_path) {
@@ -691,7 +696,7 @@ int main(int argc, char** argv) {
         }
         /* CRC32-verify the loaded cart against the value baked in by
          * the recompiler. A mismatch means the user pointed --rom at
-         * something other than the cart this binary was built for —
+         * something other than the cart this binary was built for â€”
          * running on would produce garbage (the recompiled C does the
          * original cart's CPU work on the new cart's data). */
         uint32_t expected = vb_game_expected_crc32();
@@ -699,7 +704,7 @@ int main(int argc, char** argv) {
             const uint8_t* rom_bytes = vb_rom_data();
             uint32_t rom_n = vb_rom_size();
             /* IEEE 802.3 CRC-32 reflected; matches zlib.crc32 and
-             * Python's binascii.crc32. Compact table-free shift loop —
+             * Python's binascii.crc32. Compact table-free shift loop â€”
              * one-shot at boot, perf doesn't matter. */
             uint32_t crc = 0xFFFFFFFFu;
             for (uint32_t i = 0; i < rom_n; ++i) {
@@ -713,7 +718,7 @@ int main(int argc, char** argv) {
                     "vb-runtime: ROM CRC32 mismatch.\n"
                     "  expected: 0x%08X (built for this cart)\n"
                     "  actual:   0x%08X (provided '%s')\n"
-                    "The recompiled C is specific to one cart dump — "
+                    "The recompiled C is specific to one cart dump â€” "
                     "running against a different ROM file produces "
                     "garbage. Provide the correct .vb file via --rom.\n",
                     expected, crc, rom_path);
@@ -783,7 +788,7 @@ int main(int argc, char** argv) {
     if (!headless) {
         if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO
                      | SDL_INIT_GAMECONTROLLER) != 0) {
-            std::fprintf(stderr, "vb-runtime: SDL_Init failed: %s — "
+            std::fprintf(stderr, "vb-runtime: SDL_Init failed: %s â€” "
                                  "falling back to headless\n",
                          SDL_GetError());
             headless = true;
@@ -798,7 +803,7 @@ int main(int argc, char** argv) {
             SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
             measure_window_width ? measure_window_width : tex_w * vb_host_config.scale,
             measure_window_height ? measure_window_height : tex_h * vb_host_config.scale,
-            SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
+            (hidden_window?SDL_WINDOW_HIDDEN:SDL_WINDOW_SHOWN) | SDL_WINDOW_RESIZABLE);
         if (!win) {
             std::fprintf(stderr, "vb-runtime: SDL_CreateWindow failed: %s\n",
                          SDL_GetError());
@@ -829,7 +834,7 @@ int main(int argc, char** argv) {
             explicit_headless = true;
         }
     }
-    if(!headless && vb_sdl_noactivate_window_requested() && !vb_sdl_show_guarded_window(win)) {
+    if(!headless && !hidden_window && vb_sdl_noactivate_window_requested() && !vb_sdl_show_guarded_window(win)) {
         std::fprintf(stderr,"vb-runtime: guarded window show failed: %s\n",SDL_GetError());
         SDL_DestroyRenderer(ren);SDL_DestroyWindow(win);SDL_Quit();return 3;
     }
@@ -857,7 +862,7 @@ int main(int argc, char** argv) {
                            : "single eye (--stereo for both)");
         std::fflush(stdout);
 
-        /* Audio device. Failure is non-fatal — the window keeps
+        /* Audio device. Failure is non-fatal â€” the window keeps
          * running with the cart's writes accumulating into the VSU
          * ring but no sound out. */
         s_runtime_audio_volume = vb_host_config.volume;
@@ -948,7 +953,7 @@ int main(int argc, char** argv) {
         std::fflush(stdout);
     }
 
-    /* VB CPU 20 MHz / 50.27 Hz frame ≈ 397 853 cycles. The dispatch
+    /* VB CPU 20 MHz / 50.27 Hz frame â‰ˆ 397 853 cycles. The dispatch
      * loop advances at ~750 000 cycles per pass when not halted, so
      * "one frame ready to present" is the natural cadence; in halted
      * idle it takes ~20 passes (IDLE_TICK_CYCLES) to accumulate one
@@ -972,7 +977,7 @@ int main(int argc, char** argv) {
     // each instruction's real V810 base cost into cpu.cycles as it runs
     // (recompiler/v810/cycles.py). The per-pass device-tick delta is the
     // cpu.cycles advance, captured around vb_dispatch below. cpu.step_budget
-    // is a SEPARATE concern — the per-basic-block yield budget, decremented
+    // is a SEPARATE concern â€” the per-basic-block yield budget, decremented
     // once per BB leader so a tight intra-function loop still yields to the
     // TCP/SDL poll; it no longer feeds the cycle estimate.
     bool dispatched_once = false;
@@ -1033,8 +1038,8 @@ int main(int argc, char** argv) {
     if (load_state_path) {
         const int loaded = vb_state_load_file(load_state_path);
         std::fprintf(stderr, "vb-runtime: load state %s: %s\n", load_state_path,
-                     loaded == 0 ? "loaded" : vb_state_error());
-        if (loaded != 0 && capture_mode) { vb_capture_finish(); return 3; }
+                     loaded != 0 ? "loaded" : vb_state_error());
+        if (!loaded) { if(capture_mode)vb_capture_finish(); return 3; }
     }
     VbStateCaptureCosts initial_capture_costs{};
     vb_state_capture_costs(&initial_capture_costs);
@@ -1081,6 +1086,7 @@ int main(int argc, char** argv) {
             cpu.frame++;
             vb_game_host_end_field(&cpu);
             vb_ring_frame_record(&cpu);
+            vb_diagnostics_record(cpu.frame,vb_input_get_pad());
         }
         if(frame_limit && cpu.frame>=frame_limit) {
             std::printf("vb-runtime: frame limit reached frame=%u native=%llu fallback=%llu\n",cpu.frame,
@@ -1333,7 +1339,7 @@ int main(int argc, char** argv) {
             /* Opt-in override overlays (experiment): composite the colored
              * RGBA replacements over the faithful framebuffer, per eye, using
              * the draw-list slot matching the displayed buffer. No-op when
-             * VBRECOMP_OVERRIDES is unset (empty list) ⇒ unchanged output. */
+             * VBRECOMP_OVERRIDES is unset (empty list) â‡’ unchanged output. */
             if (!game_video && vb_overrides_active()) {
                 int slot = vb_vip_display_fb() & 1;
                 static uint32_t center[VB_RT_EYE_W * VB_RT_EYE_H];
@@ -1414,7 +1420,7 @@ int main(int argc, char** argv) {
             SDL_RenderPresent(ren);
             }
 
-            /* Pace to VB_RT_FRAME_HZ — TAB skips the wait (turbo). */
+            /* Pace to VB_RT_FRAME_HZ â€” TAB skips the wait (turbo). */
             const Uint8* keys = SDL_GetKeyboardState(nullptr);
             const bool turbo = measure_runtime || capture_mode || (keys && keys[SDL_SCANCODE_TAB]);
             Uint64 now = SDL_GetPerformanceCounter();
@@ -1426,13 +1432,13 @@ int main(int argc, char** argv) {
                  * it in the while-condition AND again in `left = deadline -
                  * counter`; if the counter crossed the deadline between those
                  * two reads, the unsigned subtraction underflowed to ~1.8e19,
-                 * giving SDL_Delay() a ~49-day argument — a permanent freeze
+                 * giving SDL_Delay() a ~49-day argument â€” a permanent freeze
                  * ("Not Responding"). Idle windowed runs present every frame,
                  * so over time the race was inevitable. (Same bug class as
                  * psxrecomp's freeze_heartbeat note.) */
                 for (;;) {
                     Uint64 n2 = SDL_GetPerformanceCounter();
-                    if (n2 >= sdl_deadline) break;          /* n2 < deadline ⇒ no underflow */
+                    if (n2 >= sdl_deadline) break;          /* n2 < deadline â‡’ no underflow */
                     Uint64 left = sdl_deadline - n2;
                     Uint64 ms = (left * 1000) / sdl_freq;
                     if (ms >= 2) SDL_Delay((Uint32)(ms - 1));
@@ -1560,6 +1566,7 @@ int main(int argc, char** argv) {
 
     bool save_ok = !rom_path || vb_host_save_sram();
     if (!save_ok) std::puts(vb_host_error().c_str());
+    vb_diagnostics_shutdown();
     vb_mod_runtime_deactivate();
     vb_debug_server_stop();
     vb_memory_shutdown();

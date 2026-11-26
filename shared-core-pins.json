@@ -1,0 +1,22 @@
+{
+  "recomp-mod-core": {
+    "path": "external/shared-cores/recomp-mod-core",
+    "url": "https://github.com/mstan/recomp-mod-core.git",
+    "head": "410964ec67a5b17926ab742fe93c67a4a724e69b"
+  },
+  "recomp-diagnostics-core": {
+    "path": "external/shared-cores/recomp-diagnostics-core",
+    "url": "https://github.com/mstan/recomp-diagnostics-core-candidate-20261124.git",
+    "head": "af2906b4dc0376cfdbe96df741a6647af55b3f1b"
+  },
+  "recomp-persistence-core": {
+    "path": "external/shared-cores/recomp-persistence-core",
+    "url": "https://github.com/mstan/recomp-persistence-core-candidate-20261124.git",
+    "head": "4ae875db5d517d7d7bbdb9806679d98e3cdc44d9"
+  },
+  "recomp-input-core": {
+    "path": "external/shared-cores/recomp-input-core",
+    "url": "https://github.com/mstan/recomp-input-core-candidate-20261124.git",
+    "head": "383fe46b373fcc047d908fb9667831618300460d"
+  }
+}
