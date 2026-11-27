@@ -43,6 +43,8 @@ function(vb_add_runtime_target TARGET)
         ${VB_RUNTIME_DIR}/src/vip_gpu_raster.cpp
         ${VB_RUNTIME_DIR}/src/host.cpp
         ${VB_RUNTIME_DIR}/src/mod_runtime.cpp
+        ${VB_RUNTIME_DIR}/src/mod_transactions.cpp
+        ${VB_RUNTIME_DIR}/src/diagnostics_service.cpp
         ${VB_RUNTIME_DIR}/src/renderer.c
         ${VB_RUNTIME_DIR}/src/stereo.cpp
         ${VB_RUNTIME_DIR}/src/viewport.c

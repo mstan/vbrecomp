@@ -56,6 +56,7 @@ if(VBRECOMP_NETPLAY AND NOT TARGET recomp_net)
     add_subdirectory("${RECOMP_NET_ROOT}" "${CMAKE_CURRENT_BINARY_DIR}/recomp-net")
 endif()
 
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/VbSharedServices.cmake")
 add_subdirectory(runtime)
 
 include(CTest)
@@ -323,7 +324,7 @@ if(BUILD_TESTING)
     add_test(NAME vb-capture-versions COMMAND vb-capture-versions-test)
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
     add_executable(vb-mod-runtime-test runtime/tests/mod_runtime_test.cpp
-        runtime/src/mod_runtime.cpp runtime/src/vb_sha256.c runtime/src/vb_crc32.c)
+        runtime/src/mod_runtime.cpp runtime/src/diagnostics_service.cpp runtime/src/vb_sha256.c runtime/src/vb_crc32.c)
     target_include_directories(vb-mod-runtime-test PRIVATE runtime/include)
     if(EXISTS "${RECOMP_UI_ROOT}/src/recomp_launcher.h")
         target_compile_definitions(vb-mod-runtime-test PRIVATE RECOMP_LAUNCHER=1)

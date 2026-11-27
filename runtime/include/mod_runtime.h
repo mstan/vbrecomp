@@ -88,6 +88,8 @@ void vb_mod_runtime_frame_tick_c(void);
 /* Headless and GUI hosts share the same package state. Mutations are staged;
  * commit verifies the original ROM and persists them before activation. */
 int vb_mod_install_archive(const char* path);
+/* Owner-thread paused transaction. RAM and loaded cartridge are valid destinations. */
+int vb_mod_guarded_patch(const char* space,uint32_t address,const uint8_t* expected,const uint8_t* replacement,unsigned size);
 int vb_mod_enable(const char* package, const char* feature, int enabled);
 int vb_mod_set_option(const char* package, const char* feature,
                       const char* option, const char* value);

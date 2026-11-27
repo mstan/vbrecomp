@@ -1,3 +1,4 @@
+#include "recomp_persistence/atomic_file.h"
 #include "savestate.h"
 #include "memory.h"
 #include "machine.h"
@@ -324,22 +325,7 @@ int vb_state_save_file(const char* path) {
     if(!path || !vb_state_capture(&blob,&size,1))return 0;
     std::unique_ptr<uint8_t,decltype(&std::free)> owner(blob,&std::free);
     try {
-    const auto destination=std::filesystem::u8path(path);
-    auto temporary=destination;temporary+=".tmp";
-#ifdef _WIN32
-    FILE* f=_wfopen(temporary.c_str(),L"wb");
-#else
-    FILE* f=std::fopen(temporary.c_str(),"wb");
-#endif
-    if(!f){error="Cannot open snapshot file";return 0;}
-    bool ok=std::fwrite(blob,1,size,f)==size;ok=std::fclose(f)==0 && ok;
-    if(ok) {
-#ifdef _WIN32
-        ok=MoveFileExW(temporary.c_str(),destination.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)!=0;
-#else
-        std::error_code ec;std::filesystem::rename(temporary,destination,ec);ok=!ec;
-#endif
-    }
+    const bool ok=recomp_atomic_file_store(path,blob,size)!=0;
     error=ok?"":"Cannot write snapshot file";return ok;
     } catch(const std::filesystem::filesystem_error&) {error="Invalid snapshot path";return 0;}
       catch(const std::bad_alloc&) {error="Snapshot allocation failed";return 0;}

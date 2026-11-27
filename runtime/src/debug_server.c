@@ -44,36 +44,15 @@
 #include "vip_phase.h"
 #include "wram_hash.h"
 
-#if defined(_WIN32)
-#  include <winsock2.h>
-#  include <ws2tcpip.h>
-#  if defined(_MSC_VER)
-#    pragma comment(lib, "ws2_32.lib")
-#  endif
-   typedef SOCKET sock_t;
-#  define VB_BAD_SOCKET INVALID_SOCKET
-#  define vb_close_socket(s) closesocket(s)
-#  define vb_socket_errno() WSAGetLastError()
-#  define VB_EWOULDBLOCK WSAEWOULDBLOCK
-#else
-#  include <sys/types.h>
-#  include <sys/socket.h>
-#  include <netinet/in.h>
-#  include <arpa/inet.h>
-#  include <fcntl.h>
-#  include <unistd.h>
-#  include <errno.h>
-   typedef int sock_t;
-#  define VB_BAD_SOCKET (-1)
-#  define vb_close_socket(s) close(s)
-#  define vb_socket_errno() (errno)
-#  define VB_EWOULDBLOCK EWOULDBLOCK
-#endif
-
-#include "debug_stream.h"
-
-static sock_t s_listener = VB_BAD_SOCKET;
-static sock_t s_client   = VB_BAD_SOCKET;
+#include "diagnostics_server.h"
+#include "diagnostics_service.h"
+#include "mod_runtime.h"
+static DiagServer* s_server;
+static void dispatch_line(char*);
+static void receive_line(void* user,DiagServer* server,const char* arguments) {
+    (void)user;(void)server;char line[8192];size_t n=strlen(arguments);
+    if(n>=sizeof(line))return;memcpy(line,arguments,n+1);dispatch_line(line);
+}
 static CPUState* s_cpu   = NULL;
 static int s_paused      = 0;
 static uint32_t s_step_target = 0;
@@ -102,76 +81,14 @@ int vb_debug_server_is_paused(void) {
     return s_paused;
 }
 static int s_quit        = 0;
-static int s_winsock_inited = 0;
-
-static int set_nonblocking(sock_t s) {
-#if defined(_WIN32)
-    u_long mode = 1;
-    return ioctlsocket(s, FIONBIO, &mode) == 0 ? 0 : -1;
-#else
-    int flags = fcntl(s, F_GETFL, 0);
-    if (flags < 0) return -1;
-    return fcntl(s, F_SETFL, flags | O_NONBLOCK);
-#endif
-}
-
-int vb_debug_server_start(int port, CPUState* cpu) {
-    s_cpu = cpu;
-    s_paused = 0;
-    s_quit = 0;
-    s_step_target=0;s_input_override=0;vb_netplay_override_input(0,0);
-
-#if defined(_WIN32)
-    if (!s_winsock_inited) {
-        WSADATA wsa;
-        if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return -1;
-        s_winsock_inited = 1;
-    }
-#endif
-
-    s_listener = socket(AF_INET, SOCK_STREAM, 0);
-    if (s_listener == VB_BAD_SOCKET) return -2;
-
-    int yes = 1;
-    setsockopt(s_listener, SOL_SOCKET, SO_REUSEADDR,
-               (const char*)&yes, sizeof(yes));
-
-    struct sockaddr_in a;
-    memset(&a, 0, sizeof(a));
-    a.sin_family = AF_INET;
-    a.sin_port = htons((uint16_t)port);
-    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-
-    if (bind(s_listener, (struct sockaddr*)&a, sizeof(a)) != 0) {
-        vb_close_socket(s_listener); s_listener = VB_BAD_SOCKET;
-        return -3;
-    }
-    if (listen(s_listener, 1) != 0) {
-        vb_close_socket(s_listener); s_listener = VB_BAD_SOCKET;
-        return -4;
-    }
-    if (set_nonblocking(s_listener) != 0) {
-        vb_close_socket(s_listener); s_listener = VB_BAD_SOCKET;
-        return -5;
-    }
+int vb_debug_server_start(int port,CPUState* cpu) {
+    s_cpu=cpu;s_paused=0;s_quit=0;s_step_target=0;s_input_override=0;vb_netplay_override_input(0,0);
+    s_server=diag_server_create((uint16_t)port);
+    if(!s_server)return -1;
+    if(!diag_server_raw_handler(s_server,receive_line,NULL)){diag_server_destroy(s_server);s_server=NULL;return -2;}
     return 0;
 }
-
-void vb_debug_server_stop(void) {
-    if (s_client != VB_BAD_SOCKET) {
-        vb_close_socket(s_client); s_client = VB_BAD_SOCKET;
-    }
-    if (s_listener != VB_BAD_SOCKET) {
-        vb_close_socket(s_listener); s_listener = VB_BAD_SOCKET;
-    }
-#if defined(_WIN32)
-    if (s_winsock_inited) {
-        WSACleanup();
-        s_winsock_inited = 0;
-    }
-#endif
-}
-
+void vb_debug_server_stop(void) {diag_server_destroy(s_server);s_server=NULL;}
 /* ---- Command parsing ---- */
 /* The protocol is line-based. A request is one of:
  *   - bare command:   "ping\n"
@@ -227,10 +144,10 @@ static long long s_request_id;
 static void send_response(const char* body) {
     if(body[0]=='{' && !strstr(body,"\"id\":")) {
         size_t size=strlen(body)+64;char* reply=(char*)malloc(size);
-        if(!reply) { vb_stream.failed=1;return; }
+        if(!reply) { diag_server_disconnect(s_server);return; }
         snprintf(reply,size,"{\"id\":%lld,%s",s_request_id,body+1);
-        vb_stream_queue(reply);free(reply);
-    } else vb_stream_queue(body);
+        diag_server_reply(s_server,reply);free(reply);
+    } else diag_server_reply(s_server,body);
 }
 
 /* ---- Handlers ---- */
@@ -1401,7 +1318,19 @@ static void dispatch_line(char* line) {
         return;
     }
 
-    if (strcmp(cmd, "device_state") == 0) { char body[16384]; vb_device_response(body,sizeof(body)); send_response(body); }
+    if (strcmp(cmd,"mod_patch_byte")==0) {
+        char space[32]={0};long long address=-1,expected=-1,replacement=-1;
+        extract_str(line,"\"space\"",space,sizeof(space));extract_int(line,"\"address\"",&address);
+        extract_int(line,"\"expected\"",&expected);extract_int(line,"\"replacement\"",&replacement);
+        uint8_t a=(uint8_t)expected,b=(uint8_t)replacement;
+        int ok=address>=0 && address<=UINT32_MAX && expected>=0 && expected<=255 && replacement>=0 && replacement<=255 &&
+            vb_mod_guarded_patch(space,(uint32_t)address,&a,&b,1)>0;
+        send_response(ok?"{\"ok\":true}":"{\"ok\":false,\"error\":\"Guarded mod transaction refused\"}");
+    }
+    else if (strcmp(cmd,"status")==0) {
+        char body[256];snprintf(body,sizeof(body),"{\"ok\":true,\"paused\":%s,\"frame\":%u,\"recording\":%s,\"native\":%llu,\"interpreted\":%llu,\"fallback\":%llu}",vb_debug_server_is_paused()?"true":"false",s_cpu?s_cpu->frame:0,vb_diagnostics_enabled()?"true":"false",(unsigned long long)vb_execution.native_instructions,(unsigned long long)vb_execution.interpreted,(unsigned long long)vb_execution.fallback);send_response(body);
+    }
+    else if (strcmp(cmd, "device_state") == 0) { char body[16384]; vb_device_response(body,sizeof(body)); send_response(body); }
     else if (strcmp(cmd, "capabilities") == 0) { send_response("{\"ok\":true,\"protocol\":2,\"commands\":[\"device_state\",\"audio_pcm\",\"audio_shadow_state\",\"breakpoint\",\"capabilities\",\"capture_dump\",\"clear_input\",\"continue\",\"cpuhook\",\"execution_stats\",\"fallback_coverage\",\"branch_rules\",\"set_gpr\",\"pc_set\",\"fntrace_dump\",\"fntrace_reset\",\"fntrace_stats\",\"frame\",\"get_frame\",\"get_registers\",\"history\",\"irq_force\",\"irq_state\",\"memory_map\",\"overrides_state\",\"pad_state\",\"pause\",\"ping\",\"press\",\"psw_set\",\"psw_state\",\"quit\",\"read_ram\",\"recolor_reload\",\"recolor_state\",\"recolor_trace\",\"run_frames\",\"screenshot\",\"set_input\",\"source_dump\",\"step\",\"timer_state\",\"viewport_state\",\"vip_phase\",\"vip_state\",\"watchdog\",\"world_map\",\"world_trace\",\"wram_anchors\",\"wram_hash\",\"write_ram\",\"wtrace_dump\",\"wtrace_reset\",\"wtrace_stats\"],\"max_read_bytes\":65536,\"instruction_control\":true,\"trace_version\":2}"); }
     else if (strcmp(cmd,"state_ui") == 0) {
         char body[256];snprintf(body,sizeof(body),"{\"ok\":true,\"mode\":%d,\"slot\":%d,\"result\":%d,\"count\":%u,\"selected_frame\":%u,\"snapshots\":%u}",
@@ -1643,19 +1572,7 @@ static void dispatch_line(char* line) {
 }
 
 int vb_debug_server_poll(void) {
-    if (s_listener == VB_BAD_SOCKET) return s_quit;
-
-    if (s_client == VB_BAD_SOCKET) {
-        sock_t c = accept(s_listener, NULL, NULL);
-        if (c != VB_BAD_SOCKET) {
-            set_nonblocking(c);
-            s_client = c;
-            vb_stream_reset();
-        }
-    }
-    if (s_client != VB_BAD_SOCKET && !vb_stream_poll(s_client, dispatch_line)) {
-        vb_close_socket(s_client); s_client = VB_BAD_SOCKET;
-        vb_stream_reset();
-    }
-    return s_quit && vb_stream.size == 0;
+    if(!s_server)return s_quit;
+    (void)diag_server_poll(s_server);
+    return s_quit && diag_server_pending_output(s_server)==0;
 }
