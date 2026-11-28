@@ -118,7 +118,7 @@ static void print_help(const char* argv0) {
         "  --rewind-frames N  Keep 2..512 local snapshots; F8 opens rewind.\n"
         "  --rewind-interval N  Frames per snapshot (1..60; CLI depth defaults 1).\n"
         "  --paused         Start paused (requires debug tools).\n"
-        "  --execution MODE hybrid (default), native, or interpreter.\n"
+        "  --execution MODE native (default).\n"
         "  --save PATH      Cartridge save (64KiB, saved on clean exit).\n"
         "  --no-save        Disable cartridge save loading/writing.\n"
         "  --launcher       Always open the game launcher.\n"

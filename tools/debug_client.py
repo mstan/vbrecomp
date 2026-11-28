@@ -7,7 +7,7 @@ import time
 
 
 class DebugClient:
-    def __init__(self, port=4390, host="127.0.0.1", timeout=15):
+    def __init__(self, port=4390, host="127.0.0.1", timeout=None):
         self.socket = socket.create_connection((host, port), timeout)
         if self.socket.getsockname()==self.socket.getpeername():
             self.socket.close()
@@ -40,17 +40,16 @@ class DebugClient:
             raise RuntimeError(f"{cmd}: {reply}")
         return reply
 
-    def run_frames(self, frames, timeout=30):
+    def run_frames(self, frames, timeout=None):
+        # timeout is retained for old callers, but is not a workload deadline.
         target = self.command("run_frames", frames=frames)["target"]
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
+        while True:
             frame = self.command("frame")["frame"]
             if frame >= target:
                 if frame != target:
                     raise RuntimeError(f"Frame control overshot {target}: {frame}")
                 return frame
             time.sleep(.005)
-        raise TimeoutError(f"Did not reach frame {target}")
 
 
 def main():
