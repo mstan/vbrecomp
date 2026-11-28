@@ -10,8 +10,8 @@ from unittest.mock import patch
 import zipfile
 
 from debug_client import DebugClient
-from release_common import archive_stage, copy_dll_closure, staging, validate_cache, verify_members
-from test_session import TestSession
+from release_common import archive_stage, copy_dll_closure, dependency_notices, staging, validate_cache, verify_members
+from test_session import SessionTimeout, TestSession
 
 SERVER = r'''
 import json,socket,sys,time
@@ -25,6 +25,22 @@ with socket.socket() as listener:
    for raw in stream:
     request=json.loads(raw);reply={'ok':True,'id':request['id']}
     client.sendall((json.dumps(reply)+'\n').encode())
+    if request['cmd']=='quit':break
+'''
+
+SLOW_SERVER = r'''
+import json,socket,sys,time
+port=int(sys.argv[1]);slow_ping=len(sys.argv)>2
+with socket.socket() as listener:
+ listener.bind(('127.0.0.1',port));listener.listen()
+ with listener.accept()[0] as client:
+  with client.makefile('rb') as stream:
+   for raw in stream:
+    request=json.loads(raw);print(request['cmd'],request['id'],flush=True)
+    reply=(json.dumps({'ok':True,'id':request['id'],'effect':request['cmd']})+'\n').encode()
+    if request['cmd']=='mutate' or slow_ping:
+     slow_ping=False;client.sendall(reply[:7]);time.sleep(.12);client.sendall(reply[7:])
+    else:client.sendall(reply)
     if request['cmd']=='quit':break
 '''
 
@@ -98,6 +114,64 @@ class SharedToolsTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 TestSession([sys.executable,'-c','raise SystemExit(7)'],root/'failed',port)
             self.assertEqual(json.loads((root/'failed/crash.json').read_text())['exit'],7)
+
+    def test_timeout_preserves_session_and_pending_nonidempotent_reply(self):
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d)
+            with socket.socket() as probe:
+                probe.bind(('127.0.0.1',0));port=probe.getsockname()[1]
+            session=TestSession([sys.executable,'-u','-c',SLOW_SERVER,str(port)],root,port)
+            try:
+                with self.assertRaises(SessionTimeout) as caught:
+                    with session:
+                        session.client.socket.settimeout(.01)
+                        session.client.command('mutate')
+                self.assertIs(caught.exception.session,session)
+                self.assertIsNone(session.process.poll())
+                self.assertEqual(bytes(session.client.buffer),b'{"ok": ')
+                with self.assertRaises(RuntimeError):session.client.command('mutate')
+                self.assertEqual(session.recover()['effect'],'mutate')
+                self.assertEqual(session.client.command('ping')['id'],3)
+                self.assertEqual((root/'stdout.log').read_text().splitlines().count('mutate 2'),1)
+                self.assertTrue(json.loads((root/'transport-timeout.json').read_text())['running'])
+                session.close()
+                self.assertEqual(session.process.returncode,0)
+            finally:
+                if session.process.poll() is None:session.stop()
+
+    def test_constructor_timeout_retains_recoverable_owned_process(self):
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d)
+            with socket.socket() as probe:
+                probe.bind(('127.0.0.1',0));port=probe.getsockname()[1]
+            session=None
+            try:
+                with patch('test_session.DebugClient',side_effect=lambda port:DebugClient(port,timeout=.01)):
+                    with self.assertRaises(SessionTimeout) as caught:
+                        TestSession([sys.executable,'-u','-c',SLOW_SERVER,str(port),'slow-ping'],root,port)
+                session=caught.exception.session
+                self.assertIsNone(session.process.poll())
+                self.assertEqual(session.recover()['id'],1)
+                self.assertEqual((root/'stdout.log').read_text().splitlines(),['ping 1'])
+                session.close()
+                self.assertEqual(session.process.returncode,0)
+            finally:
+                if session is not None and session.process.poll() is None:session.stop()
+
+    def test_dependency_inventory_keeps_nested_notices(self):
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d);dependency=root/'dep';dependency.mkdir();(dependency/'.git').mkdir()
+            (dependency/'LICENSE').write_text('aggregate notice')
+            (dependency/'licenses').mkdir();(dependency/'licenses/donor-MIT.txt').write_text('donor notice')
+            stage=root/'stage';stage.mkdir()
+            def git(tree,*command,**_):
+                if tree==root:return '160000 commit abc\tdep'
+                if command==('rev-parse','HEAD'):return 'abc'
+                if command==('ls-files','LICENSES','licenses'):return 'licenses/donor-MIT.txt'
+                return ''
+            with patch('release_common.git',side_effect=git):inventory=dependency_notices(root,stage)
+            self.assertEqual((stage/'licenses/dependencies/dep/licenses/donor-MIT.txt').read_text(),'donor notice')
+            self.assertIn('licenses/donor-MIT.txt',inventory[0]['notices'])
 
 
 if __name__=='__main__':unittest.main()
