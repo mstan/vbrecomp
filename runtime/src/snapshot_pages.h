@@ -14,6 +14,7 @@
 #include <stdexcept>
 #include <unordered_map>
 #include <vector>
+#include "retcomm_rbengine/snap_ring.h"
 
 namespace vb_history {
 using std::size_t;
@@ -168,46 +169,38 @@ public:
     Snapshot finish(){flush();return std::move(snapshot);}
 };
 class Ring {
-    struct Slot {uint32_t tick=0;std::unique_ptr<Snapshot> snapshot;};
-    std::vector<Slot> slots;
-    unsigned head=0,occupied=0;
+    struct Deleter {void operator()(RbeSnapRing* ring) const {rbe_snap_ring_destroy(ring);}};
+    std::unique_ptr<RbeSnapRing,Deleter> ring;
     static unsigned checked_depth(unsigned n) {
         if(!n || n>512)throw std::invalid_argument("Invalid history depth");
         return n;
     }
+    static void release(void* value) {delete static_cast<Snapshot*>(value);}
+    static int read(const void* value,size_t offset,void* destination,size_t count) {
+        return static_cast<const Snapshot*>(value)->read(offset,destination,count);
+    }
 public:
     PagePool pool;
-    explicit Ring(unsigned depth):slots(checked_depth(depth)){}
-    const Snapshot* peek(uint32_t tick) const {
-        for(const auto& s:slots)if(s.snapshot && s.tick==tick)return s.snapshot.get();
-        return nullptr;
+    explicit Ring(unsigned depth):ring(rbe_snap_ring_create(checked_depth(depth))) {
+        if(!ring)throw std::bad_alloc();
     }
-    unsigned count() const {return occupied;}
-    void clear(){for(auto& s:slots)s.snapshot.reset();head=occupied=0;}
+    const Snapshot* peek(uint32_t tick) const {
+        const auto* object=rbe_snap_ring_peek_object(ring.get(),tick);
+        return object?static_cast<const Snapshot*>(object->object):nullptr;
+    }
+    unsigned count() const {return rbe_snap_ring_count(ring.get());}
+    void clear(){rbe_snap_ring_clear(ring.get());}
     void store(uint32_t tick,Snapshot snapshot) {
         if(!snapshot.size)throw std::invalid_argument("Empty history snapshot");
-        // Allocate the replacement before evicting anything. Allocation
-        // failure leaves retained history intact.
+        // Build the complete page handle before publishing. No byte flattening;
+        // the shared provider owns only tick retention and handle destruction.
         auto owner=std::make_unique<Snapshot>(std::move(snapshot));
-        unsigned target=unsigned(slots.size());
-        for(unsigned i=0;i<slots.size();++i)
-            if(slots[i].snapshot && slots[i].tick==tick){target=i;break;}
-        if(target==slots.size())for(unsigned i=0;i<slots.size();++i) {
-            const unsigned at=(head+i)%unsigned(slots.size());
-            if(!slots[at].snapshot){target=at;break;}
-        }
-        if(target==slots.size()) {
-            uint32_t oldest=UINT32_MAX;
-            for(unsigned i=0;i<slots.size();++i)
-                if(slots[i].tick<=oldest){oldest=slots[i].tick;target=i;}
-        }
-        const bool replacing=bool(slots[target].snapshot) && slots[target].tick==tick;
-        if(!slots[target].snapshot)++occupied;
-        slots[target].snapshot=std::move(owner);slots[target].tick=tick;
-        if(!replacing)head=(target+1)%unsigned(slots.size());
+        RbeSnapObject object{owner.get(),owner->size,release,read};
+        if(!rbe_snap_ring_store_object(ring.get(),tick,&object))throw std::bad_alloc();
+        owner.release();
     }
-    void drop_after(uint32_t tick){for(auto& s:slots)if(s.snapshot && s.tick>tick){s.snapshot.reset();--occupied;}}
-    uint32_t oldest() const {if(!occupied)return 0;uint32_t n=UINT32_MAX;for(const auto& s:slots)if(s.snapshot)n=std::min(n,s.tick);return n;}
+    void drop_after(uint32_t tick){rbe_snap_ring_drop_after(ring.get(),tick);}
+    uint32_t oldest() const {return rbe_snap_ring_oldest_tick(ring.get());}
 };
 }
 #endif

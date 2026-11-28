@@ -16,13 +16,17 @@ import subprocess
 import struct
 import time
 from debug_client import DebugClient
+from test_session import TestSession
 from _imgio import load_png
 
 
-class Runner:
+class Runner(TestSession):
     def __init__(self, exe, rom, mode, port, directory, extra=(), window=False):
         self.directory=Path(directory).resolve();self.directory.mkdir(parents=True,exist_ok=True)
         self.exe=Path(exe).resolve();self.rom=Path(rom).resolve()
+        # Legacy qualification callers used this name before native-only
+        # dispatch became the default. It never enables interpreter fallback.
+        if mode=="hybrid":mode="native"
         if window and mode=="oracle":raise ValueError("Windowed runtime fixture requires a runtime backend")
         command=[str(self.exe),"--rom",str(self.rom),"--no-launcher" if window else "--headless","--paused","--port",str(port),*extra]
         if mode!="oracle":
@@ -34,50 +38,10 @@ class Runner:
             (self.directory/'settings.cfg').write_text('fullscreen 0\naudio 1\nvolume 0\nscale 1\n')
             environment.update(SDL_VIDEODRIVER='dummy',SDL_AUDIODRIVER='dummy',SDL_RENDER_DRIVER='software',
                 SDL_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT='0xffff/0xffff')
-        # Refuse occupied ports before starting; never attach to another run.
-        with socket.socket() as probe:
-            if os.name=="nt": probe.setsockopt(socket.SOL_SOCKET,socket.SO_EXCLUSIVEADDRUSE,1)
-            probe.bind(("127.0.0.1",port))
-        # Long routes must not block the guest on an undrained console pipe.
-        # Keep complete logs even when the process exits before the debugger.
-        self.stdout_log=(self.directory/'stdout.log').open('wb')
-        self.stderr_log=(self.directory/'stderr.log').open('wb')
-        try:
-            self.process=subprocess.Popen(command,cwd=self.directory,stdout=self.stdout_log,stderr=self.stderr_log,
-                env=environment,
-                creationflags=subprocess.CREATE_NO_WINDOW if os.name=="nt" else 0)
-        except BaseException:
-            self.stdout_log.close();self.stderr_log.close();raise
-        self.client=None
-        deadline=time.monotonic()+15
-        try:
-            while time.monotonic()<deadline:
-                if self.process.poll() is not None: raise RuntimeError("runner exited during startup")
-                try: self.client=DebugClient(port,timeout=15);break
-                except OSError: time.sleep(.02)
-            if self.client is None: raise TimeoutError("runner startup")
-            self.client.command("ping")
-            if self.client.command("frame")["frame"] != 0: raise RuntimeError("--paused did not stop at reset")
-        except BaseException:
-            self.close();raise
-
-    def __enter__(self): return self
-    def __exit__(self,*args):
-        self.close()
-        if args[0] is None and self.process.returncode:
-            raise RuntimeError(f"runner exit {self.process.returncode}; see {self.directory/'crash.json'}")
-    def close(self):
-        if self.client:
-            try: self.client.command("quit")
-            except Exception: pass
-            self.client.close();self.client=None
-        try: self.process.wait(timeout=4)
-        except subprocess.TimeoutExpired:
-            self.process.terminate();self.process.wait(timeout=4)
-        self.stdout_log.close();self.stderr_log.close()
-        if self.process.returncode:
-            err=(self.directory/'stderr.log').read_bytes()
-            (self.directory/"crash.json").write_text(json.dumps({"exit":self.process.returncode,"report":err.decode(errors="replace")[-4000:],"stdout":"stdout.log","stderr":"stderr.log"},indent=2))
+        super().__init__(command, self.directory, port, environment)
+        if self.client.command("frame")["frame"] != 0:
+            self.close()
+            raise RuntimeError("--paused did not stop at reset")
 
     def memory(self, base, count=65536):
         data=bytearray()
