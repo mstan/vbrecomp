@@ -112,8 +112,19 @@ def dependency_notices(framework, stage, executable='git'):
             destination.mkdir(parents=True, exist_ok=True)
             for notice in notices:
                 shutil.copy2(notice, destination / notice.name)
+            notice_hashes = {p.name: sha(p) for p in notices}
+            # Aggregate grants retain donor/third-party notices in these
+            # tracked directories; a top-level LICENSE alone is insufficient.
+            for relative in git(tree, 'ls-files', 'LICENSES', 'licenses', executable=executable).splitlines():
+                notice = tree / relative
+                if not notice.is_file() or notice.is_symlink():
+                    raise SystemExit(f'Invalid dependency notice: {notice}')
+                target = destination / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(notice, target)
+                notice_hashes[relative] = sha(notice)
             inventory.append({'path': name, 'commit': commit,
-                              'notices': {p.name: sha(p) for p in notices}})
+                              'notices': notice_hashes})
             visit(tree, name + '/')
     visit(framework)
     (stage / 'dependency-sources.json').write_text(json.dumps(inventory, indent=2) + '\n')

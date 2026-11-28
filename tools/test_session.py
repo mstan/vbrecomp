@@ -14,6 +14,17 @@ import time
 from debug_client import DebugClient
 
 
+class SessionTimeout(TimeoutError):
+    """A reported transport timeout that retains the live owned session.
+
+    Call session.recover() to receive its pending reply, or session.stop() for
+    an explicit cancellation. Neither a command nor its effects are replayed.
+    """
+    def __init__(self, session, error):
+        super().__init__(f'Transport timed out; process remains owned and running: {session.directory}: {error}')
+        self.session = session
+
+
 class TestSession:
     def __init__(self, command, directory, port, environment=None, hidden=True, wait=True):
         self.directory = Path(directory).resolve()
@@ -40,6 +51,11 @@ class TestSession:
                 env=environment, stdout=self.stdout_log, stderr=self.stderr_log, **options)
             if wait and port is not None:
                 self.attach()
+        except TimeoutError as error:
+            if self.process is not None and self.process.poll() is None:
+                raise self._timeout(error) from error
+            self.close()
+            raise
         except BaseException:
             self.close()
             raise
@@ -56,6 +72,18 @@ class TestSession:
         self.client.command('ping')
         return self.client
 
+    def _timeout(self, error):
+        (self.directory / 'transport-timeout.json').write_text(json.dumps({
+            'pid': self.process.pid, 'running': self.process.poll() is None,
+            'pending_request': self.client.pending_request if self.client else None,
+            'error': str(error), 'recovery': 'recover the pending response or explicitly stop this owned session'}, indent=2))
+        return SessionTimeout(self, error)
+
+    def recover(self):
+        if self.client is None:
+            raise RuntimeError('No pending debugger transport; the owned process is unchanged')
+        return self.client.resume()
+
     def detach(self):
         """Explicitly transfer a prepared interactive process to its caller."""
         if self.client is not None:
@@ -70,6 +98,8 @@ class TestSession:
         return self
 
     def __exit__(self, kind, value, traceback):
+        if kind is not None and issubclass(kind, TimeoutError) and self.process.poll() is None:
+            raise self._timeout(value) from value
         self.close()
         if kind is None and self.process.returncode:
             raise RuntimeError(f'Test process exit {self.process.returncode}; see {self.directory / "crash.json"}')
@@ -77,16 +107,34 @@ class TestSession:
     def close(self):
         if self.client is not None:
             try:
+                # Normal completed-workload cleanup is graceful and has no
+                # transport timer. Drain a pending response, never resend it.
+                self.client.socket.settimeout(None)
+                if self.client.pending_request is not None:
+                    self.client.resume()
                 self.client.command('quit')
+            except TimeoutError as error:
+                raise self._timeout(error) from error
             except (OSError, RuntimeError):
                 # Explicit cleanup with an unusable transport, not a timer.
                 if self.process.poll() is None:
                     self.process.terminate()
-            finally:
-                self.client.close()
-                self.client = None
+            self.client.close()
+            self.client = None
         elif self.process is not None and self.process.poll() is None:
             self.process.terminate()  # explicit cancellation during startup
+        self._finish()
+
+    def stop(self):
+        """Explicit cancellation, including a caller choosing to stop a wait."""
+        if self.process is not None and self.process.poll() is None:
+            self.process.terminate()
+        if self.client is not None:
+            self.client.close()
+            self.client = None
+        self._finish()
+
+    def _finish(self):
         if self.process is not None:
             self.process.wait()
         self.stdout_log.close()

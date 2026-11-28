@@ -12,11 +12,13 @@ class DebugClient:
         if self.socket.getsockname()==self.socket.getpeername():
             self.socket.close()
             raise OSError("loopback self-connection before debugger listener started")
-        self.file = self.socket.makefile("rb")
+        # Keep partial replies ourselves: buffered socket files become unusable
+        # after a read timeout and can lose the already received response prefix.
+        self.buffer = bytearray()
+        self.pending_request = None
         self.seq = 0
 
     def close(self):
-        self.file.close()
         self.socket.close()
 
     def __enter__(self):
@@ -26,18 +28,44 @@ class DebugClient:
         self.close()
 
     def command(self, cmd, **args):
+        if self.pending_request is not None:
+            raise RuntimeError("A debugger response is pending; recover it before sending another command")
         self.seq += 1
         request = {"cmd": cmd, "id": self.seq, **args}
+        self.pending_request = {"cmd": cmd, "id": self.seq}
         # The runtime path boundary consumes UTF-8, not literal \uXXXX text.
         self.socket.sendall((json.dumps(request, ensure_ascii=False) + "\n").encode())
-        raw = self.file.readline(64 * 1024 * 1024)
-        if not raw.endswith(b"\n"):
-            raise RuntimeError("Debugger closed or returned an incomplete response")
+        return self._receive()
+
+    def resume(self):
+        """Wait for the outstanding reply without ever resending its command."""
+        if self.pending_request is None:
+            raise RuntimeError("No debugger response is pending")
+        self.socket.settimeout(None)
+        return self._receive()
+
+    def _receive(self):
+        limit = 64 * 1024 * 1024
+        end = self.buffer.find(b"\n")
+        while end < 0:
+            if len(self.buffer) >= limit:
+                raise RuntimeError("Debugger response exceeds the framing limit")
+            chunk = self.socket.recv(min(65536, limit - len(self.buffer)))
+            if not chunk:
+                raise RuntimeError("Debugger closed or returned an incomplete response")
+            previous = len(self.buffer)
+            self.buffer.extend(chunk)
+            end = self.buffer.find(b"\n", previous)
+        end += 1
+        raw = bytes(self.buffer[:end])
+        del self.buffer[:end]
+        pending = self.pending_request
+        self.pending_request = None  # the complete framed reply was consumed
         reply = json.loads(raw)
-        if "id" in reply and reply["id"] != self.seq:
-            raise RuntimeError(f"Response ID mismatch: {reply.get('id')} != {self.seq}")
+        if "id" in reply and reply["id"] != pending['id']:
+            raise RuntimeError(f"Response ID mismatch: {reply.get('id')} != {pending['id']}")
         if not reply.get("ok"):
-            raise RuntimeError(f"{cmd}: {reply}")
+            raise RuntimeError(f"{pending['cmd']}: {reply}")
         return reply
 
     def run_frames(self, frames, timeout=None):
